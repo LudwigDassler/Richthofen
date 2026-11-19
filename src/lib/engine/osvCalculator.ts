@@ -1,399 +1,418 @@
+import { CHART_OF_ACCOUNTS, getAccountInfo } from '@/data/chartOfAccounts';
 import {
   AccountType,
-  BusinessOperation,
-  OpeningBalanceEntry,
-  OsvAccountCardMovement,
+  BalanceAnchorOverride,
+  BalanceInterpretationMode,
+  Database1CSnapshot,
+  OsvAccountRow,
   OsvReport,
-  OsvRow,
+  QueuedOperation,
 } from '@/types/accounting';
-import { ACCOUNT_MAP, getAccountInfo } from '@/data/chartOfAccounts';
-import { formatMoneyRu, parseDateToSortKey, roundMoney } from './smartLinker';
 
-const DEFAULT_SUBACCOUNT_FOR_GROUP: Record<string, string> = {
-  '01': '01.01',
-  '02': '02.01',
-  '08': '08.04',
-  '10': '10.01',
-  '19': '19.03',
-  '20': '20.01',
-  '41': '41.01',
-  '44': '44.01',
-  '50': '50.01',
-  '60': '60.01',
-  '62': '62.01',
-  '68': '68.10',
-  '69': '69.09',
-  '71': '71.01',
-  '75': '75.01',
-  '76': '76.09',
-  '80': '80.09',
-  '84': '84.01',
-  '90': '90.09',
-  '91': '91.09',
-  '99': '99.01.1',
-};
-
-function resolveLeafAccountCode(rawCode: string): string {
-  const trimmed = (rawCode || '').trim();
-  if (!trimmed) return '000';
-  if (ACCOUNT_MAP[trimmed]?.isGroup && DEFAULT_SUBACCOUNT_FOR_GROUP[trimmed]) {
-    return DEFAULT_SUBACCOUNT_FOR_GROUP[trimmed];
-  }
-  return trimmed;
+function round2(n: number): number {
+  const r = Math.round((n + Number.EPSILON) * 100) / 100;
+  return Object.is(r, -0) ? 0 : r;
 }
 
-function buildRedBalanceHint(
-  accountCode: string,
-  accountType: AccountType,
-  amount: number
-): string {
-  const absStr = formatMoneyRu(Math.abs(amount));
-  if (accountCode === '50.01' || accountCode.startsWith('50')) {
-    return `Отрицательный остаток наличных в кассе (−${absStr})! Счет 50.01 активный — проверьте проведение ПКО «Получение наличных в банке» (Дт 50.01 Кт 51) и время документов.`;
+function splitNetToSides(
+  net: number,
+  type: AccountType
+): { debit: number; credit: number; isRed: boolean } {
+  const cleanNet = Math.abs(net) < 0.005 ? 0 : round2(net);
+
+  if (type === 'active') {
+    return {
+      debit: cleanNet,
+      credit: 0,
+      isRed: cleanNet < -0.005,
+    };
   }
-  if (accountCode === '51') {
-    return `Отрицательное сальдо на расчетном счете 51 (−${absStr})! Проверьте начальный остаток по счету 51 и поступления от покупателей.`;
+
+  if (type === 'passive') {
+    const creditVal = cleanNet === 0 ? 0 : round2(-cleanNet);
+    return {
+      debit: 0,
+      credit: creditVal,
+      isRed: creditVal < -0.005,
+    };
   }
-  if (accountCode.startsWith('10') || accountCode.startsWith('41')) {
-    return `Отрицательный складской остаток ТМЦ (−${absStr})! Списано больше, чем оприходовано — проверьте документ поступления и хронологию проведения.`;
+
+  // active-passive
+  if (cleanNet > 0) {
+    return { debit: cleanNet, credit: 0, isRed: false };
   }
-  if (accountCode === '60.02' || accountCode === '62.01') {
-    return `Краснота на активном субсчете расчетов ${accountCode} (−${absStr})! Проверьте корректность выбора субсчета (60.01/60.02 или 62.01/62.02) и зачет авансов.`;
+  if (cleanNet < 0) {
+    return { debit: 0, credit: round2(-cleanNet), isRed: false };
   }
-  if (accountCode === '60.01' || accountCode === '62.02') {
-    return `Краснота на пассивном субсчете расчетов ${accountCode} (−${absStr})! Вероятно, предоплата отражена на счете расчетов вместо авансового субсчета.`;
-  }
-  if (accountCode === '000') {
-    return `Вспомогательный счет 000 не закрыт (остаток ${absStr})! Сумма дебетовых и кредитовых начальных остатков не совпадает.`;
-  }
-  if (accountType === 'active') {
-    return `Отрицательное дебетовое сальдо на активном счете ${accountCode} (−${absStr}) — «краснота» в 1С 8.3.`;
-  }
-  return `Отрицательное кредитовое сальдо на пассивном счете ${accountCode} (−${absStr}) — «краснота» в 1С 8.3.`;
+  return { debit: 0, credit: 0, isRed: false };
 }
 
-function compareAccountCodes(a: string, b: string): number {
-  if (a === b) return 0;
-  // Auxiliary account 000 always goes at the very end in 1C 8.3 OSV
-  if (a === '000') return 1;
-  if (b === '000') return -1;
-
-  const segA = a.split('.');
-  const segB = b.split('.');
-  const maxLen = Math.max(segA.length, segB.length);
-
-  for (let i = 0; i < maxLen; i++) {
-    const partA = segA[i];
-    const partB = segB[i];
-    if (partA === undefined) return -1; // Parent group ("60") precedes subaccount ("60.01")
-    if (partB === undefined) return 1;
-
-    const numA = Number(partA);
-    const numB = Number(partB);
-    if (!Number.isNaN(numA) && !Number.isNaN(numB)) {
-      if (numA !== numB) return numA - numB;
-    } else {
-      const cmp = partA.localeCompare(partB, 'ru');
-      if (cmp !== 0) return cmp;
-    }
-  }
-  return 0;
-}
-
-interface LeafAccumulator {
-  accountCode: string;
-  startDebit: number;
-  startCredit: number;
-  turnoverDebit: number;
-  turnoverCredit: number;
-  movements: OsvAccountCardMovement[];
-}
-
-/**
- * Calculates an authentic 1C:Бухгалтерия 8.3 (ред. 3.0) Trial Balance (Оборотно-сальдовая ведомость)
- * with leaf subaccounts, synthetic parent group rows, kopeck-exact double-entry math,
- * 1C red-balance («краснота») detection, and «Карточка счета» drill-down movements.
- */
-export function calculateOsv(
-  openingBalances: OpeningBalanceEntry[],
-  operations: BusinessOperation[],
-  mode: 'completed_only' | 'all_operations'
-): OsvReport {
-  const leafMap = new Map<string, LeafAccumulator>();
-
-  const ensureLeaf = (rawCode: string): LeafAccumulator => {
-    const code = resolveLeafAccountCode(rawCode);
-    let acc = leafMap.get(code);
-    if (!acc) {
-      acc = {
-        accountCode: code,
-        startDebit: 0,
-        startCredit: 0,
-        turnoverDebit: 0,
-        turnoverCredit: 0,
-        movements: [],
-      };
-      leafMap.set(code, acc);
-    }
-    return acc;
-  };
-
-  // 1. Load Opening Balances
-  for (const entry of openingBalances) {
-    const debit = roundMoney(entry.debit || 0);
-    const credit = roundMoney(entry.credit || 0);
-    if (debit === 0 && credit === 0) continue;
-
-    const leaf = ensureLeaf(entry.accountCode);
-    leaf.startDebit = roundMoney(leaf.startDebit + debit);
-    leaf.startCredit = roundMoney(leaf.startCredit + credit);
+export function resolveEffectiveBalanceMode(
+  db1C: Database1CSnapshot | null,
+  override: BalanceAnchorOverride
+): { mode: BalanceInterpretationMode; description: string } {
+  if (!db1C) {
+    return {
+      mode: 'postings_only',
+      description: 'База 1С не подключена — расчёт только по загруженным операциям (начальное сальдо = 0)',
+    };
   }
 
-  // 2. Filter & chronologically sort operations
-  const filteredOps = operations
-    .map((op, index) => ({ op, index }))
-    .filter(({ op }) => {
-      if (op.status === 'needs_data') return false;
-      if (mode === 'completed_only') {
-        return op.status === 'done';
-      }
-      // 'all_operations': include all operations with resolvedAmount > 0 or non-zero postings
-      return (
-        op.resolvedAmount > 0 || op.postings.some((p) => Math.abs(p.amount) >= 0.005)
-      );
-    })
-    .sort((a, b) => {
-      const keyA = parseDateToSortKey(a.op.date);
-      const keyB = parseDateToSortKey(b.op.date);
-      if (keyA !== keyB) return keyA - keyB;
-      // Regular operations precede month-end closing operations on the last day of the month
-      const closingA = a.op.isMonthEndClosing ? 1 : 0;
-      const closingB = b.op.isMonthEndClosing ? 1 : 0;
-      if (closingA !== closingB) return closingA - closingB;
-      return a.index - b.index;
-    });
-
-  // 3. Accumulate turnovers & movements
-  for (const { op } of filteredOps) {
-    for (const posting of op.postings) {
-      const amt = roundMoney(posting.amount || 0);
-      if (Math.abs(amt) < 0.005) continue;
-
-      const debitCode = resolveLeafAccountCode(posting.debitAccount);
-      const creditCode = resolveLeafAccountCode(posting.creditAccount);
-
-      const debitLeaf = ensureLeaf(debitCode);
-      debitLeaf.turnoverDebit = roundMoney(debitLeaf.turnoverDebit + amt);
-      debitLeaf.movements.push({
-        operationId: op.id,
-        operationNumber: op.number,
-        date: op.date,
-        description: posting.comment || op.rawDescription,
-        correspondentAccount: creditCode,
-        subconto: (posting.debitSubconto || []).filter(Boolean).join(' / '),
-        debit: amt,
-        credit: 0,
-      });
-
-      const creditLeaf = ensureLeaf(creditCode);
-      creditLeaf.turnoverCredit = roundMoney(creditLeaf.turnoverCredit + amt);
-      creditLeaf.movements.push({
-        operationId: op.id,
-        operationNumber: op.number,
-        date: op.date,
-        description: posting.comment || op.rawDescription,
-        correspondentAccount: debitCode,
-        subconto: (posting.creditSubconto || []).filter(Boolean).join(' / '),
-        debit: 0,
-        credit: amt,
-      });
-    }
+  if (override === 'treat_raw_as_end' && db1C.rawBalances.length > 0) {
+    return {
+      mode: 'end_balances_reconstructed_start',
+      description:
+        'Ручной режим (Остатки = Конец периода): СальдоНач = СальдоКон − ОборотыДт + ОборотыКт',
+    };
   }
 
-  // 4. Finalize leaf OsvRows using 1C 8.3 active / passive / active-passive rules
-  const leafRows: OsvRow[] = [];
-  for (const acc of Array.from(leafMap.values())) {
-    const info = getAccountInfo(acc.accountCode);
-    const parentCode =
-      info.parentCode ||
-      (acc.accountCode.includes('.') ? acc.accountCode.split('.')[0] : undefined);
-
-    // Collapse net opening balance per subaccount if user entered multiple opening rows on same subaccount
-    let startDebit = acc.startDebit;
-    let startCredit = acc.startCredit;
-    if (startDebit > 0 && startCredit > 0) {
-      const startNet = roundMoney(startDebit - startCredit);
-      if (info.type === 'active') {
-        startDebit = startNet;
-        startCredit = 0;
-      } else if (info.type === 'passive') {
-        startDebit = 0;
-        startCredit = roundMoney(-startNet);
-      } else if (startNet >= 0) {
-        startDebit = startNet;
-        startCredit = 0;
-      } else {
-        startDebit = 0;
-        startCredit = roundMoney(Math.abs(startNet));
-      }
-    }
-
-    let endDebit = 0;
-    let endCredit = 0;
-    let hasRedBalance = false;
-    let redBalanceHint: string | undefined = undefined;
-
-    if (info.type === 'active') {
-      const net = roundMoney(
-        startDebit - startCredit + acc.turnoverDebit - acc.turnoverCredit
-      );
-      endDebit = net;
-      endCredit = 0;
-      if (net < -0.004) {
-        hasRedBalance = true;
-        redBalanceHint = buildRedBalanceHint(acc.accountCode, info.type, net);
-      }
-    } else if (info.type === 'passive') {
-      const net = roundMoney(
-        startCredit - startDebit + acc.turnoverCredit - acc.turnoverDebit
-      );
-      endDebit = 0;
-      endCredit = net;
-      if (net < -0.004) {
-        hasRedBalance = true;
-        redBalanceHint = buildRedBalanceHint(acc.accountCode, info.type, net);
-      }
-    } else {
-      // active-passive
-      const net = roundMoney(
-        startDebit - startCredit + acc.turnoverDebit - acc.turnoverCredit
-      );
-      if (net >= 0) {
-        endDebit = net;
-        endCredit = 0;
-      } else {
-        endDebit = 0;
-        endCredit = roundMoney(Math.abs(net));
-      }
-      if (acc.accountCode === '000' && Math.abs(net) >= 0.01) {
-        hasRedBalance = true;
-        redBalanceHint = buildRedBalanceHint('000', 'active-passive', net);
-      }
-    }
-
-    const isAllZero =
-      Math.abs(startDebit) < 0.005 &&
-      Math.abs(startCredit) < 0.005 &&
-      Math.abs(acc.turnoverDebit) < 0.005 &&
-      Math.abs(acc.turnoverCredit) < 0.005 &&
-      Math.abs(endDebit) < 0.005 &&
-      Math.abs(endCredit) < 0.005 &&
-      acc.movements.length === 0;
-
-    if (!isAllZero) {
-      leafRows.push({
-        accountCode: acc.accountCode,
-        accountName: info.name,
-        accountType: info.type,
-        isGroup: false,
-        parentCode,
-        startDebit,
-        startCredit,
-        turnoverDebit: acc.turnoverDebit,
-        turnoverCredit: acc.turnoverCredit,
-        endDebit,
-        endCredit,
-        hasRedBalance,
-        redBalanceHint,
-        movements: acc.movements,
-      });
-    }
+  if (override === 'treat_raw_as_start' && db1C.rawBalances.length > 0) {
+    return {
+      mode: 'start_balances_forward_end',
+      description:
+        'Ручной режим (Остатки = Начало периода): СальдоКон = СальдоНач + ОборотыДт − ОборотыКт',
+    };
   }
-
-  // 5. Build Synthetic Parent Group Rows (01, 02, 10, 19, 20, 41, 50, 60, 62, 68, 69, 76, 80, 84, 90, 91, 99, etc.)
-  const childrenByParent = new Map<string, OsvRow[]>();
-  for (const row of leafRows) {
-    if (row.parentCode) {
-      const list = childrenByParent.get(row.parentCode) || [];
-      list.push(row);
-      childrenByParent.set(row.parentCode, list);
-    }
-  }
-
-  const groupRows: OsvRow[] = [];
-  for (const [parentCode, children] of Array.from(childrenByParent.entries())) {
-    const parentInfo = getAccountInfo(parentCode);
-    const startDebit = roundMoney(children.reduce((s, c) => s + c.startDebit, 0));
-    const startCredit = roundMoney(children.reduce((s, c) => s + c.startCredit, 0));
-    const turnoverDebit = roundMoney(children.reduce((s, c) => s + c.turnoverDebit, 0));
-    const turnoverCredit = roundMoney(children.reduce((s, c) => s + c.turnoverCredit, 0));
-
-    let endDebit = 0;
-    let endCredit = 0;
-
-    // In 1C 8.3, synthetic accounts 90, 91, and 99 have collapsed ending balance across subaccounts
-    // (so synthetic 90 and 91 equal 0,00 after month-end closing!), while settlement/asset accounts
-    // (60, 62, 68, 69, 76, etc.) preserve expanded subaccount balances («развернутое сальдо»).
-    if (parentCode === '90' || parentCode === '91' || parentCode === '99') {
-      const collapsedNet = roundMoney(
-        children.reduce((s, c) => s + (c.endDebit - c.endCredit), 0)
-      );
-      if (collapsedNet >= 0) {
-        endDebit = collapsedNet;
-        endCredit = 0;
-      } else {
-        endDebit = 0;
-        endCredit = roundMoney(Math.abs(collapsedNet));
-      }
-    } else {
-      endDebit = roundMoney(children.reduce((s, c) => s + c.endDebit, 0));
-      endCredit = roundMoney(children.reduce((s, c) => s + c.endCredit, 0));
-    }
-
-    const childWithRed = children.find((c) => c.hasRedBalance);
-    groupRows.push({
-      accountCode: parentCode,
-      accountName: parentInfo.name,
-      accountType: parentInfo.type,
-      isGroup: true,
-      parentCode: undefined,
-      startDebit,
-      startCredit,
-      turnoverDebit,
-      turnoverCredit,
-      endDebit,
-      endCredit,
-      hasRedBalance: Boolean(childWithRed),
-      redBalanceHint: childWithRed?.redBalanceHint,
-      movements: [],
-    });
-  }
-
-  // 6. Combine & sort rows hierarchically
-  const allRows = [...leafRows, ...groupRows].sort((a, b) =>
-    compareAccountCodes(a.accountCode, b.accountCode)
-  );
-
-  // 7. Compute report totals strictly from leaf rows (!isGroup) so parent rows are never double-counted
-  const totalStartDebit = roundMoney(leafRows.reduce((s, r) => s + r.startDebit, 0));
-  const totalStartCredit = roundMoney(leafRows.reduce((s, r) => s + r.startCredit, 0));
-  const totalTurnoverDebit = roundMoney(leafRows.reduce((s, r) => s + r.turnoverDebit, 0));
-  const totalTurnoverCredit = roundMoney(leafRows.reduce((s, r) => s + r.turnoverCredit, 0));
-  const totalEndDebit = roundMoney(leafRows.reduce((s, r) => s + r.endDebit, 0));
-  const totalEndCredit = roundMoney(leafRows.reduce((s, r) => s + r.endCredit, 0));
-
-  const isStartBalanced = Math.abs(roundMoney(totalStartDebit - totalStartCredit)) < 0.01;
-  const isEndBalanced = Math.abs(roundMoney(totalEndDebit - totalEndCredit)) < 0.01;
 
   return {
-    rows: allRows,
-    totalStartDebit,
-    totalStartCredit,
-    totalTurnoverDebit,
-    totalTurnoverCredit,
-    totalEndDebit,
-    totalEndCredit,
-    isStartBalanced,
-    isEndBalanced,
+    mode: db1C.detectedBalanceMode,
+    description: db1C.balanceModeReason,
+  };
+}
+
+interface MovementRecord {
+  date: string;
+  debit: string;
+  credit: string;
+  amount: number;
+  source: 'db' | 'queued';
+}
+
+export function calculateOsvReport(params: {
+  db1C: Database1CSnapshot | null;
+  operations: QueuedOperation[];
+  dateFrom?: string;
+  dateTo?: string;
+  balanceAnchorOverride?: BalanceAnchorOverride;
+  includeQueuedOperations?: boolean;
+}): OsvReport {
+  const {
+    db1C,
+    operations,
+    dateFrom = '',
+    dateTo = '',
+    balanceAnchorOverride = 'auto',
+    includeQueuedOperations = true,
+  } = params;
+
+  const { mode: effectiveMode, description: balanceModeDescription } =
+    resolveEffectiveBalanceMode(db1C, balanceAnchorOverride);
+
+  // Collect all movements from 1C DB
+  const dbMovements: MovementRecord[] = (db1C?.postings ?? [])
+    .filter((p) => Math.abs(p.amount) >= 0.005)
+    .map((p) => ({
+      date: p.date || '',
+      debit: p.debit,
+      credit: p.credit,
+      amount: round2(p.amount),
+      source: 'db' as const,
+    }));
+
+  // Collect movements from user-queued operations (excluding duplicates disabled by user)
+  const queuedMovements: MovementRecord[] = includeQueuedOperations
+    ? operations
+        .filter((op) => op.includeInProcessing && !op.isDuplicateIn1C)
+        .flatMap((op) =>
+          op.entries
+            .filter((e) => Math.abs(e.amount) >= 0.005 && (e.debit || e.credit))
+            .map((e) => ({
+              date: op.date || '',
+              debit: e.debit,
+              credit: e.credit,
+              amount: round2(e.amount),
+              source: 'queued' as const,
+            }))
+        )
+    : [];
+
+  // Step 1: Compute baseStartNet per leaf account (before ANY dbMovements)
+  // Note: debit - credit = net
+  const baseStartNetMap = new Map<string, number>();
+  const explicitNoPostingsTurnoverMap = new Map<string, { dt: number; kt: number }>();
+
+  const addNet = (map: Map<string, number>, acc: string, delta: number) => {
+    if (!acc || acc === '000') return;
+    map.set(acc, round2((map.get(acc) ?? 0) + delta));
+  };
+
+  if (db1C && db1C.rawBalances.length > 0) {
+    if (effectiveMode === 'explicit_start_end') {
+      for (const b of db1C.rawBalances) {
+        addNet(baseStartNetMap, b.account, b.startDebit - b.startCredit);
+        if (dbMovements.length === 0 && (b.turnoverDebit !== 0 || b.turnoverCredit !== 0)) {
+          const prev = explicitNoPostingsTurnoverMap.get(b.account) ?? { dt: 0, kt: 0 };
+          explicitNoPostingsTurnoverMap.set(b.account, {
+            dt: round2(prev.dt + b.turnoverDebit),
+            kt: round2(prev.kt + b.turnoverCredit),
+          });
+        }
+      }
+    } else if (effectiveMode === 'end_balances_reconstructed_start') {
+      // rawBalances represent ending balances AFTER all dbMovements
+      for (const b of db1C.rawBalances) {
+        const endNet = b.hasExplicitEnd
+          ? b.endDebit - b.endCredit
+          : b.rawDebit - b.rawCredit;
+        addNet(baseStartNetMap, b.account, endNet);
+      }
+      // Subtract all dbMovements to reconstruct exact opening balance at start of DB period:
+      // NetStart = NetEnd - DbTurnoverDebit + DbTurnoverCredit
+      for (const m of dbMovements) {
+        if (m.debit && m.debit !== '000') {
+          addNet(baseStartNetMap, m.debit, -m.amount);
+        }
+        if (m.credit && m.credit !== '000') {
+          addNet(baseStartNetMap, m.credit, +m.amount);
+        }
+      }
+    } else {
+      // 'start_balances_forward_end' or 'balances_only'
+      for (const b of db1C.rawBalances) {
+        const startNet = b.hasExplicitStart
+          ? b.startDebit - b.startCredit
+          : b.rawDebit - b.rawCredit;
+        addNet(baseStartNetMap, b.account, startNet);
+        if (dbMovements.length === 0 && (b.turnoverDebit !== 0 || b.turnoverCredit !== 0)) {
+          const prev = explicitNoPostingsTurnoverMap.get(b.account) ?? { dt: 0, kt: 0 };
+          explicitNoPostingsTurnoverMap.set(b.account, {
+            dt: round2(prev.dt + b.turnoverDebit),
+            kt: round2(prev.kt + b.turnoverCredit),
+          });
+        }
+      }
+    }
+  }
+
+  // Step 2: Partition movements relative to [dateFrom, dateTo]
+  // - date < dateFrom -> rolls into periodStartNet
+  // - dateFrom <= date <= dateTo -> period turnovers
+  // - date > dateTo -> excluded from selected period view
+  const periodStartNetMap = new Map<string, number>(baseStartNetMap);
+  const dbTurnMap = new Map<string, { dt: number; kt: number }>();
+  const queuedTurnMap = new Map<string, { dt: number; kt: number }>();
+
+  for (const [acc, t] of explicitNoPostingsTurnoverMap.entries()) {
+    dbTurnMap.set(acc, { dt: t.dt, kt: t.kt });
+  }
+
+  const allMovements = [...dbMovements, ...queuedMovements];
+  for (const m of allMovements) {
+    const d = m.date;
+    const isBeforeStart = Boolean(dateFrom && d && d < dateFrom);
+    const isAfterEnd = Boolean(dateTo && d && d > dateTo);
+
+    if (isBeforeStart) {
+      if (m.debit && m.debit !== '000') addNet(periodStartNetMap, m.debit, +m.amount);
+      if (m.credit && m.credit !== '000') addNet(periodStartNetMap, m.credit, -m.amount);
+      continue;
+    }
+
+    if (isAfterEnd) {
+      continue;
+    }
+
+    const targetMap = m.source === 'db' ? dbTurnMap : queuedTurnMap;
+    if (m.debit && m.debit !== '000') {
+      const cur = targetMap.get(m.debit) ?? { dt: 0, kt: 0 };
+      cur.dt = round2(cur.dt + m.amount);
+      targetMap.set(m.debit, cur);
+    }
+    if (m.credit && m.credit !== '000') {
+      const cur = targetMap.get(m.credit) ?? { dt: 0, kt: 0 };
+      cur.kt = round2(cur.kt + m.amount);
+      targetMap.set(m.credit, cur);
+    }
+  }
+
+  // Collect all active leaf account codes
+  const leafAccountSet = new Set<string>([
+    ...periodStartNetMap.keys(),
+    ...dbTurnMap.keys(),
+    ...queuedTurnMap.keys(),
+  ]);
+  leafAccountSet.delete('000');
+
+  // Ensure if both parent '60' and child '60.01' somehow exist in postings, keep '60' as leaf ONLY if it has direct values;
+  // To avoid ambiguity if '60' has direct postings AND '60.01' exists, keep both as leaf accounts if '60' has direct non-zero data,
+  // otherwise synthetic group rows are generated purely from child accounts.
+  const leafRows: OsvAccountRow[] = [];
+
+  const sortedLeafCodes = Array.from(leafAccountSet).sort((a, b) =>
+    a.localeCompare(b, 'ru', { numeric: true })
+  );
+
+  for (const code of sortedLeafCodes) {
+    const info = getAccountInfo(code);
+    // Treat leaf account with its own type; if charting marks '60' as group because of '60.01',
+    // check whether '60' actually had direct postings/balances:
+    const startNet = periodStartNetMap.get(code) ?? 0;
+    const dbT = dbTurnMap.get(code) ?? { dt: 0, kt: 0 };
+    const qT = queuedTurnMap.get(code) ?? { dt: 0, kt: 0 };
+    const turnDt = round2(dbT.dt + qT.dt);
+    const turnKt = round2(dbT.kt + qT.kt);
+    const endNet = round2(startNet + turnDt - turnKt);
+
+    if (
+      Math.abs(startNet) < 0.005 &&
+      Math.abs(turnDt) < 0.005 &&
+      Math.abs(turnKt) < 0.005 &&
+      Math.abs(endNet) < 0.005
+    ) {
+      continue;
+    }
+
+    const startSides = splitNetToSides(startNet, info.type);
+    const endSides = splitNetToSides(endNet, info.type);
+
+    leafRows.push({
+      code,
+      name: info.name,
+      type: info.type,
+      parentCode: info.parentCode ?? (code.includes('.') ? code.split('.')[0] : undefined),
+      isGroup: false,
+      startDebit: startSides.debit,
+      startCredit: startSides.credit,
+      turnoverDebit: turnDt,
+      turnoverCredit: turnKt,
+      endDebit: endSides.debit,
+      endCredit: endSides.credit,
+      hasRedStart: startSides.isRed,
+      hasRedEnd: endSides.isRed,
+      dbTurnoverDebit: dbT.dt,
+      dbTurnoverCredit: dbT.kt,
+      queuedTurnoverDebit: qT.dt,
+      queuedTurnoverCredit: qT.kt,
+    });
+  }
+
+  // Build synthetic group rows for roots that have subaccounts (e.g. 10, 19, 20, 41, 60, 62, 68, 69, 76, 90, 91, 99)
+  const childrenByRoot = new Map<string, OsvAccountRow[]>();
+  const directRootLeafSet = new Set(
+    leafRows.filter((r) => !r.code.includes('.')).map((r) => r.code)
+  );
+
+  for (const row of leafRows) {
+    if (row.code.includes('.')) {
+      const root = row.code.split('.')[0];
+      if (!directRootLeafSet.has(root)) {
+        const arr = childrenByRoot.get(root) ?? [];
+        arr.push(row);
+        childrenByRoot.set(root, arr);
+      }
+    }
+  }
+
+  const rows: OsvAccountRow[] = [];
+  const emittedRoots = new Set<string>();
+
+  for (const leaf of leafRows) {
+    const root = leaf.code.includes('.') ? leaf.code.split('.')[0] : null;
+    if (root && childrenByRoot.has(root) && !emittedRoots.has(root)) {
+      emittedRoots.add(root);
+      const children = childrenByRoot.get(root)!;
+      const rootInfo =
+        CHART_OF_ACCOUNTS.find((a) => a.code === root) ?? getAccountInfo(root);
+
+      const sumTurnDt = round2(children.reduce((s, c) => s + c.turnoverDebit, 0));
+      const sumTurnKt = round2(children.reduce((s, c) => s + c.turnoverCredit, 0));
+      const sumDbTurnDt = round2(children.reduce((s, c) => s + c.dbTurnoverDebit, 0));
+      const sumDbTurnKt = round2(children.reduce((s, c) => s + c.dbTurnoverCredit, 0));
+      const sumQTurnDt = round2(children.reduce((s, c) => s + c.queuedTurnoverDebit, 0));
+      const sumQTurnKt = round2(children.reduce((s, c) => s + c.queuedTurnoverCredit, 0));
+
+      // In 1C 8.3 BP 3.0, synthetic accounts 90, 91, 99 display collapsed (свёрнутое) balance at root level
+      const isCollapsedFinancialRoot = root === '90' || root === '91' || root === '99';
+
+      let gStartDt = 0;
+      let gStartKt = 0;
+      let gEndDt = 0;
+      let gEndKt = 0;
+
+      if (isCollapsedFinancialRoot) {
+        const netStart = round2(
+          children.reduce((s, c) => s + (c.startDebit - c.startCredit), 0)
+        );
+        const netEnd = round2(
+          children.reduce((s, c) => s + (c.endDebit - c.endCredit), 0)
+        );
+        gStartDt = netStart > 0 ? netStart : 0;
+        gStartKt = netStart < 0 ? round2(-netStart) : 0;
+        gEndDt = netEnd > 0 ? netEnd : 0;
+        gEndKt = netEnd < 0 ? round2(-netEnd) : 0;
+      } else {
+        gStartDt = round2(children.reduce((s, c) => s + c.startDebit, 0));
+        gStartKt = round2(children.reduce((s, c) => s + c.startCredit, 0));
+        gEndDt = round2(children.reduce((s, c) => s + c.endDebit, 0));
+        gEndKt = round2(children.reduce((s, c) => s + c.endCredit, 0));
+      }
+
+      rows.push({
+        code: root,
+        name: rootInfo.name,
+        type: rootInfo.type,
+        isGroup: true,
+        isCollapsedSynthetic: isCollapsedFinancialRoot,
+        startDebit: gStartDt,
+        startCredit: gStartKt,
+        turnoverDebit: sumTurnDt,
+        turnoverCredit: sumTurnKt,
+        endDebit: gEndDt,
+        endCredit: gEndKt,
+        hasRedStart: children.some((c) => c.hasRedStart),
+        hasRedEnd: children.some((c) => c.hasRedEnd),
+        dbTurnoverDebit: sumDbTurnDt,
+        dbTurnoverCredit: sumDbTurnKt,
+        queuedTurnoverDebit: sumQTurnDt,
+        queuedTurnoverCredit: sumQTurnKt,
+      });
+    }
+    rows.push(leaf);
+  }
+
+  // Grand totals strictly over leafRows (no double counting)
+  const totalStartDebit = round2(leafRows.reduce((s, r) => s + r.startDebit, 0));
+  const totalStartCredit = round2(leafRows.reduce((s, r) => s + r.startCredit, 0));
+  const totalTurnoverDebit = round2(leafRows.reduce((s, r) => s + r.turnoverDebit, 0));
+  const totalTurnoverCredit = round2(leafRows.reduce((s, r) => s + r.turnoverCredit, 0));
+  const totalEndDebit = round2(leafRows.reduce((s, r) => s + r.endDebit, 0));
+  const totalEndCredit = round2(leafRows.reduce((s, r) => s + r.endCredit, 0));
+
+  const startDiff = round2(totalStartDebit - totalStartCredit);
+  const turnoverDiff = round2(totalTurnoverDebit - totalTurnoverCredit);
+  const endDiff = round2(totalEndDebit - totalEndCredit);
+
+  return {
+    dateFrom,
+    dateTo,
+    includeQueuedOperations,
+    balanceMode: effectiveMode,
+    balanceModeDescription,
+    rows,
+    leafRows,
+    totals: {
+      startDebit: totalStartDebit,
+      startCredit: totalStartCredit,
+      turnoverDebit: totalTurnoverDebit,
+      turnoverCredit: totalTurnoverCredit,
+      endDebit: totalEndDebit,
+      endCredit: totalEndCredit,
+      startDiff,
+      turnoverDiff,
+      endDiff,
+      isStartBalanced: Math.abs(startDiff) < 0.01,
+      isTurnoverBalanced: Math.abs(turnoverDiff) < 0.01,
+      isEndBalanced: Math.abs(endDiff) < 0.01,
+    },
   };
 }
