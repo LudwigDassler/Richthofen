@@ -7,5 +7,5 @@ build:
   artifacts:
     '*': /
 run:
-  scriptName: start
+  scriptName: start.cjs
   containerPort: 3000
