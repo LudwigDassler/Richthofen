@@ -4,8 +4,7 @@ meta:
     name: npm
     version: 20
 build:
-  artifacts:
-    '*': /
+  additionalCommands: npm run build
 run:
-  scriptName: start.cjs
+  command: npm run start
   containerPort: 3000
