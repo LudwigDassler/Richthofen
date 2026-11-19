@@ -10,503 +10,443 @@ export interface AccountInfo {
   isGroup?: boolean;
 }
 
-export interface OrganizationCard {
+export type TaxSystem1C =
+  | 'ОСНО'
+  | 'УСН (доходы)'
+  | 'УСН (доходы минус расходы)';
+
+export interface Organization1C {
   name: string;
-  shortName: string;
+  fullName: string;
   inn: string;
   kpp: string;
-  ogrn?: string;
+  ogrn: string;
+  taxSystem: TaxSystem1C;
+  vatRateDefault: number;
   bankAccount: string;
   bankName: string;
   bik: string;
   corrAccount: string;
-  address?: string;
-  taxSystem: 'OSNO' | 'USN_15' | 'USN_6';
-  defaultVatRate: number;
-  directorName: string;
-  chiefAccountantName: string;
-  studentName: string;
-  substituteStudentInOrgName: boolean;
-  substituteStudentAsAccountant: boolean;
-  costingMethod: 'direct-costing' | 'full-absorption';
-  periodLabel: string;
-  periodStartDate: string;
+  address: string;
+  director: string;
+  chiefAccountant: string;
+  code1C?: string;
+  guid1C?: string;
 }
 
-export interface OpeningBalanceEntry {
-  id: string;
-  accountCode: string;
-  subconto1?: string;
-  subconto2?: string;
-  subconto3?: string;
-  debit: number;
-  credit: number;
-  comment?: string;
-}
-
-export interface SmartLinkRule {
-  accountCode: string;
-  side: 'debit' | 'credit' | 'net';
-  matchSubconto1?: string;
-  matchContract?: string;
-  description: string;
-}
-
-export interface JournalPosting {
-  id: string;
-  debitAccount: string;
-  debitSubconto: string[];
-  creditAccount: string;
-  creditSubconto: string[];
-  amount: number;
-  comment: string;
-  formulaHint?: string;
-  proportionOfTotal?: 'full' | 'net_without_vat' | 'vat_only' | 'custom';
-}
-
-export interface DocumentField1C {
-  label: string;
-  value: string;
-  copyable?: boolean;
-  highlight?: boolean;
-}
-
-export interface VatMathBreakdown {
-  quantity?: number;
-  unit?: string;
-  unitPrice?: number;
-  totalWithVat: number;
+export interface AccountingPolicy1C {
+  taxSystem: TaxSystem1C;
   vatRate: number;
-  vatMode: 'included' | 'on_top' | 'none';
-  vatAmount: number;
-  amountWithoutVat: number;
-  steps: string[];
+  directCosting26To9008: boolean;
+  inventoryValuationMethod: string;
+  rawRegisters: Record<string, unknown>;
 }
 
-export interface PitfallWarning {
-  severity: 'info' | 'warning' | 'critical';
-  title: string;
-  description: string;
-  checkType?:
-    | 'cash_balance'
-    | 'bank_balance'
-    | 'advance_offset'
-    | 'penalty_split'
-    | 'closing_subconto'
-    | 'general';
-}
-
-export type OperationStatus = 'pending' | 'in_progress' | 'done' | 'needs_data';
-
-export type Operation1CSyncStatus = 'done_in_1c' | 'needs_fix_in_1c' | 'missing_in_1c';
-
-export interface DocumentTableRowGuide {
-  name: string;
-  quantity?: string;
-  price?: string;
-  amount: string;
-  vat: string;
-  account: string;
-  subconto?: string;
-}
-
-export interface Synced1CDocumentLine {
-  nomenclature?: string;
-  quantity?: number;
-  price?: number;
-  amount?: number;
-  vatRate?: string;
-  vatAmount?: number;
-  accountCode?: string;
-  vatAccountCode?: string;
-  subconto?: string;
-}
-
-export interface Synced1CDocument {
+export interface DirectoryCounterparty1C {
   id: string;
-  docType: string;
-  section1C: string;
-  number: string;
-  date: string;
-  posted: boolean;
-  deletionMark?: boolean;
-  operationKind?: string;
-  counterparty?: string;
-  contract?: string;
-  amount: number;
-  vatAmount?: number;
-  settlementAccount?: string;
-  advanceAccount?: string;
-  hasSfOrUpd?: boolean;
-  sfNumber?: string;
-  sfDate?: string;
-  comment?: string;
-  lines: Synced1CDocumentLine[];
-}
-
-export interface Synced1CEmployeeRecord {
-  id: string;
-  fullName: string;
-  position?: string;
-  department?: string;
-  salary?: number;
-  hireDate?: string;
-  inn?: string;
-  snils?: string;
-  personnelNumber?: string;
-}
-
-export interface Synced1CNomenclatureRecord {
-  id: string;
-  name: string;
-  kind?: string;
-  unit?: string;
-  vatRate?: string;
-  code?: string;
-}
-
-export interface Synced1CResponsiblePersons {
-  directorName?: string;
-  directorPosition?: string;
-  chiefAccountantName?: string;
-  cashierName?: string;
-}
-
-export interface Synced1CAccountingPolicy {
-  taxSystem?: string;
-  valuationMethod?: string;
-  mainCostAccount?: string;
-  directCosting?: boolean;
-  rawSummary?: string;
-}
-
-export interface Synced1CContract {
-  number: string;
-  date?: string;
-  kind?: string;
-  name?: string;
-}
-
-export interface Synced1CCounterparty {
+  code1C?: string;
+  guid1C?: string;
   name: string;
   fullName?: string;
-  inn?: string;
-  kpp?: string;
+  inn: string;
+  kpp: string;
+  kind?: 'ЮридическоеЛицо' | 'ФизическоеЛицо' | 'ИндивидуальныйПредприниматель' | string;
+  defaultContract?: string;
   bankAccount?: string;
   bik?: string;
   bankName?: string;
-  contracts: Synced1CContract[];
+  isNewFor1C?: boolean;
 }
 
-export interface Synced1CPosting {
+export interface DirectoryContract1C {
   id: string;
-  date: string;
-  documentType?: string;
-  documentNumber?: string;
-  debitAccount: string;
-  debitSubconto: string[];
-  creditAccount: string;
-  creditSubconto: string[];
-  amount: number;
-  comment?: string;
-}
-
-export interface RequisiteFieldGap {
-  fieldKey: string;
-  fieldLabel: string;
-  expectedValue: string;
-  actualValueIn1C?: string;
-  reason: 'empty' | 'mismatch';
-}
-
-export interface Operation1CMatchInfo {
-  syncStatus: Operation1CSyncStatus;
-  matchedDocs: Synced1CDocument[];
-  matchedPostings: Synced1CPosting[];
-  issues: string[];
-  missingCounterpartyFields: RequisiteFieldGap[];
-  tableRowsGuide: DocumentTableRowGuide[];
-  plainExplanation: string;
-}
-
-export interface BusinessOperation {
-  id: string;
-  number: number | string;
-  date: string;
-  shortTitle?: string;
-  rawDescription: string;
-  explicitAmount: number | null;
-  resolvedAmount: number;
-  isMonthEndClosing?: boolean;
-  status: OperationStatus;
-  missingDataReason?: string;
-  smartLink?: SmartLinkRule;
-  menuPath1C: string[];
-  documentType1C: string;
-  operationKind1C: string;
-  hasUpdOrSf: boolean;
-  updLabel?: string;
-  documentFields: DocumentField1C[];
-  vatBreakdown?: VatMathBreakdown;
-  postings: JournalPosting[];
-  pitfalls: PitfallWarning[];
-  match1C?: Operation1CMatchInfo;
-}
-
-export interface CounterpartyCard1C {
-  id: string;
+  code1C?: string;
+  guid1C?: string;
   name: string;
-  fullName: string;
-  inn: string;
-  kpp: string;
-  bankAccount: string;
-  bankName: string;
-  bik: string;
-  contractKind: 'С поставщиком' | 'С покупателем' | 'Прочее';
-  contractNumber: string;
-  contractDate: string;
-  createdIn1C?: boolean;
+  number: string;
+  date: string;
+  counterpartyName: string;
+  counterpartyInn?: string;
+  contractKind:
+    | 'СПоставщиком'
+    | 'СПокупателем'
+    | 'Прочее'
+    | 'СКомиссионером'
+    | 'СКомитентом'
+    | string;
+  currency?: string;
+  isNewFor1C?: boolean;
 }
 
-export interface NomenclatureCard1C {
+export interface DirectoryNomenclature1C {
   id: string;
+  code1C?: string;
+  guid1C?: string;
   name: string;
-  kind: 'Товары' | 'Материалы' | 'Услуги / Субподрядные работы' | 'Продукция / СМР';
+  fullName?: string;
+  article?: string;
   unit: string;
-  accountCode: string;
-  vatAccountCode: string;
+  itemKind: 'Товар' | 'Материал' | 'Услуга' | 'Продукция' | string;
+  vatRate: string;
+  defaultAccount?: string;
   nomenclatureGroup?: string;
-  expenseItem?: string;
-  defaultVatRate: number;
-  createdIn1C?: boolean;
+  isNewFor1C?: boolean;
 }
 
-export interface EmployeeCard1C {
+export interface DirectoryWarehouse1C {
   id: string;
-  fullName: string;
-  position: string;
-  department: string;
-  salary: number;
-  hireDate: string;
-  costAccount: string;
-  nomenclatureGroup?: string;
-  createdIn1C?: boolean;
+  code1C?: string;
+  name: string;
+  warehouseType?: string;
+  isNewFor1C?: boolean;
 }
 
-export interface ExtractedDirectories1C {
-  counterparties: CounterpartyCard1C[];
-  nomenclature: NomenclatureCard1C[];
-  nomenclatureGroups: string[];
-  expenseItems: string[];
-  cashFlowItems: string[];
-  employees: EmployeeCard1C[];
+export interface DirectorySimpleItem1C {
+  id: string;
+  code1C?: string;
+  name: string;
+  kind?: string;
+  extra?: Record<string, string>;
+  isNewFor1C?: boolean;
 }
 
-export interface OsvAccountCardMovement {
-  operationId: string;
-  operationNumber: number | string;
-  date: string;
-  description: string;
-  correspondentAccount: string;
-  subconto: string;
-  debit: number;
-  credit: number;
+export interface BankAccount1C {
+  id: string;
+  code1C?: string;
+  name: string;
+  accountNumber: string;
+  bik: string;
+  bankName: string;
+  corrAccount?: string;
+  ownerName?: string;
 }
 
-export interface OsvRow {
-  accountCode: string;
-  accountName: string;
-  accountType: AccountType;
-  isGroup: boolean;
-  parentCode?: string;
+export interface BalanceRow1C {
+  id: string;
+  account: string;
+  accountName?: string;
+  subconto?: string;
   startDebit: number;
   startCredit: number;
   turnoverDebit: number;
   turnoverCredit: number;
   endDebit: number;
   endCredit: number;
-  hasRedBalance: boolean;
-  redBalanceHint?: string;
-  movements: OsvAccountCardMovement[];
+  rawDebit: number;
+  rawCredit: number;
+  hasExplicitStart: boolean;
+  hasExplicitEnd: boolean;
+  quantity?: number;
+}
+
+export interface Posting1C {
+  id: string;
+  date: string;
+  debit: string;
+  credit: string;
+  amount: number;
+  debitSubconto: string[];
+  creditSubconto: string[];
+  documentType: string;
+  documentNumber: string;
+  documentLabel: string;
+  description: string;
+  counterpartyName?: string;
+  contractName?: string;
+  quantityDebit?: number;
+  quantityCredit?: number;
+}
+
+export interface DocumentJournalRow1C {
+  id: string;
+  documentKind: string;
+  number: string;
+  date: string;
+  posted: boolean;
+  amount: number;
+  vatAmount?: number;
+  counterparty: string;
+  counterpartyInn?: string;
+  contract: string;
+  warehouse?: string;
+  operationKind?: string;
+  comment: string;
+  rawFields?: Record<string, unknown>;
+}
+
+export type BalanceInterpretationMode =
+  | 'explicit_start_end'
+  | 'end_balances_reconstructed_start'
+  | 'start_balances_forward_end'
+  | 'balances_only'
+  | 'postings_only';
+
+export type BalanceAnchorOverride =
+  | 'auto'
+  | 'treat_raw_as_end'
+  | 'treat_raw_as_start';
+
+export interface ReconstructedAccountBalance {
+  account: string;
+  subconto?: string;
+  startDebit: number;
+  startCredit: number;
+  dbTurnoverDebit: number;
+  dbTurnoverCredit: number;
+  dbEndDebit: number;
+  dbEndCredit: number;
+}
+
+export interface Database1CSnapshot {
+  loadedAt: string;
+  exportedAt: string;
+  sourceFileName: string;
+  configurationName: string;
+  periodStart: string;
+  periodEnd: string;
+  balanceDate?: string;
+  organization: Organization1C;
+  accountingPolicy: AccountingPolicy1C;
+  rawBalances: BalanceRow1C[];
+  detectedBalanceMode: BalanceInterpretationMode;
+  balanceModeReason: string;
+  postings: Posting1C[];
+  documents: DocumentJournalRow1C[];
+  counterparties: DirectoryCounterparty1C[];
+  contracts: DirectoryContract1C[];
+  nomenclature: DirectoryNomenclature1C[];
+  warehouses: DirectoryWarehouse1C[];
+  expenseItems: DirectorySimpleItem1C[];
+  cashFlowItems: DirectorySimpleItem1C[];
+  employees: DirectorySimpleItem1C[];
+  individuals: DirectorySimpleItem1C[];
+  nomenclatureGroups: DirectorySimpleItem1C[];
+  subdivisions: DirectorySimpleItem1C[];
+  bankAccounts: BankAccount1C[];
+  rawDirectories: Record<string, Record<string, unknown>[]>;
+  rawRegisters: Record<string, unknown>;
+}
+
+export type DocType1CBP30 =
+  | 'СписаниеСРасчетногоСчета'
+  | 'ПоступлениеНаРасчетныйСчет'
+  | 'ПоступлениеТоваровУслуг'
+  | 'РеализацияТоваровУслуг'
+  | 'СчетФактураПолученный'
+  | 'СчетФактураВыданный'
+  | 'ВыдачаНаличных'
+  | 'ПоступлениеНаличных'
+  | 'НачислениеЗарплаты'
+  | 'ВедомостьВБанк'
+  | 'ВедомостьВКассу'
+  | 'АвансовыйОтчет'
+  | 'КорректировкаДолга'
+  | 'ОперацияБух'
+  | 'ЗакрытиеМесяца'
+  | 'ВводОстатков';
+
+export type OperationCategory =
+  | 'bank_out'
+  | 'bank_in'
+  | 'purchase_goods'
+  | 'purchase_materials'
+  | 'purchase_services'
+  | 'sale_goods'
+  | 'sale_services'
+  | 'cash_out'
+  | 'cash_in'
+  | 'payroll_accrual'
+  | 'payroll_payout'
+  | 'tax_payment'
+  | 'bank_fee'
+  | 'penalty_claim'
+  | 'advance_offset'
+  | 'advance_vat'
+  | 'closing'
+  | 'manual';
+
+export interface EntityBindingStatus {
+  status: 'matched_1c' | 'new_for_1c' | 'not_required' | 'missing';
+  matchedName?: string;
+  matchedCode1C?: string;
+  matchedInn?: string;
+  note?: string;
+}
+
+export interface AccountingEntry {
+  id: string;
+  debit: string;
+  credit: string;
+  debitSubconto: string;
+  creditSubconto: string;
+  amount: number;
+  description: string;
+}
+
+export type VatRule = 'included' | 'on_top' | 'none' | ' zero';
+
+export interface QueuedOperation {
+  id: string;
+  createdAt: string;
+  sourceFileName: string;
+  date: string;
+  docNumber: string;
+  incomingDocNumber?: string;
+  incomingDocDate?: string;
+  description: string;
+  category: OperationCategory;
+  docType1C: DocType1CBP30;
+  amount: number;
+  vatRate: number;
+  vatRule: 'included' | 'on_top' | 'none';
+  vatAmount: number;
+  quantity?: number;
+  unitPrice?: number;
+  hasInvoiceSF: boolean;
+  counterpartyName: string;
+  counterpartyInn: string;
+  counterpartyKpp: string;
+  counterpartyKind: 'ЮридическоеЛицо' | 'ИндивидуальныйПредприниматель' | 'ФизическоеЛицо';
+  contractName: string;
+  contractNumber: string;
+  contractDate: string;
+  nomenclatureName: string;
+  warehouseName: string;
+  expenseItemName: string;
+  cashFlowItemName: string;
+  employeeName: string;
+  nomenclatureGroupName: string;
+  isDuplicateIn1C: boolean;
+  includeInProcessing: boolean;
+  duplicateReason?: string;
+  autoGeneratedKind?: 'advance_offset' | 'advance_vat' | 'closing_26' | 'closing_90_91';
+  bindings: {
+    counterparty: EntityBindingStatus;
+    contract: EntityBindingStatus;
+    nomenclature: EntityBindingStatus;
+    warehouse: EntityBindingStatus;
+    expenseItem: EntityBindingStatus;
+    cashFlowItem: EntityBindingStatus;
+  };
+  entries: AccountingEntry[];
+}
+
+export interface OsvAccountRow {
+  code: string;
+  name: string;
+  type: AccountType;
+  parentCode?: string;
+  isGroup: boolean;
+  isCollapsedSynthetic?: boolean;
+  startDebit: number;
+  startCredit: number;
+  turnoverDebit: number;
+  turnoverCredit: number;
+  endDebit: number;
+  endCredit: number;
+  hasRedStart: boolean;
+  hasRedEnd: boolean;
+  dbTurnoverDebit: number;
+  dbTurnoverCredit: number;
+  queuedTurnoverDebit: number;
+  queuedTurnoverCredit: number;
 }
 
 export interface OsvReport {
-  rows: OsvRow[];
-  totalStartDebit: number;
-  totalStartCredit: number;
-  totalTurnoverDebit: number;
-  totalTurnoverCredit: number;
-  totalEndDebit: number;
-  totalEndCredit: number;
-  isStartBalanced: boolean;
-  isEndBalanced: boolean;
+  dateFrom: string;
+  dateTo: string;
+  includeQueuedOperations: boolean;
+  balanceMode: BalanceInterpretationMode;
+  balanceModeDescription: string;
+  rows: OsvAccountRow[];
+  leafRows: OsvAccountRow[];
+  totals: {
+    startDebit: number;
+    startCredit: number;
+    turnoverDebit: number;
+    turnoverCredit: number;
+    endDebit: number;
+    endCredit: number;
+    startDiff: number;
+    turnoverDiff: number;
+    endDiff: number;
+    isStartBalanced: boolean;
+    isTurnoverBalanced: boolean;
+    isEndBalanced: boolean;
+  };
 }
 
-export interface UserOsvInputRow {
-  accountCode: string;
-  turnoverDebit?: number | null;
-  turnoverCredit?: number | null;
-  endDebit?: number | null;
-  endCredit?: number | null;
-}
+export type AuditSeverity = 'error' | 'warning' | 'info';
 
-export interface OsvDiscrepancy {
-  id: string;
-  severity: 'error' | 'warning';
-  accountsAffected: string[];
-  diffAmount: number;
-  title: string;
-  probableCause: string;
-  howToFixIn1C: string;
-  relatedOperationId?: string;
-}
-
-export interface OsvReconciliationResult {
-  isPerfectMatch: boolean;
-  checkedAccountsCount: number;
-  mismatchedAccountsCount: number;
-  rowDiffs: Record<
-    string,
-    {
-      turnoverDebitDiff: number;
-      turnoverCreditDiff: number;
-      endDebitDiff: number;
-      endCreditDiff: number;
-      hasMismatch: boolean;
+export type InlineFieldTarget =
+  | {
+      kind: 'operation_field';
+      operationId: string;
+      field:
+        | 'counterpartyInn'
+        | 'counterpartyKpp'
+        | 'counterpartyName'
+        | 'contractName'
+        | 'nomenclatureName'
+        | 'warehouseName'
+        | 'expenseItemName'
+        | 'cashFlowItemName'
+        | 'docNumber';
+      label: string;
+      placeholder: string;
+      currentValue: string;
     }
-  >;
-  diagnostics: OsvDiscrepancy[];
-}
-
-export interface ChatMessage {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  timestamp: string;
-  relatedOperationNumber?: number | string;
-}
-
-export interface AiProviderConfig {
-  provider: 'demo-local' | 'gemini' | 'openai-compatible';
-  apiKey: string;
-  baseUrl?: string;
-  model: string;
-}
-
-export type WorkspaceTab =
-  | 'navigator'
-  | 'database1c'
-  | 'audit_osv'
-  | 'balances'
-  | 'directories'
-  | 'osv'
-  | 'audit';
-
-export interface DemoScenarioPreset {
-  id: string;
-  title: string;
-  subtitle: string;
-  organization: OrganizationCard;
-  openingBalances: OpeningBalanceEntry[];
-  operations: BusinessOperation[];
-  directories: ExtractedDirectories1C;
-}
-
-export interface Synced1CSnapshot {
-  revision: string;
-  syncedAt: string;
-  source: 'http-post' | 'downloads-file' | 'file-upload' | 'demo-simulation';
-  isNormalizedSnapshot?: boolean;
-  organization?: Partial<OrganizationCard>;
-  counterparties: Synced1CCounterparty[];
-  openingBalances: OpeningBalanceEntry[];
-  endBalances?: Record<string, { debit: number; credit: number }>;
-  aprilPostings: Synced1CPosting[];
-  hasMonthEndClosing?: boolean;
-  allDocuments: Synced1CDocument[];
-  directories1C: {
-    counterparties: Synced1CCounterparty[];
-    nomenclature: Synced1CNomenclatureRecord[];
-    employees: Synced1CEmployeeRecord[];
-    bankAccountsCount?: number;
-    contractsCount?: number;
-  };
-  registers1C: {
-    responsiblePersons?: Synced1CResponsiblePersons;
-    accountingPolicy?: Synced1CAccountingPolicy;
-    hrHistory?: Synced1CEmployeeRecord[];
-  };
-}
-
-export interface EntityRequisiteCheck {
-  entityId: string;
-  entityType: 'organization' | 'counterparty';
-  name: string;
-  innExpected: string;
-  status: 'complete' | 'incomplete_in_1c' | 'missing_in_1c';
-  totalRequired: number;
-  filledCount: number;
-  missingFields: RequisiteFieldGap[];
-}
-
-export interface RequisiteCheckReport {
-  has1CSnapshot: boolean;
-  organizationCheck: EntityRequisiteCheck;
-  counterpartyChecks: EntityRequisiteCheck[];
-  incompleteCount: number;
-}
-
-export type AuditIssueCategory =
-  | 'advance_unoffset'
-  | 'missing_sf_upd'
-  | 'incomplete_requisites'
-  | 'unclosed_month'
-  | 'posting_mismatch'
-  | 'missing_operation';
-
-export interface AuditPostingComparisonRow {
-  label: string;
-  in1CDebit: string;
-  in1CCredit: string;
-  in1CSubconto: string;
-  in1CAmount: number | null;
-  expectedDebit: string;
-  expectedCredit: string;
-  expectedSubconto: string;
-  expectedAmount: number;
-  diffAmount: number;
-}
+  | {
+      kind: 'entry_account';
+      operationId: string;
+      entryId: string;
+      side: 'debit' | 'credit';
+      label: string;
+      placeholder: string;
+      currentValue: string;
+    };
 
 export interface AuditIssue {
   id: string;
-  category: AuditIssueCategory;
-  severity: 'critical' | 'warning' | 'info';
+  severity: AuditSeverity;
+  category:
+    | 'missing_requisite'
+    | 'unbalanced_entry'
+    | 'red_balance'
+    | 'unclosed_period'
+    | 'unoffset_advance'
+    | 'duplicate_doc'
+    | 'osv_disbalance';
   title: string;
-  summary: string;
-  howToFixIn1C: string;
-  relatedOperationId?: string;
-  relatedOperationNumber?: number | string;
-  affectedAccounts?: string[];
-  missingRequisites?: RequisiteFieldGap[];
-  comparisonRows?: AuditPostingComparisonRow[];
+  description: string;
+  accountCode?: string;
+  operationId?: string;
+  canAutoFixBy1C: boolean;
+  autoFixActionLabel?: string;
+  inlineTarget?: InlineFieldTarget;
 }
 
-export interface Full1CAuditReport {
-  has1CData: boolean;
-  totalIssuesCount: number;
-  criticalCount: number;
-  warningCount: number;
-  matchedOperationsCount: number;
-  totalOperationsCount: number;
-  issuesByCategory: Record<AuditIssueCategory, AuditIssue[]>;
-  allIssues: AuditIssue[];
-}
+export type ExportMode1C = 'incremental' | 'clean_db';
 
-export interface ApplyImported1CPayload {
-  openingBalances?: OpeningBalanceEntry[];
-  mergeMode?: 'replace' | 'merge';
-  organizationPatch?: Partial<OrganizationCard>;
-  counterparties?: CounterpartyCard1C[];
-  employees?: EmployeeCard1C[];
-  synced1CPatch?: Partial<Synced1CSnapshot>;
+export type ExportFormat1C = 'bsl' | 'xml_edo' | 'json';
+
+export type WorkspaceTab =
+  | 'db_osv'
+  | 'import_postings'
+  | 'audit_autofix'
+  | 'export_1c';
+
+export interface PersistedWorkbenchStateV2 {
+  version: 2;
+  activeTab: WorkspaceTab;
+  db1C: Database1CSnapshot | null;
+  balanceAnchorOverride: BalanceAnchorOverride;
+  includeQueuedInOsv: boolean;
+  periodFilter: {
+    dateFrom: string;
+    dateTo: string;
+  };
+  operations: QueuedOperation[];
+  resolvedInlineNotes: Record<string, string>;
+  exportMode: ExportMode1C;
 }

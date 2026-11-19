@@ -474,6 +474,15 @@ export const CHART_OF_ACCOUNTS: AccountInfo[] = [
     category: 'Расчеты',
     isGroup: false,
   },
+  {
+    code: '76.ВА',
+    name: 'НДС по авансам и предоплатам выданным',
+    parentCode: '76',
+    type: 'passive',
+    subconto: ['Контрагенты', 'Счета-фактуры полученные'],
+    category: 'Расчеты',
+    isGroup: false,
+  },
 
   // Раздел VII. Капитал
   {
