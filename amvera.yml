@@ -1,0 +1,11 @@
+meta:
+  environment: node
+  toolchain:
+    name: npm
+    version: 20
+build:
+  artifacts:
+    '*': /
+run:
+  scriptName: start
+  containerPort: 3000
