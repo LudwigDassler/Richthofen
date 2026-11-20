@@ -1,10 +1,12 @@
 'use client';
 
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
+  BookOpenCheck,
   Building2,
+  Calculator,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -12,6 +14,7 @@ import {
   CopyCheck,
   FilePlus2,
   FolderUp,
+  Info,
   Landmark,
   Loader2,
   Plus,
@@ -21,15 +24,22 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useAccountant } from '@/context/AccountantContext';
-import { CHART_OF_ACCOUNTS } from '@/data/chartOfAccounts';
+import { CHART_OF_ACCOUNTS, isOffBalanceAccountCode } from '@/data/chartOfAccounts';
 import {
   DEFAULT_SBERBANK_BIK,
   DEFAULT_SBERBANK_NAME,
   DocType1CBP30,
   EgrulCandidate,
+  OperationReadinessStatus,
   QueuedOperation,
 } from '@/types/accounting';
-import { getCounterpartyGroupKey } from '@/lib/engine';
+import {
+  buildOperationMentorGuide1C,
+  DOC_TYPE_LABELS_1C,
+  doesOperationRequireCounterparty,
+  getCounterpartyGroupKey,
+  isInternalWarehouseOrProductionOp,
+} from '@/lib/engine';
 import { parseRussianNumber } from '@/lib/import1c';
 
 const DOC_TYPES_1C: DocType1CBP30[] = [
@@ -37,6 +47,11 @@ const DOC_TYPES_1C: DocType1CBP30[] = [
   'ПоступлениеНаРасчетныйСчет',
   'ПоступлениеТоваровУслуг',
   'РеализацияТоваровУслуг',
+  'РасходМатериалов',
+  'ПередачаМатериаловВЭксплуатацию',
+  'ПеремещениеТоваров',
+  'ВыпускПродукции',
+  'ПринятиеКУчетуОС',
   'СчетФактураПолученный',
   'СчетФактураВыданный',
   'ПоступлениеНаличных',
@@ -46,6 +61,27 @@ const DOC_TYPES_1C: DocType1CBP30[] = [
   'ОперацияБух',
   'ЗакрытиеМесяца',
 ];
+
+const COST_ACCOUNT_OPTIONS = [
+  { code: '20.01', label: '20.01 — Основное производство' },
+  { code: '25', label: '25 — Общепроизводственные расходы' },
+  { code: '26', label: '26 — Общехозяйственные расходы' },
+  { code: '44.01', label: '44.01 — Издержки обращения' },
+  { code: '91.02', label: '91.02 — Прочие расходы' },
+];
+
+function deriveReadinessStatus(op: QueuedOperation): OperationReadinessStatus {
+  if (op.readinessStatus) return op.readinessStatus;
+  if (op.amountMode === 'calculated_by_1c') return 'calculated_1c';
+  if (op.amountMode === 'required_missing' || op.needsAmount) return 'critical_error';
+  if (
+    doesOperationRequireCounterparty(op.category) &&
+    op.counterpartyName.trim().length < 2
+  ) {
+    return 'critical_error';
+  }
+  return 'ready';
+}
 
 export function Tab2ImportPostings() {
   const {
@@ -59,6 +95,7 @@ export function Tab2ImportPostings() {
     importOperationsFromText,
     addBlankOperation,
     updateOperation,
+    changeOperationDocType1C,
     bindOperationTo1CDirectoryItem,
     selectEgrulCandidateForCounterparty,
     rebuildSingleOperationPostings,
@@ -73,7 +110,11 @@ export function Tab2ImportPostings() {
   const [pasteText, setPasteText] = useState('');
   const [confirmClear, setConfirmClear] = useState(false);
   const [showSkippedDetails, setShowSkippedDetails] = useState(false);
-  const [filterMode, setFilterMode] = useState<'all' | 'active' | 'duplicates'>('all');
+  const [filterMode, setFilterMode] = useState<
+    'all' | 'active' | 'internal_1c' | 'duplicates'
+  >('all');
+  const [expandedGuides, setExpandedGuides] = useState<Record<string, boolean>>({});
+  const [expandAllGuides, setExpandAllGuides] = useState(false);
 
   const handleFilesSelected = async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
@@ -99,6 +140,7 @@ export function Tab2ImportPostings() {
 
   const dupCount = operations.filter((o) => o.isDuplicateIn1C).length;
   const activeCount = operations.filter((o) => o.includeInProcessing).length;
+  const internalCount = operations.filter((o) => isInternalWarehouseOrProductionOp(o)).length;
   const livePostingsCount = operations.reduce((s, o) => s + o.entries.length, 0);
 
   const filesUploadedStat =
@@ -122,9 +164,23 @@ export function Tab2ImportPostings() {
 
   const filteredOperations = operations.filter((op) => {
     if (filterMode === 'active') return op.includeInProcessing;
+    if (filterMode === 'internal_1c') return isInternalWarehouseOrProductionOp(op);
     if (filterMode === 'duplicates') return op.isDuplicateIn1C;
     return true;
   });
+
+  const toggleSingleGuide = (id: string) => {
+    setExpandedGuides((prev) => {
+      const current = prev[id] !== undefined ? prev[id] : expandAllGuides;
+      return { ...prev, [id]: !current };
+    });
+  };
+
+  const handleToggleAllGuides = () => {
+    const next = !expandAllGuides;
+    setExpandAllGuides(next);
+    setExpandedGuides({});
+  };
 
   return (
     <div className="space-y-4">
@@ -177,16 +233,13 @@ export function Tab2ImportPostings() {
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div className="space-y-1">
             <h2 className="text-sm font-semibold text-zinc-950 dark:text-white">
-              Пакетная загрузка первичных документов, выписок и реестров ({reportingYear} г.)
+              Пакетная загрузка первичных документов, складских операций и выписок ({reportingYear} г.)
             </h2>
             <p className="text-xs text-zinc-600 dark:text-zinc-400">
-              Перетащите сразу пачку файлов:{' '}
-              <span className="font-mono">.xlsx / .xls</span> (без потери строк с пустой суммой и объединённой датой),{' '}
+              Перетащите пачку файлов <span className="font-mono">.xlsx / .xls</span>,{' '}
               <span className="font-mono">.csv / .tsv</span>,{' '}
               <span className="font-mono">.txt</span> (<span className="font-mono">1CClientBankExchange</span>),{' '}
-              <span className="font-mono">.xml</span> (<span className="font-mono">EnterpriseData / CommerceML</span>) или{' '}
-              <span className="font-mono">.json</span>. Все даты автоматически приводятся к отчётному{' '}
-              <span className="font-mono font-semibold">{reportingYear}</span> году.
+              <span className="font-mono">.xml</span> или <span className="font-mono">.json</span>. Внутренние складские и производственные операции (списание материалов 10→20, выдача спецодежды с МЦ.02, ввод ОС 08→01) распознаются автоматически с пошаговой инструкцией 1С:БП 3.0.
             </p>
           </div>
 
@@ -223,14 +276,14 @@ export function Tab2ImportPostings() {
         {showPasteBox && (
           <div className="mt-4 pt-4 border-t border-zinc-200 dark:border-zinc-800 space-y-2.5">
             <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
-              Вставьте скопированные строки из Excel, банковской выписки или текстовое описание операций (по одной на строке):
+              Вставьте скопированные строки из Excel, банковской выписки или журнала хозяйственных операций (по одной на строке):
             </label>
             <textarea
               rows={5}
               value={pasteText}
               onChange={(e) => setPasteText(e.target.value)}
-              placeholder={`Пример: 02.04.${reportingYear} Перечислен 100% аванс ООО «Конкурент» за оконные блоки 133 шт по 9300 руб за шт с НДС 20%`}
-              className="w-full rounded border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 p-2.5 text-xs font-mono focus:outline-none focus:border-amber-600"
+              placeholder={`Примеры:\n02.03.${reportingYear} Поступил кирпич строительный 1000 шт от ООО «СтройБаза» на сумму 120 000 руб с НДС 20%\n05.03.${reportingYear} Передан кирпич на объект для производства трубы\n06.03.${reportingYear} Выдали спецодежду каменщику`}
+              className="w-full rounded border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 p-2.5 text-xs font-mono focus:outline-none focus:border-amber-600"
             />
             <div className="flex items-center justify-end gap-2">
               <button
@@ -300,7 +353,7 @@ export function Tab2ImportPostings() {
             </div>
 
             <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-100 dark:bg-zinc-900 font-mono">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-100 dark:bg-zinc-900 font-mono text-zinc-700 dark:text-zinc-300">
                 <Landmark className="w-3 h-3 text-amber-600" />
                 Банк по умолчанию: {defaultBankName} (БИК {defaultBik})
               </span>
@@ -344,22 +397,22 @@ export function Tab2ImportPostings() {
       {/* Queue Controls Strip */}
       {operations.length > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] px-3.5 py-2.5 text-xs">
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-1.5">
             <button
               type="button"
               onClick={() => setFilterMode('all')}
-              className={`px-2.5 py-1 rounded font-medium ${
+              className={`px-2.5 py-1 rounded font-medium tabular-nums ${
                 filterMode === 'all'
                   ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
                   : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
               }`}
             >
-              Все в очереди ({operations.length})
+              Все ({operations.length})
             </button>
             <button
               type="button"
               onClick={() => setFilterMode('active')}
-              className={`px-2.5 py-1 rounded font-medium ${
+              className={`px-2.5 py-1 rounded font-medium tabular-nums ${
                 filterMode === 'active'
                   ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
                   : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
@@ -367,11 +420,24 @@ export function Tab2ImportPostings() {
             >
               К проведению ({activeCount})
             </button>
+            {internalCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setFilterMode('internal_1c')}
+                className={`px-2.5 py-1 rounded font-medium tabular-nums ${
+                  filterMode === 'internal_1c'
+                    ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
+                    : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                }`}
+              >
+                Внутренние 1С ({internalCount})
+              </button>
+            )}
             {dupCount > 0 && (
               <button
                 type="button"
                 onClick={() => setFilterMode('duplicates')}
-                className={`px-2.5 py-1 rounded font-medium ${
+                className={`px-2.5 py-1 rounded font-medium tabular-nums ${
                   filterMode === 'duplicates'
                     ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
                     : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
@@ -382,7 +448,16 @@ export function Tab2ImportPostings() {
             )}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleToggleAllGuides}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-200 font-medium transition-colors"
+            >
+              <BookOpenCheck className="w-3.5 h-3.5 text-amber-600" />
+              {expandAllGuides ? 'Свернуть все инструкции 1С' : 'Развернуть все инструкции 1С'}
+            </button>
+
             <button
               type="button"
               onClick={() => setActiveTab('audit_autofix')}
@@ -408,7 +483,7 @@ export function Tab2ImportPostings() {
                 <button
                   type="button"
                   onClick={() => setConfirmClear(false)}
-                  className="px-2 py-1 rounded border border-zinc-300 dark:border-zinc-700"
+                  className="px-2 py-1 rounded border border-zinc-300 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300"
                 >
                   Отмена
                 </button>
@@ -417,7 +492,7 @@ export function Tab2ImportPostings() {
               <button
                 type="button"
                 onClick={() => setConfirmClear(true)}
-                className="px-2.5 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400 hover:text-red-600"
+                className="px-2.5 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400 hover:text-red-600 dark:hover:text-red-400"
               >
                 Очистить очередь
               </button>
@@ -428,30 +503,38 @@ export function Tab2ImportPostings() {
 
       {/* Operations Cards / High-Density Inline Editor */}
       {filteredOperations.length === 0 ? (
-        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] py-12 text-center text-xs text-zinc-500">
+        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] py-12 text-center text-xs text-zinc-500 dark:text-zinc-400">
           Очередь операций пуста. Загрузите файлы (.xlsx, .csv, .txt, .xml, .json) или вставьте текст выше.
         </div>
       ) : (
         <div className="space-y-3">
-          {filteredOperations.map((op, index) => (
-            <OperationEditorCard
-              key={op.id}
-              index={index + 1}
-              op={op}
-              dbConnected={Boolean(db1C)}
-              directoryOptions1C={directoryOptions1C}
-              onUpdate={(updater) => updateOperation(op.id, updater)}
-              onBind1C={(item) => bindOperationTo1CDirectoryItem(op.id, item)}
-              onSelectEgrulCandidate={(cand) =>
-                selectEgrulCandidateForCounterparty(
-                  getCounterpartyGroupKey(op.counterpartyName),
-                  cand
-                )
-              }
-              onRebuild={() => rebuildSingleOperationPostings(op.id)}
-              onRemove={() => removeOperation(op.id)}
-            />
-          ))}
+          {filteredOperations.map((op, index) => {
+            const isGuideOpen =
+              expandedGuides[op.id] !== undefined ? expandedGuides[op.id] : expandAllGuides;
+            return (
+              <OperationEditorCard
+                key={op.id}
+                index={index + 1}
+                op={op}
+                db1C={db1C}
+                dbConnected={Boolean(db1C)}
+                directoryOptions1C={directoryOptions1C}
+                isGuideOpen={isGuideOpen}
+                onToggleGuide={() => toggleSingleGuide(op.id)}
+                onUpdate={(updater) => updateOperation(op.id, updater)}
+                onChangeDocType={(dt) => changeOperationDocType1C(op.id, dt)}
+                onBind1C={(item) => bindOperationTo1CDirectoryItem(op.id, item)}
+                onSelectEgrulCandidate={(cand) =>
+                  selectEgrulCandidateForCounterparty(
+                    getCounterpartyGroupKey(op.counterpartyName),
+                    cand
+                  )
+                }
+                onRebuild={() => rebuildSingleOperationPostings(op.id)}
+                onRemove={() => removeOperation(op.id)}
+              />
+            );
+          })}
         </div>
       )}
     </div>
@@ -461,9 +544,13 @@ export function Tab2ImportPostings() {
 function OperationEditorCard({
   index,
   op,
+  db1C,
   dbConnected,
   directoryOptions1C,
+  isGuideOpen,
+  onToggleGuide,
   onUpdate,
+  onChangeDocType,
   onBind1C,
   onSelectEgrulCandidate,
   onRebuild,
@@ -471,14 +558,62 @@ function OperationEditorCard({
 }: {
   index: number;
   op: QueuedOperation;
+  db1C: import('@/types/accounting').Database1CSnapshot | null;
   dbConnected: boolean;
   directoryOptions1C: import('@/types/accounting').DirectoryAutocompleteOption1C[];
+  isGuideOpen: boolean;
+  onToggleGuide: () => void;
   onUpdate: (updater: (prev: QueuedOperation) => QueuedOperation) => void;
+  onChangeDocType: (dt: DocType1CBP30) => void;
   onBind1C: (item: import('@/types/accounting').DirectoryAutocompleteOption1C) => void;
   onSelectEgrulCandidate: (cand: EgrulCandidate) => void;
   onRebuild: () => void;
   onRemove: () => void;
 }) {
+  const isInternalOp = isInternalWarehouseOrProductionOp(op);
+  const status = deriveReadinessStatus(op);
+  const isCriticalMissingAmount =
+    op.amountMode === 'required_missing' ||
+    (Boolean(op.needsAmount) && op.amountMode !== 'calculated_by_1c');
+
+  const mentorGuide = useMemo(
+    () => op.mentorGuide1C ?? buildOperationMentorGuide1C(op, db1C),
+    [op, db1C]
+  );
+
+  const renderReadinessBadge = () => {
+    if (status === 'critical_error') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-50 dark:bg-red-950/60 border border-red-200 dark:border-red-900/70 text-red-700 dark:text-red-300 text-[11px] font-medium">
+          <AlertTriangle className="w-3 h-3 shrink-0" />
+          {isCriticalMissingAmount ? 'Критическая ошибка: требуется сумма' : 'Критическая ошибка'}
+        </span>
+      );
+    }
+    if (status === 'calculated_1c') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-sky-50 dark:bg-sky-950/50 border border-sky-200/80 dark:border-sky-900/70 text-sky-800 dark:text-sky-300 text-[11px] font-medium">
+          <Calculator className="w-3 h-3 shrink-0" />
+          Расчётная сумма 1С (авто по себестоимости)
+        </span>
+      );
+    }
+    if (status === 'needs_clarification') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-50 dark:bg-amber-950/50 border border-amber-200/80 dark:border-amber-900/70 text-amber-800 dark:text-amber-300 text-[11px] font-medium">
+          <Info className="w-3 h-3 shrink-0" />
+          Рекомендуется уточнить
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200/80 dark:border-emerald-900/60 text-emerald-800 dark:text-emerald-300 text-[11px] font-medium">
+        <CheckCircle2 className="w-3 h-3 shrink-0" />
+        Готово
+      </span>
+    );
+  };
+
   const renderCounterpartyStatusBadge = () => {
     if (!op.counterpartyName) return null;
     if (op.bindings.counterparty.status === 'matched_1c') {
@@ -522,8 +657,8 @@ function OperationEditorCard({
   return (
     <div
       className={`rounded border bg-white dark:bg-[#121418] transition-opacity ${
-        op.needsAmount
-          ? 'border-red-400 dark:border-red-800'
+        status === 'critical_error' && op.includeInProcessing
+          ? 'border-red-300 dark:border-red-800/90'
           : op.includeInProcessing
             ? 'border-zinc-200 dark:border-zinc-800'
             : 'border-zinc-200/70 dark:border-zinc-800/60 opacity-65'
@@ -531,7 +666,7 @@ function OperationEditorCard({
     >
       {/* Top Document Header Row */}
       <div className="px-3.5 py-2.5 border-b border-zinc-100 dark:border-zinc-800/80 flex flex-wrap items-center justify-between gap-2 bg-zinc-50/60 dark:bg-zinc-900/30">
-        <div className="flex flex-wrap items-center gap-2.5 text-xs">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
           <label className="inline-flex items-center gap-1.5 cursor-pointer font-medium text-zinc-800 dark:text-zinc-200">
             <input
               type="checkbox"
@@ -541,7 +676,9 @@ function OperationEditorCard({
               }
               className="rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
             />
-            <span className="font-mono text-zinc-500">#{index}</span>
+            <span className="font-mono tabular-nums text-zinc-500 dark:text-zinc-400">
+              #{index}
+            </span>
           </label>
 
           <input
@@ -549,7 +686,7 @@ function OperationEditorCard({
             aria-label="Дата операции"
             value={op.date}
             onChange={(e) => onUpdate((prev) => ({ ...prev, date: e.target.value }))}
-            className="px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono tabular-nums text-xs"
+            className="px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-mono tabular-nums text-xs"
           />
 
           <input
@@ -557,44 +694,44 @@ function OperationEditorCard({
             value={op.docNumber}
             onChange={(e) => onUpdate((prev) => ({ ...prev, docNumber: e.target.value }))}
             placeholder="№ док."
-            className="w-24 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono text-xs"
+            className="w-20 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-mono text-xs"
           />
 
           <select
             aria-label="Вид документа 1С"
             value={op.docType1C}
-            onChange={(e) =>
-              onUpdate((prev) => ({
-                ...prev,
-                docType1C: e.target.value as DocType1CBP30,
-              }))
-            }
-            className="px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-medium text-xs text-zinc-900 dark:text-zinc-100"
+            onChange={(e) => onChangeDocType(e.target.value as DocType1CBP30)}
+            className="max-w-xs sm:max-w-md px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-medium text-xs text-zinc-900 dark:text-zinc-100"
           >
             {DOC_TYPES_1C.map((dt) => (
               <option key={dt} value={dt}>
-                1С: {dt}
+                1С: {dt} — {DOC_TYPE_LABELS_1C[dt]}
               </option>
             ))}
           </select>
 
-          <span className="text-[11px] text-zinc-400 font-mono truncate max-w-[200px]">
-            {op.sourceFileName}
-            {op.rowKey ? ` · [${op.rowKey}]` : ''}
-          </span>
-
-          {op.needsAmount && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-100 dark:bg-red-950/70 text-red-700 dark:text-red-300 text-[11px] font-semibold">
-              <AlertTriangle className="w-3 h-3" />
-              Требуется сумма
+          {op.documentSubKind1C && (
+            <span className="px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 text-[10px] font-medium">
+              {op.documentSubKind1C}
             </span>
           )}
 
-          {!op.needsAmount && op.amountCalculationNote && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 text-[10px] font-medium">
-              {op.amountCalculationNote}
+          {renderReadinessBadge()}
+
+          {op.amountMode === 'from_stock_balance' && op.stockSourceNote && (
+            <span className="text-[10px] font-medium text-emerald-700 dark:text-emerald-400">
+              {op.stockSourceNote}
             </span>
           )}
+
+          {!isInternalOp &&
+            op.amountMode !== 'calculated_by_1c' &&
+            !isCriticalMissingAmount &&
+            op.amountCalculationNote && (
+              <span className="px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 text-[10px] font-medium">
+                {op.amountCalculationNote}
+              </span>
+            )}
 
           {op.isDuplicateIn1C && (
             <span
@@ -608,14 +745,18 @@ function OperationEditorCard({
         </div>
 
         <div className="flex items-center gap-1.5">
+          <span className="hidden xl:inline text-[11px] text-zinc-400 font-mono truncate max-w-[160px]">
+            {op.sourceFileName}
+            {op.rowKey ? ` · [${op.rowKey}]` : ''}
+          </span>
           <button
             type="button"
             onClick={onRebuild}
-            title="Пересчитать автопроводки и сопоставление со справочниками 1С"
+            title="Пересчитать автопроводки, партии списания и инструкцию 1С"
             className="inline-flex items-center gap-1 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-[11px] font-medium text-zinc-700 dark:text-zinc-300"
           >
             <RefreshCcw className="w-3 h-3" />
-            Пересчитать проводки
+            Пересчитать
           </button>
           <button
             type="button"
@@ -628,261 +769,600 @@ function OperationEditorCard({
         </div>
       </div>
 
-      {/* Requisites & Amount Grid */}
-      <div className="p-3.5 grid grid-cols-1 lg:grid-cols-12 gap-3 text-xs">
-        <div className="lg:col-span-5 space-y-2">
-          <div>
-            <label className="block text-[11px] text-zinc-500 mb-0.5">
-              Содержание / Назначение платежа
-            </label>
-            <input
-              type="text"
-              value={op.description}
-              onChange={(e) =>
-                onUpdate((prev) => ({ ...prev, description: e.target.value }))
-              }
-              className="w-full px-2.5 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs"
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
+      {/* Contextual Requisites Grid — Internal Warehouse/Production/OS vs External Settlement */}
+      {isInternalOp ? (
+        <div className="p-3.5 grid grid-cols-1 lg:grid-cols-12 gap-3 text-xs">
+          {/* Column 1: Description, Item, Quantity, Material/Asset Account */}
+          <div className="lg:col-span-5 space-y-2">
             <div>
-              <label className="block text-[11px] text-zinc-500 mb-0.5">
-                Номенклатура / Услуга
+              <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                Содержание хозяйственной операции
               </label>
               <input
                 type="text"
-                value={op.nomenclatureName}
+                value={op.description}
                 onChange={(e) =>
-                  onUpdate((prev) => ({ ...prev, nomenclatureName: e.target.value }))
+                  onUpdate((prev) => ({ ...prev, description: e.target.value }))
                 }
-                placeholder="Наименование ТМЦ / услуги"
-                className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs"
+                className="w-full px-2.5 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-xs"
               />
             </div>
-            <div>
-              <label className="block text-[11px] text-zinc-500 mb-0.5">
-                Склад / Статья затрат
-              </label>
-              <input
-                type="text"
-                value={op.warehouseName || op.expenseItemName}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  onUpdate((prev) =>
-                    ['purchase_goods', 'purchase_materials', 'sale_goods'].includes(prev.category)
-                      ? { ...prev, warehouseName: v }
-                      : { ...prev, expenseItemName: v }
-                  );
-                }}
-                placeholder="Склад или статья затрат"
-                className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs"
-              />
-            </div>
-          </div>
-        </div>
 
-        {/* Counterparty & 1C / EGRUL Binding Status */}
-        <div className="lg:col-span-4 space-y-2">
-          <div>
-            <div className="flex items-center justify-between gap-2 mb-0.5">
-              <label className="text-[11px] text-zinc-500">Контрагент</label>
-              {renderCounterpartyStatusBadge()}
-            </div>
-            <input
-              type="text"
-              list="db1c-counterparties-list"
-              value={op.counterpartyName}
-              onChange={(e) => {
-                const nextVal = e.target.value;
-                const exact1C = directoryOptions1C.find(
-                  (d) => d.name.toLowerCase() === nextVal.trim().toLowerCase()
-                );
-                if (exact1C) {
-                  onBind1C(exact1C);
-                  return;
-                }
-                onUpdate((prev) => ({ ...prev, counterpartyName: nextVal }));
-              }}
-              onBlur={(e) => {
-                const trimmed = e.target.value.trim();
-                if (trimmed.length > 0 && trimmed.length < 2) {
-                  onUpdate((prev) => ({
-                    ...prev,
-                    counterpartyName: '',
-                    counterpartyInn: '',
-                    counterpartyKpp: '',
-                    bindings: {
-                      ...prev.bindings,
-                      counterparty: { status: 'missing', note: 'Не указан контрагент' },
-                    },
-                  }));
-                }
-              }}
-              placeholder="ООО «...» / ИП / ФИО учредителя..."
-              className="w-full px-2.5 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs"
-            />
-          </div>
-
-          <div className="grid grid-cols-3 gap-2">
-            <div>
-              <label className="block text-[11px] text-zinc-500 mb-0.5">ИНН</label>
-              <input
-                type="text"
-                value={op.counterpartyInn}
-                onChange={(e) =>
-                  onUpdate((prev) => ({
-                    ...prev,
-                    counterpartyInn: e.target.value.replace(/\D/g, ''),
-                    counterpartySource: 'manual',
-                  }))
-                }
-                placeholder="ИНН"
-                className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono tabular-nums text-xs"
-              />
-            </div>
-            <div>
-              <label className="block text-[11px] text-zinc-500 mb-0.5">КПП</label>
-              <input
-                type="text"
-                value={op.counterpartyKpp}
-                onChange={(e) =>
-                  onUpdate((prev) => ({
-                    ...prev,
-                    counterpartyKpp: e.target.value.replace(/\D/g, ''),
-                    counterpartySource: 'manual',
-                  }))
-                }
-                placeholder="КПП"
-                className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono tabular-nums text-xs"
-              />
-            </div>
-            <div>
-              <label className="block text-[11px] text-zinc-500 mb-0.5">Договор</label>
-              <input
-                type="text"
-                value={op.contractName}
-                onChange={(e) =>
-                  onUpdate((prev) => ({ ...prev, contractName: e.target.value }))
-                }
-                placeholder="Договор"
-                className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs"
-              />
+            <div className="grid grid-cols-12 gap-2">
+              <div className="col-span-6">
+                <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                  {op.category === 'os_commissioning'
+                    ? 'Объект основных средств'
+                    : op.category === 'production_output'
+                      ? 'Готовая продукция'
+                      : op.category === 'workwear_issue'
+                        ? 'Спецодежда / Инвентарь'
+                        : 'Номенклатура (ТМЦ)'}
+                </label>
+                <input
+                  type="text"
+                  value={op.nomenclatureName}
+                  onChange={(e) =>
+                    onUpdate((prev) => ({ ...prev, nomenclatureName: e.target.value }))
+                  }
+                  placeholder="Например: Кирпич / Спецодежда"
+                  className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-xs"
+                />
+              </div>
+              <div className="col-span-3">
+                <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                  Кол-во
+                </label>
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={op.quantity ?? 1}
+                  onChange={(e) => {
+                    const q = parseRussianNumber(e.target.value);
+                    onUpdate((prev) => ({ ...prev, quantity: q > 0 ? q : 1 }));
+                  }}
+                  className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-mono tabular-nums text-xs"
+                />
+              </div>
+              <div className="col-span-3">
+                <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                  Счёт ТМЦ
+                </label>
+                <input
+                  type="text"
+                  list="rsbu-accounts-list"
+                  value={
+                    op.materialAccount ||
+                    (op.category === 'os_commissioning'
+                      ? '08.04.1'
+                      : op.category === 'production_output'
+                        ? '43'
+                        : op.entries[0]?.credit || '10.01')
+                  }
+                  onChange={(e) =>
+                    onUpdate((prev) => ({
+                      ...prev,
+                      materialAccount: e.target.value.trim(),
+                    }))
+                  }
+                  className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-mono font-semibold text-xs"
+                />
+              </div>
             </div>
           </div>
 
-          {(op.counterpartyBik || op.counterpartyBankAccount) && (
-            <div className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400 truncate">
-              Банк контрагента:{' '}
-              {op.counterpartyBankAccount ? `р/с ${op.counterpartyBankAccount}` : ''}
-              {op.counterpartyBik ? ` · БИК ${op.counterpartyBik}` : ''}
-              {op.counterpartyBankName ? ` (${op.counterpartyBankName})` : ''}
-            </div>
-          )}
-
-          {op.egrulCandidates && op.egrulCandidates.length > 1 && (
-            <div>
-              <select
-                aria-label="Выбор филиала из ЕГРЮЛ"
-                value={`${op.counterpartyInn}:${op.counterpartyKpp}`}
-                onChange={(e) => {
-                  const found = op.egrulCandidates?.find(
-                    (c) => `${c.inn}:${c.kpp}` === e.target.value
-                  );
-                  if (found) onSelectEgrulCandidate(found);
-                }}
-                className="w-full px-2 py-1 rounded border border-sky-300 dark:border-sky-800 bg-sky-50/50 dark:bg-sky-950/30 text-[11px] font-mono"
-              >
-                {op.egrulCandidates.map((c, idx) => (
-                  <option key={`${c.inn}-${c.kpp}-${idx}`} value={`${c.inn}:${c.kpp}`}>
-                    ЕГРЮЛ: ИНН {c.inn}
-                    {c.kpp ? ` / КПП ${c.kpp}` : ''} — {c.region || c.address || c.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-        </div>
-
-        {/* Amount & VAT Controls */}
-        <div className="lg:col-span-3 space-y-2">
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="block text-[11px] text-zinc-500 mb-0.5">Сумма документа, ₽</label>
-              <input
-                type="number"
-                step="0.01"
-                value={op.amount}
-                onChange={(e) => {
-                  const nextAmt = parseRussianNumber(e.target.value);
-                  onUpdate((prev) => ({
-                    ...prev,
-                    amount: nextAmt,
-                    needsAmount: nextAmt < 0.01 ? true : undefined,
-                  }));
-                }}
-                className={`w-full px-2.5 py-1.5 rounded border bg-white dark:bg-zinc-900 font-mono tabular-nums font-semibold text-right text-xs ${
-                  op.needsAmount
-                    ? 'border-red-500 dark:border-red-700'
-                    : 'border-zinc-200 dark:border-zinc-700'
-                }`}
-              />
-            </div>
-            <div>
-              <label className="block text-[11px] text-zinc-500 mb-0.5">НДС</label>
-              <select
-                value={op.vatRule === 'none' ? 'none' : `${op.vatRate}_${op.vatRule}`}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  onUpdate((prev) => {
-                    if (val === 'none') {
-                      return { ...prev, vatRule: 'none', vatRate: 0, vatAmount: 0 };
+          {/* Column 2: Contextual Production / Employee (MOL) / Warehouse Analytics */}
+          <div className="lg:col-span-4 space-y-2">
+            {op.category === 'workwear_issue' ? (
+              <>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                      Сотрудник (МОЛ / Физлицо)
+                    </label>
+                    <input
+                      type="text"
+                      list="db1c-counterparties-list"
+                      value={op.employeeName}
+                      onChange={(e) =>
+                        onUpdate((prev) => ({
+                          ...prev,
+                          employeeName: e.target.value,
+                          entries: prev.entries.map((en) =>
+                            en.isOffBalance
+                              ? {
+                                  ...en,
+                                  debitSubconto: [prev.nomenclatureName, e.target.value]
+                                    .filter(Boolean)
+                                    .join(' / '),
+                                }
+                              : en
+                          ),
+                        }))
+                      }
+                      placeholder="ФИО или должность (Каменщик)"
+                      className="w-full px-2 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                      Склад выдачи
+                    </label>
+                    <input
+                      type="text"
+                      value={op.warehouseName}
+                      onChange={(e) =>
+                        onUpdate((prev) => ({ ...prev, warehouseName: e.target.value }))
+                      }
+                      placeholder="Основной склад"
+                      className="w-full px-2 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-xs"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                      Счёт затрат (ФСБУ 5/2019)
+                    </label>
+                    <select
+                      value={op.costAccount || '20.01'}
+                      onChange={(e) =>
+                        onUpdate((prev) => ({ ...prev, costAccount: e.target.value }))
+                      }
+                      className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-mono text-xs"
+                    >
+                      {COST_ACCOUNT_OPTIONS.map((opt) => (
+                        <option key={opt.code} value={opt.code}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                      Забалансовый контроль
+                    </label>
+                    <div className="px-2 py-1 rounded border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/70 font-mono text-xs text-zinc-800 dark:text-zinc-200">
+                      Дт {op.offBalanceAccount || 'МЦ.02'} · без НДС
+                    </div>
+                  </div>
+                </div>
+              </>
+            ) : op.category === 'warehouse_transfer' ? (
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                    Склад-отправитель
+                  </label>
+                  <input
+                    type="text"
+                    value={op.warehouseName}
+                    onChange={(e) =>
+                      onUpdate((prev) => ({ ...prev, warehouseName: e.target.value }))
                     }
-                    const [rateStr, ruleStr] = val.split('_');
-                    const rate = Number(rateStr);
-                    const rule = ruleStr as 'included' | 'on_top';
-                    const vatAmt =
-                      rule === 'included'
-                        ? Math.round(((prev.amount * rate) / (100 + rate)) * 100) / 100
-                        : Math.round(((prev.amount * rate) / 100) * 100) / 100;
-                    return { ...prev, vatRate: rate, vatRule: rule, vatAmount: vatAmt };
-                  });
-                }}
-                className="w-full px-2 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs"
-              >
-                <option value="20_included">В т.ч. НДС 20%</option>
-                <option value="20_on_top">Сверху НДС 20%</option>
-                <option value="10_included">В т.ч. НДС 10%</option>
-                <option value="none">Без НДС</option>
-              </select>
+                    placeholder="Основной склад"
+                    className="w-full px-2 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                    Склад-получатель
+                  </label>
+                  <input
+                    type="text"
+                    value={op.warehouseToName || ''}
+                    onChange={(e) =>
+                      onUpdate((prev) => ({ ...prev, warehouseToName: e.target.value }))
+                    }
+                    placeholder="Цеховой / Объектный склад"
+                    className="w-full px-2 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-xs"
+                  />
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                      Счёт затрат
+                    </label>
+                    <select
+                      value={op.costAccount || '20.01'}
+                      onChange={(e) =>
+                        onUpdate((prev) => ({ ...prev, costAccount: e.target.value }))
+                      }
+                      className="w-full px-2 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-mono text-xs"
+                    >
+                      {COST_ACCOUNT_OPTIONS.map((opt) => (
+                        <option key={opt.code} value={opt.code}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                      Склад
+                    </label>
+                    <input
+                      type="text"
+                      value={op.warehouseName}
+                      onChange={(e) =>
+                        onUpdate((prev) => ({ ...prev, warehouseName: e.target.value }))
+                      }
+                      placeholder="Основной склад"
+                      className="w-full px-2 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-xs"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                      Номенкл. группа / Объект
+                    </label>
+                    <input
+                      type="text"
+                      value={op.nomenclatureGroupName}
+                      onChange={(e) =>
+                        onUpdate((prev) => ({
+                          ...prev,
+                          nomenclatureGroupName: e.target.value,
+                        }))
+                      }
+                      placeholder="Производство трубы"
+                      className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                      Статья затрат
+                    </label>
+                    <input
+                      type="text"
+                      value={op.expenseItemName}
+                      onChange={(e) =>
+                        onUpdate((prev) => ({ ...prev, expenseItemName: e.target.value }))
+                      }
+                      placeholder="Материальные расходы"
+                      className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-xs"
+                    />
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Column 3: Cost / Stock Valuation (Zero VAT, Zero External Counterparty) */}
+          <div className="lg:col-span-3 space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <label className="block text-[11px] text-zinc-500 dark:text-zinc-400">
+                Себестоимость списания, ₽
+              </label>
+              <span className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400">
+                Без НДС (внутр.)
+              </span>
+            </div>
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              value={op.amount}
+              onChange={(e) => {
+                const nextAmt = parseRussianNumber(e.target.value);
+                onUpdate((prev) => ({
+                  ...prev,
+                  amount: nextAmt,
+                  amountMode: nextAmt >= 0.01 ? 'explicit' : 'calculated_by_1c',
+                  readinessStatus: nextAmt >= 0.01 ? 'ready' : 'calculated_1c',
+                  needsAmount: undefined,
+                  entries: prev.entries.map((en) =>
+                    en.isOffBalance ? en : { ...en, amount: nextAmt }
+                  ),
+                }));
+              }}
+              placeholder="Авторасчёт в 1С"
+              className="w-full px-2.5 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-mono tabular-nums font-semibold text-right text-xs"
+            />
+            <p className="text-[11px] leading-snug text-zinc-500 dark:text-zinc-400">
+              {op.amountMode === 'calculated_by_1c'
+                ? `В 1С списывается количество (${op.quantity ?? 1}), а сумма рассчитывается автоматически по партиям счёта ${op.materialAccount || '10'} (ФИФО / по средней).`
+                : op.stockSourceNote ||
+                  'Себестоимость определена по партии поступления без НДС (счёт 60 и НДС не участвуют).'}
+            </p>
+          </div>
+        </div>
+      ) : (
+        /* External Settlement / Bank / Tax / Payroll Layout */
+        <div className="p-3.5 grid grid-cols-1 lg:grid-cols-12 gap-3 text-xs">
+          <div className="lg:col-span-5 space-y-2">
+            <div>
+              <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                Содержание / Назначение платежа
+              </label>
+              <input
+                type="text"
+                value={op.description}
+                onChange={(e) =>
+                  onUpdate((prev) => ({ ...prev, description: e.target.value }))
+                }
+                className="w-full px-2.5 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-xs"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                  {op.category === 'purchase_equipment'
+                    ? 'Оборудование (счёт 08.04.1)'
+                    : 'Номенклатура / Услуга'}
+                </label>
+                <input
+                  type="text"
+                  value={op.nomenclatureName}
+                  onChange={(e) =>
+                    onUpdate((prev) => ({ ...prev, nomenclatureName: e.target.value }))
+                  }
+                  placeholder="Наименование ТМЦ / услуги"
+                  className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                  Склад / Статья затрат
+                </label>
+                <input
+                  type="text"
+                  value={op.warehouseName || op.expenseItemName}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    onUpdate((prev) =>
+                      [
+                        'purchase_goods',
+                        'purchase_materials',
+                        'purchase_equipment',
+                        'sale_goods',
+                      ].includes(prev.category)
+                        ? { ...prev, warehouseName: v }
+                        : { ...prev, expenseItemName: v }
+                    );
+                  }}
+                  placeholder="Склад или статья затрат"
+                  className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-xs"
+                />
+              </div>
             </div>
           </div>
 
-          <div className="flex items-center justify-between pt-1">
-            <label className="inline-flex items-center gap-1.5 cursor-pointer text-xs text-zinc-700 dark:text-zinc-300">
+          {/* Counterparty & 1C / EGRUL Binding Status */}
+          <div className="lg:col-span-4 space-y-2">
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-0.5">
+                <label className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                  {op.category === 'tax_payment'
+                    ? 'Получатель налога / взноса'
+                    : op.category === 'founder_contribution'
+                      ? 'Учредитель (счёт 75.01)'
+                      : 'Контрагент'}
+                </label>
+                {renderCounterpartyStatusBadge()}
+              </div>
               <input
-                type="checkbox"
-                checked={op.hasInvoiceSF}
-                onChange={(e) =>
-                  onUpdate((prev) => ({ ...prev, hasInvoiceSF: e.target.checked }))
-                }
-                className="rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                type="text"
+                list="db1c-counterparties-list"
+                value={op.counterpartyName}
+                onChange={(e) => {
+                  const nextVal = e.target.value;
+                  const exact1C = directoryOptions1C.find(
+                    (d) => d.name.toLowerCase() === nextVal.trim().toLowerCase()
+                  );
+                  if (exact1C) {
+                    onBind1C(exact1C);
+                    return;
+                  }
+                  onUpdate((prev) => ({ ...prev, counterpartyName: nextVal }));
+                }}
+                onBlur={(e) => {
+                  const trimmed = e.target.value.trim();
+                  if (trimmed.length > 0 && trimmed.length < 2) {
+                    onUpdate((prev) => ({
+                      ...prev,
+                      counterpartyName: '',
+                      counterpartyInn: '',
+                      counterpartyKpp: '',
+                      bindings: {
+                        ...prev.bindings,
+                        counterparty: doesOperationRequireCounterparty(prev.category)
+                          ? { status: 'missing', note: 'Не указан контрагент' }
+                          : { status: 'not_required' },
+                      },
+                    }));
+                  }
+                }}
+                placeholder="ООО «...» / ИП / ФИО учредителя..."
+                className="w-full px-2.5 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-xs"
               />
-              <span>Счёт-фактура / УПД</span>
-            </label>
-            <span className="font-mono tabular-nums text-[11px] text-zinc-500">
-              НДС: {op.vatAmount.toFixed(2)} ₽
-            </span>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2">
+              <div>
+                <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                  ИНН
+                </label>
+                <input
+                  type="text"
+                  value={op.counterpartyInn}
+                  onChange={(e) =>
+                    onUpdate((prev) => ({
+                      ...prev,
+                      counterpartyInn: e.target.value.replace(/\D/g, ''),
+                      counterpartySource: 'manual',
+                    }))
+                  }
+                  placeholder="ИНН"
+                  className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-mono tabular-nums text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                  КПП
+                </label>
+                <input
+                  type="text"
+                  value={op.counterpartyKpp}
+                  onChange={(e) =>
+                    onUpdate((prev) => ({
+                      ...prev,
+                      counterpartyKpp: e.target.value.replace(/\D/g, ''),
+                      counterpartySource: 'manual',
+                    }))
+                  }
+                  placeholder="КПП"
+                  className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-mono tabular-nums text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                  Договор
+                </label>
+                <input
+                  type="text"
+                  value={op.contractName}
+                  onChange={(e) =>
+                    onUpdate((prev) => ({ ...prev, contractName: e.target.value }))
+                  }
+                  placeholder="Договор"
+                  className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-xs"
+                />
+              </div>
+            </div>
+
+            {(op.counterpartyBik || op.counterpartyBankAccount) && (
+              <div className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400 truncate">
+                Банк контрагента:{' '}
+                {op.counterpartyBankAccount ? `р/с ${op.counterpartyBankAccount}` : ''}
+                {op.counterpartyBik ? ` · БИК ${op.counterpartyBik}` : ''}
+                {op.counterpartyBankName ? ` (${op.counterpartyBankName})` : ''}
+              </div>
+            )}
+
+            {op.egrulCandidates && op.egrulCandidates.length > 1 && (
+              <div>
+                <select
+                  aria-label="Выбор филиала из ЕГРЮЛ"
+                  value={`${op.counterpartyInn}:${op.counterpartyKpp}`}
+                  onChange={(e) => {
+                    const found = op.egrulCandidates?.find(
+                      (c) => `${c.inn}:${c.kpp}` === e.target.value
+                    );
+                    if (found) onSelectEgrulCandidate(found);
+                  }}
+                  className="w-full px-2 py-1 rounded border border-sky-300 dark:border-sky-800 bg-sky-50/50 dark:bg-sky-950/30 text-zinc-900 dark:text-zinc-100 text-[11px] font-mono"
+                >
+                  {op.egrulCandidates.map((c, idx) => (
+                    <option key={`${c.inn}-${c.kpp}-${idx}`} value={`${c.inn}:${c.kpp}`}>
+                      ЕГРЮЛ: ИНН {c.inn}
+                      {c.kpp ? ` / КПП ${c.kpp}` : ''} — {c.region || c.address || c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+
+          {/* Amount & VAT Controls */}
+          <div className="lg:col-span-3 space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                  Сумма документа, ₽
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={op.amount}
+                  onChange={(e) => {
+                    const nextAmt = parseRussianNumber(e.target.value);
+                    onUpdate((prev) => ({
+                      ...prev,
+                      amount: nextAmt,
+                      amountMode: nextAmt < 0.01 ? 'required_missing' : 'explicit',
+                      readinessStatus: nextAmt < 0.01 ? 'critical_error' : 'ready',
+                      needsAmount: nextAmt < 0.01 ? true : undefined,
+                    }));
+                  }}
+                  className={`w-full px-2.5 py-1.5 rounded border bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-mono tabular-nums font-semibold text-right text-xs ${
+                    isCriticalMissingAmount
+                      ? 'border-red-500 dark:border-red-700'
+                      : 'border-zinc-200 dark:border-zinc-700'
+                  }`}
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-0.5">
+                  НДС
+                </label>
+                <select
+                  value={op.vatRule === 'none' ? 'none' : `${op.vatRate}_${op.vatRule}`}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    onUpdate((prev) => {
+                      if (val === 'none') {
+                        return { ...prev, vatRule: 'none', vatRate: 0, vatAmount: 0 };
+                      }
+                      const [rateStr, ruleStr] = val.split('_');
+                      const rate = Number(rateStr);
+                      const rule = ruleStr as 'included' | 'on_top';
+                      const vatAmt =
+                        rule === 'included'
+                          ? Math.round(((prev.amount * rate) / (100 + rate)) * 100) / 100
+                          : Math.round(((prev.amount * rate) / 100) * 100) / 100;
+                      return { ...prev, vatRate: rate, vatRule: rule, vatAmount: vatAmt };
+                    });
+                  }}
+                  className="w-full px-2 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-xs"
+                >
+                  <option value="20_included">В т.ч. НДС 20%</option>
+                  <option value="20_on_top">Сверху НДС 20%</option>
+                  <option value="10_included">В т.ч. НДС 10%</option>
+                  <option value="none">Без НДС</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-1">
+              <label className="inline-flex items-center gap-1.5 cursor-pointer text-xs text-zinc-700 dark:text-zinc-300">
+                <input
+                  type="checkbox"
+                  checked={op.hasInvoiceSF}
+                  onChange={(e) =>
+                    onUpdate((prev) => ({ ...prev, hasInvoiceSF: e.target.checked }))
+                  }
+                  className="rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                />
+                <span>Счёт-фактура / УПД</span>
+              </label>
+              <span className="font-mono tabular-nums text-[11px] text-zinc-500 dark:text-zinc-400">
+                НДС: {op.vatAmount.toFixed(2)} ₽
+              </span>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* Inline Editable Accounting Postings Table */}
       <div className="border-t border-zinc-100 dark:border-zinc-800/80 px-3.5 py-2.5 bg-zinc-50/40 dark:bg-zinc-950/30">
-        <div className="flex items-center justify-between mb-1.5">
-          <span className="text-[11px] font-medium text-zinc-500">
-            Бухгалтерские проводки (РСБУ 1С БП 3.0) — строк: {op.entries.length}
-          </span>
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+              Бухгалтерские проводки (РСБУ 1С:БП 3.0) — строк: {op.entries.length}
+            </span>
+            {op.entries.some((e) => e.isOffBalance || isOffBalanceAccountCode(e.debit)) && (
+              <span className="px-1.5 py-0.5 rounded bg-zinc-200/70 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 font-mono text-[10px]">
+                + забалансовый учёт МЦ
+              </span>
+            )}
+          </div>
           <button
             type="button"
             onClick={() =>
@@ -892,8 +1372,8 @@ function OperationEditorCard({
                   ...prev.entries,
                   {
                     id: `${prev.id}-e${Date.now()}`,
-                    debit: '26',
-                    credit: '60.01',
+                    debit: isInternalOp ? prev.costAccount || '20.01' : '26',
+                    credit: isInternalOp ? prev.materialAccount || '10.01' : '60.01',
                     debitSubconto: '',
                     creditSubconto: '',
                     amount: prev.amount,
@@ -910,136 +1390,332 @@ function OperationEditorCard({
         </div>
 
         <div className="space-y-1.5">
-          {op.entries.map((entry) => (
-            <div
-              key={entry.id}
-              className="grid grid-cols-12 gap-2 items-center text-xs"
-            >
-              <div className="col-span-2 sm:col-span-1">
-                <input
-                  type="text"
-                  list="rsbu-accounts-list"
-                  aria-label="Счёт Дебета"
-                  value={entry.debit}
-                  onChange={(e) =>
-                    onUpdate((prev) => ({
-                      ...prev,
-                      entries: prev.entries.map((x) =>
-                        x.id === entry.id ? { ...x, debit: e.target.value.trim() } : x
-                      ),
-                    }))
-                  }
-                  placeholder="Дт"
-                  className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono font-semibold text-xs"
-                />
-              </div>
+          {op.entries.map((entry) => {
+            const isOffBal =
+              Boolean(entry.isOffBalance) ||
+              isOffBalanceAccountCode(entry.debit) ||
+              isOffBalanceAccountCode(entry.credit);
+            const showAuto1CHint =
+              op.amountMode === 'calculated_by_1c' && entry.amount < 0.01;
 
-              <div className="col-span-2 sm:col-span-1">
-                <input
-                  type="text"
-                  list="rsbu-accounts-list"
-                  aria-label="Счёт Кредита"
-                  value={entry.credit}
-                  onChange={(e) =>
-                    onUpdate((prev) => ({
-                      ...prev,
-                      entries: prev.entries.map((x) =>
-                        x.id === entry.id ? { ...x, credit: e.target.value.trim() } : x
-                      ),
-                    }))
-                  }
-                  placeholder="Кт"
-                  className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono font-semibold text-xs"
-                />
-              </div>
-
-              <div className="col-span-4 sm:col-span-3">
-                <input
-                  type="text"
-                  value={entry.debitSubconto}
-                  onChange={(e) =>
-                    onUpdate((prev) => ({
-                      ...prev,
-                      entries: prev.entries.map((x) =>
-                        x.id === entry.id ? { ...x, debitSubconto: e.target.value } : x
-                      ),
-                    }))
-                  }
-                  placeholder="Субконто Дт"
-                  className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs text-zinc-600 dark:text-zinc-300"
-                />
-              </div>
-
-              <div className="hidden sm:block sm:col-span-3">
-                <input
-                  type="text"
-                  value={entry.creditSubconto}
-                  onChange={(e) =>
-                    onUpdate((prev) => ({
-                      ...prev,
-                      entries: prev.entries.map((x) =>
-                        x.id === entry.id ? { ...x, creditSubconto: e.target.value } : x
-                      ),
-                    }))
-                  }
-                  placeholder="Субконто Кт"
-                  className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs text-zinc-600 dark:text-zinc-300"
-                />
-              </div>
-
-              <div className="hidden sm:block sm:col-span-2">
-                <input
-                  type="text"
-                  value={entry.description}
-                  onChange={(e) =>
-                    onUpdate((prev) => ({
-                      ...prev,
-                      entries: prev.entries.map((x) =>
-                        x.id === entry.id ? { ...x, description: e.target.value } : x
-                      ),
-                    }))
-                  }
-                  placeholder="Содержание проводки"
-                  className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs text-zinc-600 dark:text-zinc-300"
-                />
-              </div>
-
-              <div className="col-span-4 sm:col-span-2 flex items-center gap-1">
-                <input
-                  type="number"
-                  step="0.01"
-                  value={entry.amount}
-                  onChange={(e) =>
-                    onUpdate((prev) => ({
-                      ...prev,
-                      entries: prev.entries.map((x) =>
-                        x.id === entry.id
-                          ? { ...x, amount: parseRussianNumber(e.target.value) }
-                          : x
-                      ),
-                    }))
-                  }
-                  className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono tabular-nums text-right font-medium text-xs"
-                />
-                {op.entries.length > 1 && (
-                  <button
-                    type="button"
-                    onClick={() =>
+            return (
+              <div
+                key={entry.id}
+                className="grid grid-cols-12 gap-2 items-center text-xs"
+              >
+                <div className="col-span-2 sm:col-span-1">
+                  <input
+                    type="text"
+                    list="rsbu-accounts-list"
+                    aria-label="Счёт Дебета"
+                    value={entry.debit}
+                    onChange={(e) =>
                       onUpdate((prev) => ({
                         ...prev,
-                        entries: prev.entries.filter((x) => x.id !== entry.id),
+                        entries: prev.entries.map((x) =>
+                          x.id === entry.id ? { ...x, debit: e.target.value.trim() } : x
+                        ),
                       }))
                     }
-                    className="p-1 text-zinc-400 hover:text-red-600"
-                    title="Удалить строку проводки"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
+                    placeholder="Дт"
+                    className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-mono font-semibold text-xs"
+                  />
+                </div>
+
+                <div className="col-span-2 sm:col-span-1">
+                  {isOffBal && !entry.credit ? (
+                    <div
+                      title="Односторонняя забалансовая запись (второй балансовый счёт не указывается)"
+                      className="w-full px-1.5 py-1 rounded border border-dashed border-zinc-300 dark:border-zinc-700 bg-zinc-100/70 dark:bg-zinc-900/60 font-mono text-[10px] text-center text-zinc-500 dark:text-zinc-400"
+                    >
+                      забаланс
+                    </div>
+                  ) : (
+                    <input
+                      type="text"
+                      list="rsbu-accounts-list"
+                      aria-label="Счёт Кредита"
+                      value={entry.credit}
+                      onChange={(e) =>
+                        onUpdate((prev) => ({
+                          ...prev,
+                          entries: prev.entries.map((x) =>
+                            x.id === entry.id ? { ...x, credit: e.target.value.trim() } : x
+                          ),
+                        }))
+                      }
+                      placeholder="Кт"
+                      className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-mono font-semibold text-xs"
+                    />
+                  )}
+                </div>
+
+                <div className="col-span-4 sm:col-span-3">
+                  <input
+                    type="text"
+                    value={entry.debitSubconto}
+                    onChange={(e) =>
+                      onUpdate((prev) => ({
+                        ...prev,
+                        entries: prev.entries.map((x) =>
+                          x.id === entry.id ? { ...x, debitSubconto: e.target.value } : x
+                        ),
+                      }))
+                    }
+                    placeholder="Субконто Дт"
+                    className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs text-zinc-700 dark:text-zinc-300"
+                  />
+                </div>
+
+                <div className="hidden sm:block sm:col-span-3">
+                  <input
+                    type="text"
+                    value={entry.creditSubconto}
+                    onChange={(e) =>
+                      onUpdate((prev) => ({
+                        ...prev,
+                        entries: prev.entries.map((x) =>
+                          x.id === entry.id ? { ...x, creditSubconto: e.target.value } : x
+                        ),
+                      }))
+                    }
+                    placeholder={isOffBal ? 'Односторонний учёт МЦ' : 'Субконто Кт'}
+                    className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs text-zinc-700 dark:text-zinc-300"
+                  />
+                </div>
+
+                <div className="hidden sm:block sm:col-span-2">
+                  <input
+                    type="text"
+                    value={entry.description}
+                    onChange={(e) =>
+                      onUpdate((prev) => ({
+                        ...prev,
+                        entries: prev.entries.map((x) =>
+                          x.id === entry.id ? { ...x, description: e.target.value } : x
+                        ),
+                      }))
+                    }
+                    placeholder="Содержание проводки"
+                    className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs text-zinc-700 dark:text-zinc-300"
+                  />
+                </div>
+
+                <div className="col-span-4 sm:col-span-2 flex items-center gap-1">
+                  <div className="relative w-full">
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={entry.amount}
+                      onChange={(e) =>
+                        onUpdate((prev) => ({
+                          ...prev,
+                          entries: prev.entries.map((x) =>
+                            x.id === entry.id
+                              ? { ...x, amount: parseRussianNumber(e.target.value) }
+                              : x
+                          ),
+                        }))
+                      }
+                      className="w-full px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-mono tabular-nums text-right font-medium text-xs"
+                    />
+                    {showAuto1CHint && (
+                      <span className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2 text-[10px] font-mono text-sky-700 dark:text-sky-400">
+                        авто 1С
+                      </span>
+                    )}
+                  </div>
+                  {op.entries.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdate((prev) => ({
+                          ...prev,
+                          entries: prev.entries.filter((x) => x.id !== entry.id),
+                        }))
+                      }
+                      className="p-1 text-zinc-400 hover:text-red-600"
+                      title="Удалить строку проводки"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Collapsible Step-by-Step 1C:Бухгалтерия 8.3 (ред. 3.0) Mentor Panel */}
+      <div className="border-t border-zinc-100 dark:border-zinc-800/80">
+        <button
+          type="button"
+          aria-expanded={isGuideOpen}
+          onClick={onToggleGuide}
+          className="w-full px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-left text-xs hover:bg-zinc-50 dark:hover:bg-zinc-900/40 transition-colors"
+        >
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <BookOpenCheck className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+            <span className="font-medium text-zinc-800 dark:text-zinc-200">
+              Подробная инструкция по проведению в 1С:Бухгалтерия 8.3
+            </span>
+            <span className="hidden md:inline text-[11px] font-mono text-zinc-500 dark:text-zinc-400 truncate">
+              · {mentorGuide.navigationPath1C}
+            </span>
+          </div>
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 dark:text-amber-400 shrink-0">
+            {isGuideOpen ? 'Свернуть' : 'Открыть разбор 1С'}
+            {isGuideOpen ? (
+              <ChevronUp className="w-3.5 h-3.5" />
+            ) : (
+              <ChevronDown className="w-3.5 h-3.5" />
+            )}
+          </span>
+        </button>
+
+        {isGuideOpen && (
+          <div className="px-4 py-3.5 border-t border-zinc-100 dark:border-zinc-800/80 bg-zinc-50/50 dark:bg-zinc-950/40 space-y-3.5 text-xs">
+            {/* Section 1 & 2: Accounting Meaning + Exact 1C Menu Path */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 pb-3 border-b border-zinc-200/70 dark:border-zinc-800">
+              <div className="lg:col-span-7 space-y-1.5">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  1. Бухгалтерский смысл операции (РСБУ / ФСБУ)
+                </div>
+                <p className="text-zinc-900 dark:text-zinc-100 leading-relaxed">
+                  {mentorGuide.accountingMeaning}
+                </p>
+                <p className="text-sky-800 dark:text-sky-300 leading-relaxed">
+                  <strong className="font-semibold">Правило суммы и НДС: </strong>
+                  {mentorGuide.whyAmountOrVatRule}
+                </p>
+              </div>
+
+              <div className="lg:col-span-5 space-y-1.5">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  2. Где создать документ в 1С:БП 3.0
+                </div>
+                <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-2.5 space-y-1.5">
+                  <div>
+                    <span className="text-zinc-500 dark:text-zinc-400">Путь в меню: </span>
+                    <span className="font-mono font-semibold text-zinc-900 dark:text-zinc-100">
+                      {mentorGuide.navigationPath1C}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-zinc-500 dark:text-zinc-400">Документ и вид операции: </span>
+                    <span className="font-mono text-amber-800 dark:text-amber-300 font-medium">
+                      {mentorGuide.documentOperationKind1C}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Section 3 & 4: Header Fields + Tabular Section & Tabs */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 pb-3 border-b border-zinc-200/70 dark:border-zinc-800">
+              <div className="space-y-1.5">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  3. Заполнение шапки документа
+                </div>
+                <div className="divide-y divide-zinc-200/70 dark:divide-zinc-800 rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
+                  {mentorGuide.headerFieldsSteps.map((hf, idx) => (
+                    <div
+                      key={idx}
+                      className="px-2.5 py-1.5 flex flex-col sm:flex-row sm:items-baseline justify-between gap-1"
+                    >
+                      <span className="text-zinc-500 dark:text-zinc-400 shrink-0">
+                        {hf.field}
+                      </span>
+                      <div className="sm:text-right min-w-0">
+                        <span className="font-mono font-medium text-zinc-900 dark:text-zinc-100">
+                          {hf.value}
+                        </span>
+                        {hf.hint && (
+                          <div className="text-[10px] text-zinc-500 dark:text-zinc-400">
+                            {hf.hint}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  4. Табличные части и вкладки документа
+                </div>
+                <div className="divide-y divide-zinc-200/70 dark:divide-zinc-800 rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
+                  {mentorGuide.tabularAndTabsSteps.map((tf, idx) => (
+                    <div key={idx} className="px-2.5 py-2 space-y-0.5">
+                      <div className="font-mono text-[11px] font-semibold text-amber-800 dark:text-amber-300">
+                        {tf.tabName}
+                      </div>
+                      <div className="text-zinc-700 dark:text-zinc-300 leading-snug">
+                        {tf.instruction}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Section 5: Reference Postings + OSV Self-Verification & Student Pitfalls */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-3">
+              <div className="lg:col-span-6 space-y-1.5">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  5. Эталонные проводки по кнопке «Дт/Кт»
+                </div>
+                <div className="divide-y divide-zinc-200/70 dark:divide-zinc-800 rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
+                  {mentorGuide.referencePostings.map((rp, i) => (
+                    <div key={i} className="px-2.5 py-1.5 space-y-0.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[11px]">
+                        <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+                          Дт {rp.debit}{' '}
+                          {rp.isOffBalance ? '· забаланс' : `→ Кт ${rp.credit}`}
+                        </span>
+                        <span className="tabular-nums text-emerald-700 dark:text-emerald-400">
+                          {rp.amountRule}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                        {rp.purpose}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="lg:col-span-6 space-y-1.5">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  Самопроверка по ОСВ и частые ошибки на защите
+                </div>
+                <ul className="space-y-1 text-[11px] text-emerald-800 dark:text-emerald-300">
+                  {mentorGuide.selfCheckOsv.map((chk, i) => (
+                    <li key={i} className="leading-snug">
+                      ✓ {chk}
+                    </li>
+                  ))}
+                </ul>
+                {mentorGuide.commonStudentMistakes.length > 0 && (
+                  <div className="pt-1 space-y-0.5 text-[11px] text-zinc-600 dark:text-zinc-400">
+                    <div className="font-semibold text-zinc-700 dark:text-zinc-300">
+                      Частые ошибки студентов:
+                    </div>
+                    <ul className="space-y-0.5">
+                      {mentorGuide.commonStudentMistakes.map((warn, i) => (
+                        <li key={i} className="leading-snug">
+                          — {warn}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 )}
               </div>
             </div>
-          ))}
-        </div>
+          </div>
+        )}
       </div>
     </div>
   );

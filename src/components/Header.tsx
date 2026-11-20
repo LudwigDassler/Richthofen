@@ -123,12 +123,12 @@ export function Header() {
               </div>
             </div>
           ) : (
-            <div className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400">
-              <Building2 className="w-4 h-4 text-zinc-400 shrink-0" />
-              <span className="font-medium text-zinc-800 dark:text-zinc-200">
+            <div className="flex items-center gap-2 min-w-0 text-xs text-zinc-600 dark:text-zinc-400">
+              <Building2 className="w-4 h-4 text-zinc-400 shrink-0 hidden sm:block" />
+              <span className="font-medium text-zinc-800 dark:text-zinc-200 truncate">
                 База 1С не загружена
               </span>
-              <span className="hidden md:inline text-zinc-400">
+              <span className="hidden lg:inline text-zinc-400 truncate">
                 — загрузите JSON выгрузки 1С или синхронизируйте /api/1c-sync
               </span>
             </div>

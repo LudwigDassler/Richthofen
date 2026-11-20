@@ -1,4 +1,8 @@
-import { CHART_OF_ACCOUNTS, getAccountInfo } from '@/data/chartOfAccounts';
+import {
+  CHART_OF_ACCOUNTS,
+  getAccountInfo,
+  isOffBalanceAccountCode,
+} from '@/data/chartOfAccounts';
 import {
   AccountType,
   BalanceAnchorOverride,
@@ -412,13 +416,14 @@ export function calculateOsvReport(params: {
     rows.push(leaf);
   }
 
-  // Grand totals strictly over leafRows (no double counting)
-  const totalStartDebit = round2(leafRows.reduce((s, r) => s + r.startDebit, 0));
-  const totalStartCredit = round2(leafRows.reduce((s, r) => s + r.startCredit, 0));
-  const totalTurnoverDebit = round2(leafRows.reduce((s, r) => s + r.turnoverDebit, 0));
-  const totalTurnoverCredit = round2(leafRows.reduce((s, r) => s + r.turnoverCredit, 0));
-  const totalEndDebit = round2(leafRows.reduce((s, r) => s + r.endDebit, 0));
-  const totalEndCredit = round2(leafRows.reduce((s, r) => s + r.endCredit, 0));
+  // Grand totals strictly over balance-sheet leafRows (excluding off-balance single-entry accounts like МЦ.02 / МЦ.04 / 001–011)
+  const balanceLeafRows = leafRows.filter((r) => !isOffBalanceAccountCode(r.code));
+  const totalStartDebit = round2(balanceLeafRows.reduce((s, r) => s + r.startDebit, 0));
+  const totalStartCredit = round2(balanceLeafRows.reduce((s, r) => s + r.startCredit, 0));
+  const totalTurnoverDebit = round2(balanceLeafRows.reduce((s, r) => s + r.turnoverDebit, 0));
+  const totalTurnoverCredit = round2(balanceLeafRows.reduce((s, r) => s + r.turnoverCredit, 0));
+  const totalEndDebit = round2(balanceLeafRows.reduce((s, r) => s + r.endDebit, 0));
+  const totalEndCredit = round2(balanceLeafRows.reduce((s, r) => s + r.endCredit, 0));
 
   const startDiff = round2(totalStartDebit - totalStartCredit);
   const turnoverDiff = round2(totalTurnoverDebit - totalTurnoverCredit);

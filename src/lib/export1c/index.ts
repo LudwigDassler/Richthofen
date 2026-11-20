@@ -1,3 +1,4 @@
+import { isOffBalanceAccountCode } from '@/data/chartOfAccounts';
 import {
   Database1CSnapshot,
   DEFAULT_REPORTING_YEAR,
@@ -242,13 +243,18 @@ export function buildExportBundle(params: {
     ) {
       expSet.add(op.expenseItemName);
     }
+    if (op.warehouseToName && (mode === 'clean_db' || op.bindings.warehouse.status === 'new_for_1c')) {
+      whSet.add(op.warehouseToName);
+    }
   }
 
-  // Opening balances lines for Mode B ('clean_db')
+  // Opening balances lines for Mode B ('clean_db') — exclude unilateral off-balance accounts from double-entry 000
   const openingLines =
     mode === 'clean_db'
       ? osv.leafRows.filter(
-          (r) => Math.abs(r.startDebit) >= 0.01 || Math.abs(r.startCredit) >= 0.01
+          (r) =>
+            !isOffBalanceAccountCode(r.code) &&
+            (Math.abs(r.startDebit) >= 0.01 || Math.abs(r.startCredit) >= 0.01)
         )
       : [];
 
@@ -699,12 +705,13 @@ function generateBslModule(params: {
       lines.push('\t\tДок.Записать(РежимЗаписиДокумента.Проведение);');
     } else if (op.docType1C === 'ПоступлениеТоваровУслуг') {
       const isService = op.category === 'purchase_services';
+      const isEquipment = op.category === 'purchase_equipment';
       lines.push('\t\tДок = Документы.ПоступлениеТоваровУслуг.СоздатьДокумент();');
       lines.push(`\t\tДок.Дата = ${dateExpr};`);
       lines.push('\t\tДок.Организация = ОрганизацияСсылка;');
       lines.push(
         `\t\tДок.ВидОперации = Перечисления.ВидыОперацийПоступлениеТоваровУслуг.${
-          isService ? 'Услуги' : 'Товары'
+          isService ? 'Услуги' : isEquipment ? 'Оборудование' : 'Товары'
         };`
       );
       lines.push(
@@ -724,7 +731,8 @@ function generateBslModule(params: {
       const nomItem = escapeBsl(op.nomenclatureName || op.description.slice(0, 80));
       const qty = op.quantity && op.quantity > 0 ? op.quantity : 1;
       const price = Math.round((op.amount / qty) * 100) / 100;
-      const mainDebitAcc = op.entries[0]?.debit || (isService ? '26' : '41.01');
+      const mainDebitAcc =
+        op.entries[0]?.debit || (isService ? '26' : isEquipment ? '08.04.1' : '41.01');
       if (isService) {
         lines.push('\t\tСтр = Док.Услуги.Добавить();');
         lines.push(
@@ -745,6 +753,18 @@ function generateBslModule(params: {
           );
         }
         lines.push('\t\tСтр.СчетУчетаНДС = ПланыСчетов.Хозрасчетный.НайтиПоКоду("19.04");');
+      } else if (isEquipment) {
+        lines.push('\t\tСтр = Док.Оборудование.Добавить();');
+        lines.push(
+          `\t\tСтр.Номенклатура = НайтиИлиСоздатьНоменклатуру("${nomItem}", Ложь, "${vatEnum}");`
+        );
+        lines.push(`\t\tСтр.Количество = ${qty};`);
+        lines.push(`\t\tСтр.Цена = ${price.toFixed(2)};`);
+        lines.push(`\t\tСтр.Сумма = ${op.amount.toFixed(2)};`);
+        lines.push(`\t\tСтр.СтавкаНДС = Перечисления.СтавкиНДС.${vatEnum};`);
+        lines.push(`\t\tСтр.СуммаНДС = ${op.vatAmount.toFixed(2)};`);
+        lines.push('\t\tСтр.СчетУчета = ПланыСчетов.Хозрасчетный.НайтиПоКоду("08.04.1");');
+        lines.push('\t\tСтр.СчетУчетаНДС = ПланыСчетов.Хозрасчетный.НайтиПоКоду("19.01");');
       } else {
         lines.push('\t\tСтр = Док.Товары.Добавить();');
         lines.push(
@@ -841,9 +861,110 @@ function generateBslModule(params: {
         lines.push(`\t\tСФВыд.СуммаНДС = ${op.vatAmount.toFixed(2)};`);
         lines.push('\t\tСФВыд.Записать(РежимЗаписиДокумента.Проведение);');
       }
+    } else if (op.docType1C === 'РасходМатериалов') {
+      const nomItem = escapeBsl(op.nomenclatureName || 'Материалы');
+      const qty = op.quantity && op.quantity > 0 ? op.quantity : 1;
+      const costAcc = escapeBsl(op.costAccount || op.entries[0]?.debit || '20.01');
+      const matAcc = escapeBsl(op.materialAccount || op.entries[0]?.credit || '10.01');
+      lines.push('\t\tДок = Документы.РасходМатериалов.СоздатьДокумент();');
+      lines.push(`\t\tДок.Дата = ${dateExpr};`);
+      lines.push('\t\tДок.Организация = ОрганизацияСсылка;');
+      lines.push('\t\tПопытка Док.ВидОперации = Перечисления.ВидыОперацийРасходМатериалов.ИспользованиеМатериалов; Исключение КонецПопытки;');
+      lines.push(`\t\tДок.Склад = НайтиИлиСоздатьСклад("${escapeBsl(op.warehouseName || 'Основной склад')}");`);
+      lines.push(`\t\tДок.СчетЗатрат = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${costAcc}");`);
+      if (op.nomenclatureGroupName) {
+        lines.push(
+          `\t\tПопытка Док.Субконто1 = НайтиИлиСоздатьНоменклатурнуюГруппу("${escapeBsl(op.nomenclatureGroupName)}"); Исключение КонецПопытки;`
+        );
+      }
+      if (op.expenseItemName) {
+        lines.push(
+          `\t\tПопытка Док.Субконто2 = НайтиИлиСоздатьСтатьюЗатрат("${escapeBsl(op.expenseItemName)}"); Исключение КонецПопытки;`
+        );
+      }
+      lines.push('\t\tСтр = Док.Материалы.Добавить();');
+      lines.push(`\t\tСтр.Номенклатура = НайтиИлиСоздатьНоменклатуру("${nomItem}", Ложь, "БезНДС");`);
+      lines.push(`\t\tСтр.Количество = ${qty};`);
+      lines.push(`\t\tСтр.СчетУчета = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${matAcc}");`);
+      lines.push(`\t\tДок.Комментарий = "${descEsc}";`);
+      lines.push('\t\tДок.Записать(РежимЗаписиДокумента.Проведение);');
+    } else if (op.docType1C === 'ПередачаМатериаловВЭксплуатацию') {
+      const nomItem = escapeBsl(op.nomenclatureName || 'Спецодежда');
+      const qty = op.quantity && op.quantity > 0 ? op.quantity : 1;
+      const empName = escapeBsl(op.employeeName || 'Сотрудник производства');
+      const matAcc = escapeBsl(op.materialAccount || '10.10');
+      const isInventory = matAcc === '10.09' || op.offBalanceAccount === 'МЦ.04';
+      lines.push('\t\tДок = Документы.ПередачаМатериаловВЭксплуатацию.СоздатьДокумент();');
+      lines.push(`\t\tДок.Дата = ${dateExpr};`);
+      lines.push('\t\tДок.Организация = ОрганизацияСсылка;');
+      lines.push(`\t\tДок.Склад = НайтиИлиСоздатьСклад("${escapeBsl(op.warehouseName || 'Основной склад')}");`);
+      lines.push(
+        `\t\tСтр = Док.${isInventory ? 'ИнвентарьИХозяйственныеПринадлежности' : 'Спецодежда'}.Добавить();`
+      );
+      lines.push(`\t\tСтр.Номенклатура = НайтиИлиСоздатьНоменклатуру("${nomItem}", Ложь, "БезНДС");`);
+      lines.push(`\t\tСтр.Количество = ${qty};`);
+      lines.push(`\t\tСтр.ФизическоеЛицо = НайтиИлиСоздатьФизлицо("${empName}");`);
+      lines.push(`\t\tСтр.СчетУчета = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${matAcc}");`);
+      lines.push(`\t\tДок.Комментарий = "${descEsc}";`);
+      lines.push('\t\tДок.Записать(РежимЗаписиДокумента.Проведение);');
+    } else if (op.docType1C === 'ПеремещениеТоваров') {
+      const nomItem = escapeBsl(op.nomenclatureName || 'Материалы');
+      const qty = op.quantity && op.quantity > 0 ? op.quantity : 1;
+      const matAcc = escapeBsl(op.materialAccount || op.entries[0]?.debit || '10.01');
+      lines.push('\t\tДок = Документы.ПеремещениеТоваров.СоздатьДокумент();');
+      lines.push(`\t\tДок.Дата = ${dateExpr};`);
+      lines.push('\t\tДок.Организация = ОрганизацияСсылка;');
+      lines.push(`\t\tДок.СкладОтправитель = НайтиИлиСоздатьСклад("${escapeBsl(op.warehouseName || 'Основной склад')}");`);
+      lines.push(`\t\tДок.СкладПолучатель = НайтиИлиСоздатьСклад("${escapeBsl(op.warehouseToName || 'Производственный склад')}");`);
+      lines.push('\t\tСтр = Док.Товары.Добавить();');
+      lines.push(`\t\tСтр.Номенклатура = НайтиИлиСоздатьНоменклатуру("${nomItem}", Ложь, "БезНДС");`);
+      lines.push(`\t\tСтр.Количество = ${qty};`);
+      lines.push(`\t\tСтр.СчетУчетаОтправителя = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${matAcc}");`);
+      lines.push(`\t\tСтр.СчетУчетаПолучателя = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${matAcc}");`);
+      lines.push(`\t\tДок.Комментарий = "${descEsc}";`);
+      lines.push('\t\tДок.Записать(РежимЗаписиДокумента.Проведение);');
+    } else if (op.docType1C === 'ВыпускПродукции') {
+      const nomItem = escapeBsl(op.nomenclatureName || 'Готовая продукция');
+      const qty = op.quantity && op.quantity > 0 ? op.quantity : 1;
+      const costAcc = escapeBsl(op.costAccount || '20.01');
+      lines.push('\t\tДок = Документы.ОтчетПроизводстваЗаСмену.СоздатьДокумент();');
+      lines.push(`\t\tДок.Дата = ${dateExpr};`);
+      lines.push('\t\tДок.Организация = ОрганизацияСсылка;');
+      lines.push(`\t\tДок.Склад = НайтиИлиСоздатьСклад("${escapeBsl(op.warehouseName || 'Основной склад')}");`);
+      lines.push(`\t\tДок.СчетЗатрат = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${costAcc}");`);
+      lines.push('\t\tСтр = Док.Продукция.Добавить();');
+      lines.push(`\t\tСтр.Номенклатура = НайтиИлиСоздатьНоменклатуру("${nomItem}", Ложь, "БезНДС");`);
+      lines.push(`\t\tСтр.Количество = ${qty};`);
+      if (op.amount >= 0.01) {
+        lines.push(`\t\tСтр.СуммаПлановая = ${op.amount.toFixed(2)};`);
+        lines.push(`\t\tСтр.ЦенаПлановая = ${(Math.round((op.amount / qty) * 100) / 100).toFixed(2)};`);
+      }
+      lines.push('\t\tСтр.СчетУчета = ПланыСчетов.Хозрасчетный.НайтиПоКоду("43");');
+      if (op.nomenclatureGroupName) {
+        lines.push(
+          `\t\tПопытка Стр.НоменклатурнаяГруппа = НайтиИлиСоздатьНоменклатурнуюГруппу("${escapeBsl(op.nomenclatureGroupName)}"); Исключение КонецПопытки;`
+        );
+      }
+      lines.push(`\t\tДок.Комментарий = "${descEsc}";`);
+      lines.push('\t\tДок.Записать(РежимЗаписиДокумента.Проведение);');
+    } else if (op.docType1C === 'ПринятиеКУчетуОС') {
+      const osItem = escapeBsl(op.nomenclatureName || 'Объект основных средств');
+      lines.push('\t\tДок = Документы.ПринятиеКУчетуОС.СоздатьДокумент();');
+      lines.push(`\t\tДок.Дата = ${dateExpr};`);
+      lines.push('\t\tДок.Организация = ОрганизацияСсылка;');
+      lines.push('\t\tПопытка Док.ВидОперации = Перечисления.ВидыОперацийПринятиеКУчетуОС.Оборудование; Исключение КонецПопытки;');
+      lines.push(`\t\tДок.Склад = НайтиИлиСоздатьСклад("${escapeBsl(op.warehouseName || 'Основной склад')}");`);
+      lines.push(`\t\tДок.Оборудование = НайтиИлиСоздатьНоменклатуру("${osItem}", Ложь, "БезНДС");`);
+      lines.push('\t\tДок.СчетУчета = ПланыСчетов.Хозрасчетный.НайтиПоКоду("08.04.1");');
+      lines.push('\t\tДок.СчетУчетаБУ = ПланыСчетов.Хозрасчетный.НайтиПоКоду("01.01");');
+      lines.push('\t\tДок.СчетНачисленияАмортизацииБУ = ПланыСчетов.Хозрасчетный.НайтиПоКоду("02.01");');
+      lines.push(`\t\tСтрОС = Док.ОсновныеСредства.Добавить();`);
+      lines.push(`\t\tСтрОС.ОсновноеСредство = НайтиИлиСоздатьОсновноеСредство("${osItem}");`);
+      lines.push(`\t\tДок.Комментарий = "${descEsc}";`);
+      lines.push('\t\tДок.Записать(РежимЗаписиДокумента.Проведение);');
     } else {
       // Universal ОперацияБух for НачислениеЗарплаты, КорректировкаДолга, ЗакрытиеМесяца, СФ на аванс, Касса, ручные операции
-      // Guarantees exact RSBU double-entry movements in РегистрБухгалтерии.Хозрасчетный
+      // Guarantees exact RSBU double-entry (and unilateral off-balance МЦ) movements in РегистрБухгалтерии.Хозрасчетный
       void netAmount;
       lines.push('\t\tДокОп = Документы.ОперацияБух.СоздатьДокумент();');
       lines.push(`\t\tДокОп.Дата = ${dateExpr};`);
@@ -851,6 +972,7 @@ function generateBslModule(params: {
       lines.push(`\t\tДокОп.Содержание = "${descEsc}";`);
       lines.push(
         `\t\tДокОп.СуммаОперации = ${op.entries
+          .filter((e) => !e.isOffBalance)
           .reduce((s, e) => s + e.amount, 0)
           .toFixed(2)};`
       );
@@ -858,12 +980,16 @@ function generateBslModule(params: {
         lines.push('\t\tДвиж = ДокОп.Движения.Хозрасчетный.Добавить();');
         lines.push(`\t\tДвиж.Период = ${dateExpr};`);
         lines.push('\t\tДвиж.Организация = ОрганизацияСсылка;');
-        lines.push(
-          `\t\tДвиж.СчетДт = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${escapeBsl(entry.debit)}");`
-        );
-        lines.push(
-          `\t\tДвиж.СчетКт = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${escapeBsl(entry.credit)}");`
-        );
+        if (entry.debit) {
+          lines.push(
+            `\t\tДвиж.СчетДт = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${escapeBsl(entry.debit)}");`
+          );
+        }
+        if (entry.credit && !entry.isOffBalance) {
+          lines.push(
+            `\t\tДвиж.СчетКт = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${escapeBsl(entry.credit)}");`
+          );
+        }
         lines.push(`\t\tДвиж.Сумма = ${entry.amount.toFixed(2)};`);
         lines.push(`\t\tДвиж.Содержание = "${escapeBsl(entry.description || op.description)}";`);
       }
@@ -1040,6 +1166,40 @@ function generateBslModule(params: {
   lines.push('\tНовСчет.Записать();');
   lines.push('\tВозврат НовСчет.Ссылка;');
   lines.push('КонецФункции');
+  lines.push('');
+
+  lines.push('&НаСервере');
+  lines.push('Функция НайтиИлиСоздатьФизлицо(ФИО)');
+  lines.push('\tНайденное = Справочники.ФизическиеЛица.НайтиПоНаименованию(ФИО);');
+  lines.push('\tЕсли ЗначениеЗаполнено(Найденное) Тогда Возврат Найденное; КонецЕсли;');
+  lines.push('\tНов = Справочники.ФизическиеЛица.СоздатьЭлемент();');
+  lines.push('\tНов.Наименование = ФИО;');
+  lines.push('\tНов.Записать();');
+  lines.push('\tВозврат Нов.Ссылка;');
+  lines.push('КонецФункции');
+  lines.push('');
+
+  lines.push('&НаСервере');
+  lines.push('Функция НайтиИлиСоздатьНоменклатурнуюГруппу(Наименование)');
+  lines.push('\tНайденная = Справочники.НоменклатурныеГруппы.НайтиПоНаименованию(Наименование);');
+  lines.push('\tЕсли ЗначениеЗаполнено(Найденная) Тогда Возврат Найденная; КонецЕсли;');
+  lines.push('\tНов = Справочники.НоменклатурныеГруппы.СоздатьЭлемент();');
+  lines.push('\tНов.Наименование = Наименование;');
+  lines.push('\tНов.Записать();');
+  lines.push('\tВозврат Нов.Ссылка;');
+  lines.push('КонецФункции');
+  lines.push('');
+
+  lines.push('&НаСервере');
+  lines.push('Функция НайтиИлиСоздатьОсновноеСредство(Наименование)');
+  lines.push('\tНайденное = Справочники.ОсновныеСредства.НайтиПоНаименованию(Наименование);');
+  lines.push('\tЕсли ЗначениеЗаполнено(Найденное) Тогда Возврат Найденное; КонецЕсли;');
+  lines.push('\tНов = Справочники.ОсновныеСредства.СоздатьЭлемент();');
+  lines.push('\tНов.Наименование = Наименование;');
+  lines.push('\tНов.НаименованиеПолное = Наименование;');
+  lines.push('\tНов.Записать();');
+  lines.push('\tВозврат Нов.Ссылка;');
+  lines.push('КонецФункции');
 
   return lines.join('\n');
 }
@@ -1136,7 +1296,17 @@ function generateEnterpriseDataXml(params: {
             ? 'Документ.ПоступлениеТоваровУслуг'
             : op.docType1C === 'РеализацияТоваровУслуг'
               ? 'Документ.РеализацияТоваровУслуг'
-              : 'Документ.ОперацияБух';
+              : op.docType1C === 'РасходМатериалов'
+                ? 'Документ.РасходМатериалов'
+                : op.docType1C === 'ПередачаМатериаловВЭксплуатацию'
+                  ? 'Документ.ПередачаМатериаловВЭксплуатацию'
+                  : op.docType1C === 'ПеремещениеТоваров'
+                    ? 'Документ.ПеремещениеТоваров'
+                    : op.docType1C === 'ВыпускПродукции'
+                      ? 'Документ.ОтчетПроизводстваЗаСмену'
+                      : op.docType1C === 'ПринятиеКУчетуОС'
+                        ? 'Документ.ПринятиеКУчетуОС'
+                        : 'Документ.ОперацияБух';
 
     xml.push(`    <${edTag}>`);
     xml.push('      <КлючевыеСвойства>');

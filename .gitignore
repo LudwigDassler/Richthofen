@@ -31,3 +31,7 @@ yarn-error.log*
 next-env.d.ts
 node_modules/
 .backup_src/
+
+# browser verification & platform temp files
+.playwright-cli/
+.aistudio/

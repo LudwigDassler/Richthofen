@@ -18,6 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAccountant } from '@/context/AccountantContext';
+import { isOffBalanceAccountCode } from '@/data/chartOfAccounts';
 import { BalanceAnchorOverride } from '@/types/accounting';
 import { formatDateRu, formatMoney, formatMoneyWithCurrency } from '@/lib/formatters';
 
@@ -612,11 +613,18 @@ export function Tab1DatabaseOsv() {
                         <td className="py-2 px-3 border-r border-zinc-100 dark:border-zinc-800/70">
                           <div className="flex items-center justify-between gap-2">
                             <span className="truncate">{row.name}</span>
-                            {row.isCollapsedSynthetic && (
-                              <span className="text-[10px] font-normal text-zinc-400 shrink-0">
-                                свёрнуто
-                              </span>
-                            )}
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {isOffBalanceAccountCode(row.code) && (
+                                <span className="px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 font-mono text-[10px] font-normal">
+                                  забалансовый (не входит в итог Дт=Кт)
+                                </span>
+                              )}
+                              {row.isCollapsedSynthetic && (
+                                <span className="text-[10px] font-normal text-zinc-400">
+                                  свёрнуто
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </td>
 

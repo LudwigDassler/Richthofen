@@ -670,6 +670,75 @@ export const CHART_OF_ACCOUNTS: AccountInfo[] = [
     isGroup: false,
   },
 
+  // Рабочие субсчета ОС, спецодежды и малоценного инвентаря 1С:БП 3.0 (ФСБУ 5/2019, ФСБУ 6/2020)
+  {
+    code: '08.04.1',
+    name: 'Приобретение компонентов основных средств',
+    parentCode: '08',
+    type: 'active',
+    subconto: ['Номенклатура', 'Склады', 'Партии'],
+    category: 'Внеоборотные активы',
+    isGroup: false,
+  },
+  {
+    code: '10.10',
+    name: 'Специальная оснастка и специальная одежда на складе',
+    parentCode: '10',
+    type: 'active',
+    subconto: ['Номенклатура', 'Склады', 'Партии'],
+    category: 'Производственные запасы',
+    isGroup: false,
+  },
+  {
+    code: '10.11.1',
+    name: 'Специальная одежда в эксплуатации',
+    parentCode: '10',
+    type: 'active',
+    subconto: ['Номенклатура', 'Материально ответственные лица'],
+    category: 'Производственные запасы',
+    isGroup: false,
+  },
+  {
+    code: '10.21.1',
+    name: 'Приобретение малоценного оборудования и запасов',
+    parentCode: '10',
+    type: 'active',
+    subconto: ['Номенклатура', 'Склады', 'Партии'],
+    category: 'Производственные запасы',
+    isGroup: false,
+  },
+
+  // Забалансовые счета контроля ТМЦ в эксплуатации 1С:БП 3.0
+  {
+    code: 'МЦ',
+    name: 'Материальные ценности в эксплуатации (забалансовый)',
+    type: 'active',
+    subconto: ['Номенклатура', 'Работники организаций'],
+    category: 'Забалансовые счета',
+    isGroup: true,
+    isOffBalance: true,
+  },
+  {
+    code: 'МЦ.02',
+    name: 'Спецодежда в эксплуатации (забалансовый учёт по МОЛ)',
+    parentCode: 'МЦ',
+    type: 'active',
+    subconto: ['Номенклатура', 'Партии материалов в эксплуатации', 'Работники организаций'],
+    category: 'Забалансовые счета',
+    isGroup: false,
+    isOffBalance: true,
+  },
+  {
+    code: 'МЦ.04',
+    name: 'Инвентарь и хозяйственные принадлежности в эксплуатации (забалансовый)',
+    parentCode: 'МЦ',
+    type: 'active',
+    subconto: ['Номенклатура', 'Работники организаций'],
+    category: 'Забалансовые счета',
+    isGroup: false,
+    isOffBalance: true,
+  },
+
   // Вспомогательный счет 1С 8.3
   {
     code: '000',
@@ -685,10 +754,44 @@ export const ACCOUNT_MAP: Record<string, AccountInfo> = Object.fromEntries(
   CHART_OF_ACCOUNTS.map((acc) => [acc.code, acc])
 );
 
+export function isOffBalanceAccountCode(rawCode: string): boolean {
+  const clean = (rawCode ?? '').trim().toUpperCase();
+  if (!clean) return false;
+  if (
+    clean.startsWith('МЦ') ||
+    clean.startsWith('MC') ||
+    clean.startsWith('ГТД') ||
+    clean.startsWith('РВ')
+  ) {
+    return true;
+  }
+  if (/^00[1-9](?:\.|$)|^01[01](?:\.|$)/.test(clean)) {
+    return true;
+  }
+  return Boolean(ACCOUNT_MAP[clean]?.isOffBalance);
+}
+
 export function getAccountInfo(code: string): AccountInfo {
   const normalized = code.trim();
   if (ACCOUNT_MAP[normalized]) {
     return ACCOUNT_MAP[normalized];
+  }
+
+  const upper = normalized.toUpperCase();
+  if (ACCOUNT_MAP[upper]) {
+    return ACCOUNT_MAP[upper];
+  }
+
+  if (isOffBalanceAccountCode(upper)) {
+    return {
+      code: upper,
+      name: `Забалансовый счёт ${upper}`,
+      type: 'active',
+      subconto: ['Номенклатура', 'Работники организаций'],
+      category: 'Забалансовые счета',
+      isGroup: false,
+      isOffBalance: true,
+    };
   }
 
   const rootCode = normalized.includes('.') ? normalized.split('.')[0] : undefined;

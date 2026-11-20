@@ -56,6 +56,13 @@ export function Tab3AuditAutofix() {
   const errorCount = auditIssues.filter((i) => i.severity === 'error').length;
   const warningCount = auditIssues.filter((i) => i.severity === 'warning').length;
   const autoFixableCount = auditIssues.filter((i) => i.canAutoFixBy1C).length;
+  const calculatedBy1COps = useMemo(
+    () =>
+      operations.filter(
+        (op) => op.includeInProcessing && op.amountMode === 'calculated_by_1c'
+      ),
+    [operations]
+  );
 
   const setDraft = (key: string, value: string) => {
     setDraftValues((prev) => ({ ...prev, [key]: value }));
@@ -239,12 +246,14 @@ export function Tab3AuditAutofix() {
         </div>
 
         {/* Status Metrics */}
-        <div className="mt-4 pt-4 border-t border-zinc-100 dark:border-zinc-800 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+        <div className="mt-4 pt-4 border-t border-zinc-100 dark:border-zinc-800 grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
           <div className="p-3 rounded bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200/70 dark:border-zinc-800">
-            <div className="text-zinc-500">Критические ошибки</div>
+            <div className="text-zinc-500 dark:text-zinc-400">Критические ошибки</div>
             <div
               className={`mt-1 text-lg font-mono font-semibold tabular-nums ${
-                errorCount > 0 ? 'text-red-600 dark:text-red-400' : 'text-emerald-600'
+                errorCount > 0
+                  ? 'text-red-600 dark:text-red-400'
+                  : 'text-emerald-600 dark:text-emerald-400'
               }`}
             >
               {errorCount}
@@ -252,10 +261,12 @@ export function Tab3AuditAutofix() {
           </div>
 
           <div className="p-3 rounded bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200/70 dark:border-zinc-800">
-            <div className="text-zinc-500">Предупреждения учёта</div>
+            <div className="text-zinc-500 dark:text-zinc-400">Рекомендуется уточнить</div>
             <div
               className={`mt-1 text-lg font-mono font-semibold tabular-nums ${
-                warningCount > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600'
+                warningCount > 0
+                  ? 'text-amber-600 dark:text-amber-400'
+                  : 'text-emerald-600 dark:text-emerald-400'
               }`}
             >
               {warningCount}
@@ -263,14 +274,21 @@ export function Tab3AuditAutofix() {
           </div>
 
           <div className="p-3 rounded bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200/70 dark:border-zinc-800">
-            <div className="text-zinc-500">Доступно для автоисправления</div>
+            <div className="text-zinc-500 dark:text-zinc-400">Расчётная сумма 1С</div>
+            <div className="mt-1 text-lg font-mono font-semibold tabular-nums text-sky-700 dark:text-sky-400">
+              {calculatedBy1COps.length}
+            </div>
+          </div>
+
+          <div className="p-3 rounded bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200/70 dark:border-zinc-800">
+            <div className="text-zinc-500 dark:text-zinc-400">К автоисправлению</div>
             <div className="mt-1 text-lg font-mono font-semibold tabular-nums text-zinc-900 dark:text-white">
               {autoFixableCount}
             </div>
           </div>
 
-          <div className="p-3 rounded bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200/70 dark:border-zinc-800 flex flex-col justify-between">
-            <div className="text-zinc-500">Готовность к выгрузке</div>
+          <div className="col-span-2 sm:col-span-1 p-3 rounded bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200/70 dark:border-zinc-800 flex flex-col justify-between">
+            <div className="text-zinc-500 dark:text-zinc-400">Готовность к выгрузке</div>
             <button
               type="button"
               onClick={() => setActiveTab('export_1c')}
@@ -281,6 +299,24 @@ export function Tab3AuditAutofix() {
             </button>
           </div>
         </div>
+
+        {calculatedBy1COps.length > 0 && (
+          <div className="mt-3 rounded border border-sky-200/80 dark:border-sky-900/60 bg-sky-50/50 dark:bg-sky-950/25 px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-sky-950 dark:text-sky-200">
+            <div>
+              <strong className="font-semibold">
+                Внутренние складские/производственные операции ({calculatedBy1COps.length}):
+              </strong>{' '}
+              себестоимость списания не считается ошибкой при пустой сумме в Excel — в 1С:БП 3.0 она рассчитывается автоматически при проведении по партиям счёта 10 / 08.04.1 (без НДС и без контрагента).
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveTab('import_postings')}
+              className="shrink-0 font-medium text-sky-800 dark:text-sky-300 hover:underline"
+            >
+              Открыть инструкции 1С →
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Structured Auto-Fix Audit Trail: Что было -> Что стало -> Основание */}
@@ -313,6 +349,11 @@ export function Tab3AuditAutofix() {
                         {rec.whatWas}
                       </td>
                       <td className="py-2 px-3 font-mono text-[11px] font-semibold text-emerald-800 dark:text-emerald-300">
+                        {rec.category === 'doc_reclassification' && (
+                          <span className="mr-1.5 inline-block px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/60 text-emerald-900 dark:text-emerald-200 font-sans text-[10px]">
+                            Переклассификация 1С
+                          </span>
+                        )}
                         {rec.whatBecame}
                       </td>
                       <td className="py-2 px-3 text-zinc-700 dark:text-zinc-300">
