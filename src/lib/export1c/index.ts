@@ -1,5 +1,8 @@
 import {
   Database1CSnapshot,
+  DEFAULT_REPORTING_YEAR,
+  DEFAULT_SBERBANK_BIK,
+  DEFAULT_SBERBANK_NAME,
   ExportMode1C,
   OsvReport,
   PersistedWorkbenchStateV2,
@@ -71,6 +74,7 @@ export interface ExportStatsSummary {
   mode: ExportMode1C;
   counterpartiesCount: number;
   contractsCount: number;
+  bankAccountsCount?: number;
   nomenclatureCount: number;
   warehousesCount: number;
   openingBalanceLinesCount: number;
@@ -83,6 +87,7 @@ export function buildExportBundle(params: {
   db1C: Database1CSnapshot | null;
   operations: QueuedOperation[];
   osv: OsvReport;
+  reportingYear?: number;
   fullState?: PersistedWorkbenchStateV2;
 }): {
   stats: ExportStatsSummary;
@@ -90,13 +95,23 @@ export function buildExportBundle(params: {
   enterpriseDataXml: string;
   jsonSnapshot: string;
 } {
-  const { mode, db1C, operations, osv, fullState } = params;
+  const { mode, db1C, operations, osv, reportingYear, fullState } = params;
+  const effYear = reportingYear ?? fullState?.reportingYear;
   const activeNewOps = operations.filter((op) => op.includeInProcessing && !op.isDuplicateIn1C);
 
   // Collect directories according to mode
   const cpMap = new Map<
     string,
-    { name: string; fullName: string; inn: string; kpp: string; kind: string }
+    {
+      name: string;
+      fullName: string;
+      inn: string;
+      kpp: string;
+      kind: string;
+      bankAccount?: string;
+      bik?: string;
+      bankName?: string;
+    }
   >();
   const ctrMap = new Map<
     string,
@@ -147,17 +162,31 @@ export function buildExportBundle(params: {
     const trimmedCp = op.counterpartyName.trim();
     if (
       trimmedCp.length >= 2 &&
-      (mode === 'clean_db' || op.bindings.counterparty.status === 'new_for_1c')
+      (mode === 'clean_db' ||
+        op.bindings.counterparty.status === 'new_for_1c' ||
+        Boolean(op.counterpartyBankAccount || op.counterpartyBik))
     ) {
       const key = op.counterpartyInn || trimmedCp.toLowerCase();
-      if (!cpMap.has(key)) {
+      const existing = cpMap.get(key);
+      if (!existing) {
         cpMap.set(key, {
           name: trimmedCp,
           fullName: trimmedCp,
           inn: op.counterpartyInn,
           kpp: op.counterpartyKpp,
           kind: op.counterpartyKind,
+          bankAccount: op.counterpartyBankAccount,
+          bik: op.counterpartyBik,
+          bankName: op.counterpartyBankName,
         });
+      } else {
+        if (!existing.bankAccount && op.counterpartyBankAccount) {
+          existing.bankAccount = op.counterpartyBankAccount;
+        }
+        if (!existing.bik && op.counterpartyBik) {
+          existing.bik = op.counterpartyBik;
+          existing.bankName = op.counterpartyBankName;
+        }
       }
     }
 
@@ -223,12 +252,24 @@ export function buildExportBundle(params: {
         )
       : [];
 
-  const dbPostingsCountInCleanMode = mode === 'clean_db' ? (db1C?.postings.length ?? 0) : 0;
+  // Only carry over DB postings in clean_db mode that belong to the active reporting period (>= effYear-01-01)
+  const filteredDbPostingsForCleanMode =
+    mode === 'clean_db' && db1C
+      ? effYear
+        ? db1C.postings.filter((p) => !p.date || p.date >= `${effYear}-01-01`)
+        : db1C.postings
+      : [];
+  const dbPostingsCountInCleanMode = filteredDbPostingsForCleanMode.length;
+
+  const bankAccountsCount =
+    Array.from(cpMap.values()).filter((c) => Boolean(c.bankAccount || c.bik)).length +
+    (activeNewOps.some((o) => o.entries.some((e) => e.debit === '51' || e.credit === '51')) ? 1 : 0);
 
   const stats: ExportStatsSummary = {
     mode,
     counterpartiesCount: cpMap.size,
     contractsCount: ctrMap.size,
+    bankAccountsCount,
     nomenclatureCount: nomMap.size,
     warehousesCount: whSet.size,
     openingBalanceLinesCount: openingLines.length,
@@ -241,6 +282,8 @@ export function buildExportBundle(params: {
   const bslCode = generateBslModule({
     mode,
     db1C,
+    reportingYear: effYear,
+    filteredDbPostings: filteredDbPostingsForCleanMode,
     activeNewOps,
     openingLines,
     cpList: Array.from(cpMap.values()),
@@ -264,6 +307,7 @@ export function buildExportBundle(params: {
       version: 2,
       exportedAt: new Date().toISOString(),
       exportMode: mode,
+      reportingYear: effYear ?? DEFAULT_REPORTING_YEAR,
       stats,
       db1C: fullState?.db1C ?? db1C,
       operations: fullState?.operations ?? operations,
@@ -284,16 +328,38 @@ export function buildExportBundle(params: {
 function generateBslModule(params: {
   mode: ExportMode1C;
   db1C: Database1CSnapshot | null;
+  reportingYear?: number;
+  filteredDbPostings: Database1CSnapshot['postings'];
   activeNewOps: QueuedOperation[];
   openingLines: OsvReport['leafRows'];
-  cpList: Array<{ name: string; fullName: string; inn: string; kpp: string; kind: string }>;
+  cpList: Array<{
+    name: string;
+    fullName: string;
+    inn: string;
+    kpp: string;
+    kind: string;
+    bankAccount?: string;
+    bik?: string;
+    bankName?: string;
+  }>;
   ctrList: Array<{ name: string; number: string; date: string; cpName: string; cpInn: string; kind: string }>;
   nomList: Array<{ name: string; unit: string; isService: boolean; vatRate: number }>;
   whList: string[];
   expList: string[];
 }): string {
-  const { mode, db1C, activeNewOps, openingLines, cpList, ctrList, nomList, whList, expList } =
-    params;
+  const {
+    mode,
+    db1C,
+    reportingYear,
+    filteredDbPostings,
+    activeNewOps,
+    openingLines,
+    cpList,
+    ctrList,
+    nomList,
+    whList,
+    expList,
+  } = params;
 
   const org = db1C?.organization;
   const orgName = escapeBsl(org?.name || '');
@@ -301,7 +367,19 @@ function generateBslModule(params: {
   const orgInn = escapeBsl(org?.inn || '');
   const orgKpp = escapeBsl(org?.kpp || '');
   const orgOgrn = escapeBsl(org?.ogrn || '');
-  const openingDateIso = dayBeforeIso(db1C?.periodStart || activeNewOps[0]?.date || '2025-04-01');
+  const orgDefaultBik = escapeBsl(
+    org?.bik || activeNewOps.find((o) => o.organizationBik)?.organizationBik || DEFAULT_SBERBANK_BIK
+  );
+  const orgDefaultBankName = escapeBsl(
+    org?.bankName ||
+      activeNewOps.find((o) => o.organizationBankName)?.organizationBankName ||
+      DEFAULT_SBERBANK_NAME
+  );
+  const orgDefaultAccount = escapeBsl(org?.bankAccount || '');
+  const basePeriodStart = reportingYear
+    ? `${reportingYear}-01-01`
+    : db1C?.periodStart || activeNewOps[0]?.date || '2026-01-01';
+  const openingDateIso = dayBeforeIso(basePeriodStart);
 
   const lines: string[] = [];
   lines.push('// ============================================================================');
@@ -338,6 +416,9 @@ function generateBslModule(params: {
   lines.push('\t\tСообщить("КРИТИЧЕСКАЯ ОШИБКА: Не найдена организация в базе 1С!");');
   lines.push('\t\tВозврат;');
   lines.push('\tКонецЕсли;');
+  lines.push(
+    `\tПопытка НайтиИлиСоздатьБанковскийСчет(ОрганизацияСсылка, "${orgDefaultBik}", "${orgDefaultBankName}", "${orgDefaultAccount}"); Исключение КонецПопытки;`
+  );
   lines.push('');
 
   // Warehouses
@@ -370,16 +451,25 @@ function generateBslModule(params: {
     lines.push('');
   }
 
-  // Counterparties
+  // Counterparties & Counterparty Bank Accounts
   if (cpList.length > 0) {
-    lines.push('\t// 4. Справочник Контрагенты (поиск по ИНН / Наименованию без дублей)');
+    lines.push('\t// 4. Справочник Контрагенты и их Банковские счета (поиск по ИНН / Наименованию без дублей)');
     for (const cp of cpList) {
       lines.push('\tПопытка');
       lines.push(
-        `\t\tНайтиИлиСоздатьКонтрагента("${escapeBsl(cp.name)}", "${escapeBsl(
+        `\t\tКонтрОбъектСсылка = НайтиИлиСоздатьКонтрагента("${escapeBsl(cp.name)}", "${escapeBsl(
           cp.fullName
         )}", "${escapeBsl(cp.inn)}", "${escapeBsl(cp.kpp)}", "${escapeBsl(cp.kind)}");`
       );
+      if (cp.bik || cp.bankAccount) {
+        const effCpBik = escapeBsl(cp.bik || DEFAULT_SBERBANK_BIK);
+        const effCpBank = escapeBsl(cp.bankName || DEFAULT_SBERBANK_NAME);
+        lines.push(
+          `\t\tНайтиИлиСоздатьБанковскийСчет(КонтрОбъектСсылка, "${effCpBik}", "${effCpBank}", "${escapeBsl(
+            cp.bankAccount || ''
+          )}");`
+        );
+      }
       lines.push('\t\tСчетчикСправочников = СчетчикСправочников + 1;');
       lines.push('\tИсключение');
       lines.push('\t\tСчетчикОшибок = СчетчикОшибок + 1;');
@@ -483,21 +573,22 @@ function generateBslModule(params: {
     lines.push('');
   }
 
-  if (mode === 'clean_db' && db1C && db1C.postings.length > 0) {
-    lines.push('\t// 8. Перенос существующих проводок периода из исходной базы 1С');
+  if (mode === 'clean_db' && filteredDbPostings.length > 0) {
+    const histDateIso = filteredDbPostings[0]?.date || basePeriodStart;
+    lines.push('\t// 8. Перенос проводок отчётного периода из исходной базы 1С');
     lines.push('\tПопытка');
     lines.push('\t\tДокИст = Документы.ОперацияБух.СоздатьДокумент();');
-    lines.push(`\t\tДокИст.Дата = ${toBslDateExpr(db1C.periodStart)};`);
+    lines.push(`\t\tДокИст.Дата = ${toBslDateExpr(histDateIso)};`);
     lines.push('\t\tДокИст.Организация = ОрганизацияСсылка;');
     lines.push('\t\tДокИст.Содержание = "Перенос проводок периода из исходной базы 1С";');
     lines.push(
-      `\t\tДокИст.СуммаОперации = ${db1C.postings
+      `\t\tДокИст.СуммаОперации = ${filteredDbPostings
         .reduce((s, p) => s + p.amount, 0)
         .toFixed(2)};`
     );
-    for (const p of db1C.postings) {
+    for (const p of filteredDbPostings) {
       lines.push('\t\tДвиж = ДокИст.Движения.Хозрасчетный.Добавить();');
-      lines.push(`\t\tДвиж.Период = ${toBslDateExpr(p.date || db1C.periodStart)};`);
+      lines.push(`\t\tДвиж.Период = ${toBslDateExpr(p.date || histDateIso)};`);
       lines.push('\t\tДвиж.Организация = ОрганизацияСсылка;');
       lines.push(`\t\tДвиж.СчетДт = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${escapeBsl(p.debit)}");`);
       lines.push(`\t\tДвиж.СчетКт = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${escapeBsl(p.credit)}");`);
@@ -923,6 +1014,31 @@ function generateBslModule(params: {
   lines.push('\tНов.Наименование = Наименование;');
   lines.push('\tНов.Записать();');
   lines.push('\tВозврат Нов.Ссылка;');
+  lines.push('КонецФункции');
+  lines.push('');
+
+  lines.push('&НаСервере');
+  lines.push('Функция НайтиИлиСоздатьБанковскийСчет(ВладелецСсылка, БИКБанка, НаименованиеБанка, НомерСчета)');
+  lines.push('\tЕсли Не ЗначениеЗаполнено(БИКБанка) Тогда Возврат Неопределено; КонецЕсли;');
+  lines.push('\tБанкСсылка = Справочники.Банки.НайтиПоКоду(БИКБанка);');
+  lines.push('\tЕсли Не ЗначениеЗаполнено(БанкСсылка) Тогда');
+  lines.push('\t\tНовБанк = Справочники.Банки.СоздатьЭлемент();');
+  lines.push('\t\tНовБанк.Код = БИКБанка;');
+  lines.push('\t\tНовБанк.Наименование = ?(ЗначениеЗаполнено(НаименованиеБанка), НаименованиеБанка, "Банк БИК " + БИКБанка);');
+  lines.push('\t\tНовБанк.Записать();');
+  lines.push('\t\tБанкСсылка = НовБанк.Ссылка;');
+  lines.push('\tКонецЕсли;');
+  lines.push('\tЕсли ЗначениеЗаполнено(НомерСчета) Тогда');
+  lines.push('\t\tНайденныйСчет = Справочники.БанковскиеСчета.НайтиПоРеквизиту("НомерСчета", НомерСчета, , ВладелецСсылка);');
+  lines.push('\t\tЕсли ЗначениеЗаполнено(НайденныйСчет) Тогда Возврат НайденныйСчет; КонецЕсли;');
+  lines.push('\tКонецЕсли;');
+  lines.push('\tНовСчет = Справочники.БанковскиеСчета.СоздатьЭлемент();');
+  lines.push('\tНовСчет.Владелец = ВладелецСсылка;');
+  lines.push('\tНовСчет.Банк = БанкСсылка;');
+  lines.push('\tЕсли ЗначениеЗаполнено(НомерСчета) Тогда НовСчет.НомерСчета = НомерСчета; КонецЕсли;');
+  lines.push('\tНовСчет.Наименование = ?(ЗначениеЗаполнено(НомерСчета), НомерСчета + " (" + БИКБанка + ")", "Основной счёт (" + БИКБанка + ")");');
+  lines.push('\tНовСчет.Записать();');
+  lines.push('\tВозврат НовСчет.Ссылка;');
   lines.push('КонецФункции');
 
   return lines.join('\n');

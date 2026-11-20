@@ -39,19 +39,29 @@ export function loadWorkbenchState(): PersistedWorkbenchStateV2 | null {
     const rawOperations = Array.isArray(parsed.operations) ? parsed.operations : [];
     const sanitizedOperations = sanitizeHydratedOperations(rawOperations, db1C);
 
+    const reportingYear =
+      typeof parsed.reportingYear === 'number' &&
+      parsed.reportingYear >= 2000 &&
+      parsed.reportingYear <= 2100
+        ? parsed.reportingYear
+        : 2026;
+
     return {
       version: 2,
       activeTab: parsed.activeTab ?? 'db_osv',
+      reportingYear,
       db1C,
       balanceAnchorOverride: parsed.balanceAnchorOverride ?? 'auto',
       includeQueuedInOsv: parsed.includeQueuedInOsv ?? true,
       periodFilter: parsed.periodFilter ?? {
-        dateFrom: db1C?.periodStart ?? '',
-        dateTo: db1C?.periodEnd ?? '',
+        dateFrom: `${reportingYear}-01-01`,
+        dateTo: `${reportingYear}-12-31`,
       },
       operations: sanitizedOperations,
       resolvedInlineNotes: {},
       exportMode: parsed.exportMode ?? 'incremental',
+      lastImportStats: parsed.lastImportStats ?? null,
+      autoFixChanges: Array.isArray(parsed.autoFixChanges) ? parsed.autoFixChanges : [],
     };
   } catch {
     return null;

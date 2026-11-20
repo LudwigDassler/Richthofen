@@ -25,6 +25,8 @@ export function Header() {
     setActiveTab,
     db1C,
     syncStatus,
+    reportingYear,
+    setReportingYear,
     periodFilter,
     setPeriodFilter,
     operations,
@@ -133,8 +135,29 @@ export function Header() {
           )}
         </div>
 
-        {/* Right: Period Filter + 1C Sync / Upload + Theme + Reset */}
+        {/* Right: Reporting Year + Period Filter + 1C Sync / Upload + Theme + Reset */}
         <div className="flex items-center gap-2 shrink-0">
+          {/* Reporting Year selector (default 2026) */}
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded border border-amber-300/80 dark:border-amber-800/70 bg-amber-50/60 dark:bg-amber-950/30 text-xs">
+            <span className="text-zinc-600 dark:text-zinc-300 hidden sm:inline">
+              Отчётный год:
+            </span>
+            <select
+              aria-label="Отчётный год"
+              value={reportingYear}
+              onChange={(e) => setReportingYear(Number(e.target.value))}
+              className="bg-transparent font-mono font-semibold tabular-nums text-amber-800 dark:text-amber-300 focus:outline-none text-xs cursor-pointer"
+            >
+              {Array.from(new Set([2024, 2025, 2026, 2027, reportingYear]))
+                .sort((a, b) => a - b)
+                .map((yr) => (
+                  <option key={yr} value={yr} className="bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100">
+                    {yr}
+                  </option>
+                ))}
+            </select>
+          </div>
+
           {/* Period selector */}
           <div className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/60 text-xs">
             <span className="text-zinc-500 dark:text-zinc-400">Период:</span>
@@ -157,19 +180,19 @@ export function Header() {
               }
               className="bg-transparent font-mono tabular-nums text-zinc-900 dark:text-zinc-100 focus:outline-none text-xs"
             />
-            {(periodFilter.dateFrom || periodFilter.dateTo) && db1C && (
+            {(periodFilter.dateFrom || periodFilter.dateTo) && (
               <button
                 type="button"
                 onClick={() =>
                   setPeriodFilter({
-                    dateFrom: db1C.periodStart,
-                    dateTo: db1C.periodEnd,
+                    dateFrom: `${reportingYear}-01-01`,
+                    dateTo: `${reportingYear}-12-31`,
                   })
                 }
-                title="Сбросить к периоду выгрузки 1С"
+                title={`Установить весь ${reportingYear} отчётный год`}
                 className="ml-1 text-[11px] text-amber-700 dark:text-amber-400 hover:underline"
               >
-                весь
+                весь {reportingYear}
               </button>
             )}
           </div>

@@ -1,11 +1,18 @@
 import { getAccountInfo } from '@/data/chartOfAccounts';
 import {
+  AuditGuide1CBP30,
   AuditIssue,
+  AutoFixChangeRecord,
+  CounterpartyResolutionSource,
   Database1CSnapshot,
+  DEFAULT_SBERBANK_BIK,
+  DEFAULT_SBERBANK_NAME,
+  EgrulCandidate,
   OsvReport,
   QueuedOperation,
 } from '@/types/accounting';
 import {
+  BatchSequentialContext,
   bindAndGenerateOperation,
   extractFounderFioFromDescription,
   findPersonMentionedInDescription1C,
@@ -13,6 +20,10 @@ import {
   matchPersonOrCounterpartyIn1C,
   normalizeEntityKey,
 } from '@/lib/engine/postingEngine';
+import {
+  extractRequisitesFromFreeText,
+  normalizeOperationDateToReportingYear,
+} from '@/lib/import1c/batchFileParser';
 
 function round2(n: number): number {
   const r = Math.round((n + Number.EPSILON) * 100) / 100;
@@ -64,6 +75,11 @@ export interface PendingNewCounterpartyInfo {
   name: string;
   currentInn: string;
   currentKpp: string;
+  bankAccount?: string;
+  bik?: string;
+  bankName?: string;
+  source: CounterpartyResolutionSource;
+  egrulCandidates: EgrulCandidate[];
   kind: QueuedOperation['counterpartyKind'];
   operationIds: string[];
   primaryOperationId: string;
@@ -89,12 +105,16 @@ export function computePendingNewCounterparties(
       'payroll_accrual',
       'payroll_payout',
       'bank_fee',
-      'tax_payment',
     ].includes(op.category);
     if (!needsCp) continue;
 
     const trimmedName = op.counterpartyName.trim();
     if (trimmedName.length < 2) continue;
+
+    // For tax_payment, only show in pending counterparties if missing INN (when explicit INN is already parsed from text, no manual action needed)
+    if (op.category === 'tax_payment' && isValidRussianInnFormat(op.counterpartyInn)) {
+      continue;
+    }
 
     const isMatchedIn1C =
       op.bindings.counterparty.status === 'matched_1c' ||
@@ -114,11 +134,28 @@ export function computePendingNewCounterparties(
       cleanInn.length === 10 &&
       cleanKpp.length !== 9;
 
+    const opSource: CounterpartyResolutionSource =
+      op.counterpartySource ??
+      (validInn ? 'excel_explicit' : 'unresolved');
+
     const existing = map.get(key);
     if (existing) {
       existing.operationIds.push(op.id);
       if (!existing.currentInn && cleanInn) existing.currentInn = cleanInn;
       if (!existing.currentKpp && cleanKpp) existing.currentKpp = cleanKpp;
+      if (!existing.bankAccount && op.counterpartyBankAccount) {
+        existing.bankAccount = op.counterpartyBankAccount;
+      }
+      if (!existing.bik && op.counterpartyBik) {
+        existing.bik = op.counterpartyBik;
+        existing.bankName = op.counterpartyBankName;
+      }
+      if (existing.egrulCandidates.length === 0 && op.egrulCandidates?.length) {
+        existing.egrulCandidates = op.egrulCandidates;
+      }
+      if (existing.source === 'unresolved' && opSource !== 'unresolved') {
+        existing.source = opSource;
+      }
       if (needsInn) existing.needsInn = true;
       if (needsKpp) existing.needsKpp = true;
     } else {
@@ -127,6 +164,11 @@ export function computePendingNewCounterparties(
         name: trimmedName,
         currentInn: cleanInn,
         currentKpp: cleanKpp,
+        bankAccount: op.counterpartyBankAccount,
+        bik: op.counterpartyBik,
+        bankName: op.counterpartyBankName,
+        source: opSource,
+        egrulCandidates: op.egrulCandidates ?? [],
         kind: op.counterpartyKind,
         operationIds: [op.id],
         primaryOperationId: op.id,
@@ -137,6 +179,89 @@ export function computePendingNewCounterparties(
   }
 
   return Array.from(map.values());
+}
+
+function buildRedBalanceGuide1C(code: string, name: string, val: number): {
+  accountingReason: string;
+  guide1C: AuditGuide1CBP30;
+} {
+  if (code === '50.01' || code === '51') {
+    return {
+      accountingReason: `По активному денежному счёту ${code} «${name}» расход превысил входящий остаток и поступления на ${Math.abs(val).toFixed(2)} ₽. По правилам кассовой и банковской дисциплины отрицательный остаток денег невозможен — не отражено поступление средств (выручка, заём, вклад учредителя 75.01) или нарушено время проведения документов внутри одного дня.`,
+      guide1C: {
+        menuPath:
+          code === '51'
+            ? 'Банк и касса → Банковские выписки'
+            : 'Банк и касса → Кассовые документы',
+        documentKind:
+          code === '51'
+            ? 'Поступление на расчетный счет / Списание с расчетного счета'
+            : 'Поступление наличных (ПКО) / Выдача наличных (РКО)',
+        checkPoints: [
+          `Проверьте полноту загрузки всех выписок по счёту ${code} и входящее сальдо на начало периода`,
+          'Проверьте время документов внутри одной даты: приходные документы должны стоять по времени раньше расходных (например, 09:00:00 vs 15:00:00)',
+          'Убедитесь, что банковский счёт организации выбран одинаковый во всех документах',
+        ],
+        repostInstruction:
+          'Операции → Закрытие месяца → Перепроведение документов за месяц → Выполнить операцию',
+        verifyInOsv: `Отчеты → Карточка счета ${code} (с отбором по дням) и Оборотно-сальдовая ведомость по счету ${code}`,
+      },
+    };
+  }
+
+  if (code.startsWith('41') || code.startsWith('10') || code.startsWith('43')) {
+    return {
+      accountingReason: `По активному счёту учёта МПЗ ${code} «${name}» списано ТМЦ больше, чем числилось на складе (${val.toFixed(2)} ₽). Типичные причины в 1С БП 3.0: реализация проведена раньше поступления по времени, выбран другой «Склад» или дубликат карточки «Номенклатура».`,
+      guide1C: {
+        menuPath: 'Покупки → Поступление (акты, накладные, УПД) / Продажи → Реализация (акты, накладные, УПД)',
+        documentKind: 'Поступление товаров (накладная, УПД) и Реализация товаров',
+        checkPoints: [
+          `Сверьте реквизит «Склад» и точную карточку «Номенклатура» в приходной и расходной накладных по счёту ${code}`,
+          'Проверьте дату и время документов: Поступление должно быть проведено раньше Реализации / Требования-накладной',
+          `Проверьте счёт учёта номенклатуры в табличной части (${code})`,
+        ],
+        repostInstruction:
+          'Откройте документ поступления → Провести и закрыть, затем выполните Операции → Закрытие месяца → Перепроведение документов',
+        verifyInOsv: `Отчеты → Оборотно-сальдовая ведомость по счету ${code} (группировка по Номенклатуре, Складам и Партиям)`,
+      },
+    };
+  }
+
+  if (code.startsWith('60') || code.startsWith('62')) {
+    const isSupplier = code.startsWith('60');
+    return {
+      accountingReason: `По счёту расчётов ${code} «${name}» возник отрицательный остаток (${val.toFixed(2)} ₽) из-за отражения оплаты/аванса на счёте расчётов (${isSupplier ? '60.01 вместо 60.02' : '62.01 вместо 62.02'}) либо несоответствия субконто «Договор» между оплатой и накладной.`,
+      guide1C: {
+        menuPath: 'Банк и касса → Банковские выписки',
+        documentKind: isSupplier
+          ? 'Списание с расчетного счета (Оплата поставщику)'
+          : 'Поступление на расчетный счет (Оплата от покупателя)',
+        checkPoints: [
+          `Установите в документе Счёт расчётов = ${isSupplier ? '60.01' : '62.01'}, Счёт авансов = ${isSupplier ? '60.02' : '62.02'}`,
+          'Проверьте реквизит «Погашение задолженности: Автоматически»',
+          'Убедитесь, что в оплате и в накладной/акте выбран строго один и тот же «Договор контрагента»',
+        ],
+        repostInstruction:
+          'Перепроведите банковскую выписку и связанную накладную кнопкой «Провести и закрыть» в хронологическом порядке',
+        verifyInOsv: `Отчеты → Оборотно-сальдовая ведомость по счету ${isSupplier ? '60' : '62'} (по субсчетам и субконто Контрагенты, Договоры)`,
+      },
+    };
+  }
+
+  return {
+    accountingReason: `По счёту ${code} «${name}» сформировалось отрицательное конечное сальдо (${val.toFixed(2)} ₽), не характерное для его вида (активный/пассивный).`,
+    guide1C: {
+      menuPath: 'Операции → Операции, введенные вручную / Журнал операций',
+      documentKind: 'Документы движения по счёту ' + code,
+      checkPoints: [
+        `Откройте Карточку счёта ${code} и найдите документ, после которого сальдо ушло в минус`,
+        'Проверьте корректность корреспондирующего счёта и аналитики (субконто)',
+      ],
+      repostInstruction:
+        'Исправьте счёт/сумму в первичном документе → Провести и закрыть → Операции → Закрытие месяца',
+      verifyInOsv: `Отчеты → Оборотно-сальдовая ведомость по счету ${code}`,
+    },
+  };
 }
 
 export function runAuditDiagnostics(params: {
@@ -157,6 +282,18 @@ export function runAuditDiagnostics(params: {
       category: 'osv_disbalance',
       title: 'Нарушено равенство начального сальдо ОСВ',
       description: `Сальдо на начало по Дебету (${osv.totals.startDebit.toFixed(2)} ₽) не равно Кредиту (${osv.totals.startCredit.toFixed(2)} ₽). Разница: ${osv.totals.startDiff.toFixed(2)} ₽.`,
+      accountingReason: `Нарушен базовый постулат двойной записи на дату начала периода: сумма дебетовых остатков отличается от кредитовых на ${osv.totals.startDiff.toFixed(2)} ₽. Обычно это означает незакрытый вспомогательный счёт 000 при вводе начальных остатков.`,
+      quickFixLabel: 'Проверьте режим интерпретации остатков БД 1С во вкладке 1 (Начало / Конец периода)',
+      guide1C: {
+        menuPath: 'Главное → Помощник ввода остатков',
+        documentKind: 'Ввод начальных остатков (в корреспонденции со счётом 000)',
+        checkPoints: [
+          'Проверьте, что по вспомогательному счёту 000 конечное сальдо на дату ввода остатков строго равно 0,00 ₽',
+          'Сверьте остатки по расчётному счёту (51), уставному капиталу (80.09), расчётам с бюджетом (68, 69) и нераспределённой прибыли (84)',
+        ],
+        repostInstruction: 'Перепроведите документы «Ввод начальных остатков» на дату 31.12 предшествующего года',
+        verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость (общая по всем счетам, проверить отсутствие счёта 000)',
+      },
       canAutoFixBy1C: false,
     });
   }
@@ -168,6 +305,17 @@ export function runAuditDiagnostics(params: {
       category: 'osv_disbalance',
       title: 'Нарушено равенство оборотов за период',
       description: `Обороты Дт (${osv.totals.turnoverDebit.toFixed(2)} ₽) не равны оборотам Кт (${osv.totals.turnoverCredit.toFixed(2)} ₽). Проверьте незаполненные счета проводок.`,
+      accountingReason: `Обороты по Дебету и Кредиту за отчётный период расходятся на ${osv.totals.turnoverDiff.toFixed(2)} ₽ из-за односторонней проводки (не указан счёт Дт или Кт в ручной операции).`,
+      quickFixLabel: 'Заполните пустой счёт проводки в карточке ниже',
+      guide1C: {
+        menuPath: 'Операции → Операции, введенные вручную',
+        documentKind: 'Операция (бухгалтерский и налоговый учет)',
+        checkPoints: [
+          'Проверьте каждую строку движений регистра бухгалтерии: должны быть заполнены оба счёта — Счет Дт и Счет Кт',
+        ],
+        repostInstruction: 'Запишите исправленную операцию кнопкой «Записать и закрыть»',
+        verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость за период',
+      },
       canAutoFixBy1C: false,
     });
   }
@@ -179,6 +327,18 @@ export function runAuditDiagnostics(params: {
       category: 'osv_disbalance',
       title: 'Нарушено равенство конечного сальдо ОСВ',
       description: `Сальдо на конец по Дебету (${osv.totals.endDebit.toFixed(2)} ₽) не равно Кредиту (${osv.totals.endCredit.toFixed(2)} ₽). Разница: ${osv.totals.endDiff.toFixed(2)} ₽.`,
+      accountingReason: `Итоговый баланс активов и пассивов на конец периода нарушен на ${osv.totals.endDiff.toFixed(2)} ₽ вследствие дисбаланса входящих остатков или односторонних проводок.`,
+      quickFixLabel: 'Устраните дисбаланс начального сальдо или незаполненных проводок',
+      guide1C: {
+        menuPath: 'Отчеты → Экспресс-проверка ведения учета',
+        documentKind: 'Отчёт «Экспресс-проверка ведения учета»',
+        checkPoints: [
+          'Выполните проверку раздела «Положения учетной политики» и «Операции по кассе / банку / ведение книги покупок и продаж»',
+          'Проверьте отсутствие остатка на счёте 000 и односторонних ручных проводок',
+        ],
+        repostInstruction: 'Операции → Закрытие месяца → Перепроведение документов за месяц',
+        verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость за отчётный период',
+      },
       canAutoFixBy1C: false,
     });
   }
@@ -187,7 +347,12 @@ export function runAuditDiagnostics(params: {
   for (const row of osv.leafRows) {
     if (row.hasRedEnd) {
       const val = row.type === 'active' ? row.endDebit : row.endCredit;
-      const isSettlementReclassifiable = row.code === '60.01' || row.code === '62.01' || row.code === '60.02' || row.code === '62.02';
+      const isSettlementReclassifiable =
+        row.code === '60.01' ||
+        row.code === '62.01' ||
+        row.code === '60.02' ||
+        row.code === '62.02';
+      const redDetails = buildRedBalanceGuide1C(row.code, row.name, val);
       issues.push({
         id: `red-end-${row.code}`,
         severity: 'error',
@@ -195,6 +360,11 @@ export function runAuditDiagnostics(params: {
         accountCode: row.code,
         title: `Отрицательный остаток («краснота») по счёту ${row.code}`,
         description: `Счёт ${row.code} «${row.name}» (${row.type === 'active' ? 'активный' : 'пассивный'}) имеет отрицательное конечное сальдо ${val.toFixed(2)} ₽.`,
+        accountingReason: redDetails.accountingReason,
+        quickFixLabel: isSettlementReclassifiable
+          ? 'Нажмите «Исправить всё автоматически» для переклассификации и зачёта авансов'
+          : 'Проверьте хронологию и полноту приходных документов по счёту ' + row.code,
+        guide1C: redDetails.guide1C,
         canAutoFixBy1C: isSettlementReclassifiable,
         autoFixActionLabel: isSettlementReclassifiable
           ? 'Переклассифицировать расчёты / авансы (60.01↔60.02, 62.01↔62.02)'
@@ -215,6 +385,19 @@ export function runAuditDiagnostics(params: {
       accountCode: '60',
       title: 'Незачтённые авансы поставщикам (счета 60.01 и 60.02)',
       description: `Одновременно числится кредиторская задолженность на 60.01 (${acc6001.endCredit.toFixed(2)} ₽) и выданный аванс на 60.02 (${acc6002.endDebit.toFixed(2)} ₽). Возможен зачёт на сумму до ${offsetAmt.toFixed(2)} ₽.`,
+      accountingReason: `Развёрнутое сальдо по счёту 60 искажает строки бухгалтерского баланса (дебиторскую и кредиторскую задолженность). При поступлении ТМЦ/услуг после предоплаты должна формироваться проводка зачёта аванса Дт 60.01 Кт 60.02 на сумму ${offsetAmt.toFixed(2)} ₽.`,
+      quickFixLabel: 'Автоматический зачёт Дт 60.01 Кт 60.02 кнопкой «Исправить всё автоматически»',
+      guide1C: {
+        menuPath: 'Покупки → Поступление (акты, накладные, УПД) (или Покупки → Корректировка долга)',
+        documentKind: 'Поступление (акт, накладная, УПД)',
+        checkPoints: [
+          'В документе поступления проверьте ссылку «Расчеты»: Счет расчетов = 60.01, Счет авансов = 60.02, Зачет авансов = «Автоматически»',
+          'Проверьте, что в Списании с р/с и в Поступлении выбран один и тот же элемент справочника «Договоры»',
+          'Если договоры разные — оформите документ «Покупки → Корректировка долга» с видом операции «Зачет авансов»',
+        ],
+        repostInstruction: 'Перепроведите банковскую выписку и затем документ поступления («Провести и закрыть»)',
+        verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 60 (флаги «По субсчетам», «Контрагенты», «Договоры»)',
+      },
       canAutoFixBy1C: true,
       autoFixActionLabel: 'Сформировать зачёт авансов поставщикам (Дт 60.01 Кт 60.02)',
     });
@@ -231,6 +414,18 @@ export function runAuditDiagnostics(params: {
       accountCode: '62',
       title: 'Незачтённые авансы покупателей (счета 62.01 и 62.02)',
       description: `Одновременно числится дебиторская задолженность на 62.01 (${acc6201.endDebit.toFixed(2)} ₽) и полученный аванс на 62.02 (${acc6202.endCredit.toFixed(2)} ₽). Возможен зачёт на сумму до ${offsetAmt.toFixed(2)} ₽.`,
+      accountingReason: `При отгрузке в счёт полученной предоплаты должен быть выполнен зачёт Дт 62.02 Кт 62.01 (${offsetAmt.toFixed(2)} ₽), иначе завышаются дебиторская и кредиторская задолженности и не применяется вычет НДС с аванса (Дт 68.02 Кт 76.АВ).`,
+      quickFixLabel: 'Автоматический зачёт Дт 62.02 Кт 62.01 кнопкой «Исправить всё автоматически»',
+      guide1C: {
+        menuPath: 'Продажи → Реализация (акты, накладные, УПД) (или Продажи → Корректировка долга)',
+        documentKind: 'Реализация (акт, накладная, УПД)',
+        checkPoints: [
+          'В документе реализации проверьте гиперссылку «Расчеты»: Счет расчетов = 62.01, Счет авансов = 62.02, Зачет авансов = «Автоматически»',
+          'Сверьте «Договор» с документом «Поступление на расчетный счет»',
+        ],
+        repostInstruction: 'Перепроведите поступление оплаты и реализацию в хронологическом порядке, затем сформируйте «Формирование записей книги покупок»',
+        verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 62 и Анализ субконто «Контрагенты»',
+      },
       canAutoFixBy1C: true,
       autoFixActionLabel: 'Сформировать зачёт авансов покупателей (Дт 62.02 Кт 62.01)',
     });
@@ -247,17 +442,84 @@ export function runAuditDiagnostics(params: {
       issues.push({
         id: 'missing-advance-vat-76av',
         severity: 'warning',
-        category: 'unclosed_period',
+        category: 'vat_discrepancy',
         accountCode: '76.АВ',
         title: 'Не начислен НДС с полученных авансов покупателей (76.АВ — 68.02)',
         description: `По остатку авансов на счёте 62.02 (${acc6202.endCredit.toFixed(2)} ₽) расчётный НДС ${vatRate}/${100 + vatRate} составляет ${expected76AV.toFixed(2)} ₽ (отражено на 76.АВ: ${current76AV.toFixed(2)} ₽).`,
+        accountingReason: `Согласно п. 1 ст. 167 НК РФ налогоплательщик на ОСНО обязан исчислить НДС по расчётной ставке ${vatRate}/${100 + vatRate} с суммы полученной предоплаты и выставить счёт-фактуру на аванс (Дт 76.АВ Кт 68.02).`,
+        quickFixLabel: 'Сформировать СФ на аванс кнопкой «Исправить всё автоматически»',
+        guide1C: {
+          menuPath: 'Банк и касса → Регистрация счетов-фактур → Счета-фактуры на аванс',
+          documentKind: 'Обработка «Регистрация счетов-фактур на аванс» → Счет-фактура выданный (на аванс)',
+          checkPoints: [
+            'Укажите период и нажмите кнопку «Заполнить», затем «Выполнить»',
+            `Проверьте соответствие формулы: Сальдо Кт 62.02 × ${vatRate}/${100 + vatRate} = Сальдо Дт 76.АВ`,
+          ],
+          repostInstruction: 'Операции → Закрытие месяца / Помощник по учету НДС → перепроведите регламентные операции НДС',
+          verifyInOsv: 'Отчеты → Экспресс-проверка ведения учета (раздел Ведение книги продаж) и Анализ счета 62.02 / 76.АВ',
+        },
         canAutoFixBy1C: true,
         autoFixActionLabel: 'Сформировать СФ на аванс (Дт 76.АВ Кт 68.02)',
       });
     }
   }
 
-  // 4. Unclosed month-end accounts (26, 44.01, 90, 91)
+  // Check unaccepted input VAT sitting on 19.* (vat_discrepancy)
+  if (isOsno) {
+    const rows19 = osv.leafRows.filter((r) => r.code.startsWith('19.') && r.endDebit > 0.01);
+    for (const r19 of rows19) {
+      issues.push({
+        id: `open-vat-${r19.code}`,
+        severity: 'warning',
+        category: 'vat_discrepancy',
+        accountCode: r19.code,
+        title: `Не принят к вычету входной НДС на счёте ${r19.code} (${r19.endDebit.toFixed(2)} ₽)`,
+        description: `На конец периода на счёте ${r19.code} «${r19.name}» остался дебетовый остаток ${r19.endDebit.toFixed(2)} ₽ без вычета в Дт 68.02.`,
+        accountingReason: `Входной НДС учтён при поступлении (Дт ${r19.code} Кт 60.01), но не списан в уменьшение налога к уплате (Дт 68.02 Кт ${r19.code}). Если оригинал счёта-фактуры или УПД со статусом «1» получен от поставщика, вычет применяется в текущем квартале (ст. 171–172 НК РФ).`,
+        quickFixLabel: 'Отметьте наличие СФ/УПД в карточке операции во вкладке 2 или оставьте на 19 счёте при отсутствии оригинала СФ',
+        guide1C: {
+          menuPath: 'Покупки → Поступление (акты, накладные, УПД) / Операции → Помощник по учету НДС',
+          documentKind: 'Счет-фактура полученный / Формирование записей книги покупок',
+          checkPoints: [
+            'В нижней части документа Поступление проверьте наличие номера и даты входящего СФ (или переключатель «УПД»)',
+            'В документе «Счет-фактура полученный» проверьте установленный флажок «Отразить вычет НДС в книге покупок датой получения»',
+            'Либо сформируйте документ «Операции → Регламентные операции НДС → Формирование записей книги покупок»',
+          ],
+          repostInstruction: 'Проведите «Счет-фактура полученный» или «Формирование записей книги покупок»',
+          verifyInOsv: `Отчеты → Оборотно-сальдовая ведомость по счету ${r19.code} (в разрезе Контрагентов и Счетов-фактур полученных)`,
+        },
+        canAutoFixBy1C: false,
+      });
+    }
+  }
+
+  // 4. Unclosed month-end accounts (20.01, 26, 44.01, 90, 91)
+  const acc20 = osv.leafRows.find((r) => r.code === '20.01');
+  if (acc20 && acc20.endDebit > 0.01) {
+    issues.push({
+      id: 'unclosed-20',
+      severity: 'warning',
+      category: 'unclosed_period',
+      accountCode: '20.01',
+      title: 'Остаток на счёте 20.01 «Основное производство»',
+      description: `На конец периода на счёте 20.01 числится дебетовый остаток ${acc20.endDebit.toFixed(2)} ₽ (незавершённое производство или не выполнено закрытие счёта 20).`,
+      accountingReason: `Если у организации нет незавершённого производства (НЗП), прямые производственные затраты по счёту 20.01 закрываются ежемесячно в Дт 90.02.1 (или 43/40) по номенклатурным группам.`,
+      quickFixLabel: 'Нажмите «Исправить всё автоматически» для регламентного закрытия месяца',
+      guide1C: {
+        menuPath: 'Операции → Закрытие месяца',
+        documentKind: 'Регламентная операция «Закрытие счетов 20, 23, 25, 26»',
+        checkPoints: [
+          'Проверьте совпадение субконто «Номенклатурная группа» на счёте 20.01 и выручки на счёте 90.01.1',
+          'В «Главное → Учетная политика → Затраты» проверьте правила учёта прямых расходов и НЗП',
+        ],
+        repostInstruction: 'Операции → Закрытие месяца → Выполнить закрытие месяца',
+        verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 20.01 и Справка-расчет себестоимости',
+      },
+      canAutoFixBy1C: true,
+      autoFixActionLabel: 'Закрыть счёт 20.01 в Дт 90.02.1',
+    });
+  }
+
   const acc26 = osv.leafRows.find((r) => r.code === '26');
   if (acc26 && acc26.endDebit > 0.01) {
     issues.push({
@@ -267,6 +529,18 @@ export function runAuditDiagnostics(params: {
       accountCode: '26',
       title: 'Не закрыт счёт 26 «Общехозяйственные расходы»',
       description: `На конец периода на счёте 26 числится остаток ${acc26.endDebit.toFixed(2)} ₽. По РСБУ счёт 26 закрывается ежемесячно.`,
+      accountingReason: `Общехозяйственные (управленческие) расходы по ФСБУ 5/2019 и Инструкции к Плану счетов не формируют остаток НЗП и в полном объёме списываются в Дт 90.08.1 («Директ-костинг») на конец каждого месяца.`,
+      quickFixLabel: 'Закрыть счёт 26 кнопкой «Исправить всё автоматически»',
+      guide1C: {
+        menuPath: 'Операции → Закрытие месяца',
+        documentKind: 'Регламентная операция «Закрытие счетов 20, 23, 25, 26»',
+        checkPoints: [
+          'Проверьте заполнение субконто «Подразделения» и «Статьи затрат» во всех документах отнесения расходов на счёт 26',
+          'В «Главное → Учетная политика» убедитесь, что управленческие расходы списываются на счёт 90.08.1 (директ-костинг)',
+        ],
+        repostInstruction: 'Операции → Закрытие месяца → Выполнить закрытие месяца',
+        verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 26 (конечное сальдо = 0,00 ₽)',
+      },
       canAutoFixBy1C: true,
       autoFixActionLabel: 'Закрыть счёт 26 регламентной операцией',
     });
@@ -281,6 +555,17 @@ export function runAuditDiagnostics(params: {
       accountCode: '44.01',
       title: 'Не закрыт счёт 44.01 «Издержки обращения»',
       description: `На конец периода на счёте 44.01 числится остаток ${acc4401.endDebit.toFixed(2)} ₽.`,
+      accountingReason: `Коммерческие расходы торговой организации (кроме транспортных расходов в доле остатка товаров) ежемесячно списываются со счёта 44.01 в дебет счёта 90.07.1 / 90.02.1.`,
+      quickFixLabel: 'Закрыть счёт 44.01 кнопкой «Исправить всё автоматически»',
+      guide1C: {
+        menuPath: 'Операции → Закрытие месяца',
+        documentKind: 'Регламентная операция «Закрытие счета 44 "Издержки обращения"»',
+        checkPoints: [
+          'Проверьте вид расхода в справочнике «Статьи затрат» (прочие расходы списываются полностью, транспортные — пропорционально остатку на 41 счёте)',
+        ],
+        repostInstruction: 'Операции → Закрытие месяца → Выполнить закрытие месяца',
+        verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 44.01 и Справка-расчет «Списание косвенных расходов»',
+      },
       canAutoFixBy1C: true,
       autoFixActionLabel: 'Списать расходы на продажу в Дт 90.02.1',
     });
@@ -296,6 +581,18 @@ export function runAuditDiagnostics(params: {
       accountCode: '90',
       title: 'Не закрыт счёт 90 «Продажи» на финансовый результат (90.09 — 99.01.1)',
       description: `Синтетический счёт 90 имеет ненулевое свёрнутое сальдо на конец периода (${Math.abs(residual).toFixed(2)} ₽).`,
+      accountingReason: `По Плану счетов РСБУ синтетический счёт 90 на конец каждого месяца не должен иметь сальдо (субсчета 90.01, 90.02, 90.03, 90.08 накапливают обороты в течение года, а финансовый результат месяца переносится проводкой 90.09 ↔ 99.01.1).`,
+      quickFixLabel: 'Закрыть счёт 90 кнопкой «Исправить всё автоматически»',
+      guide1C: {
+        menuPath: 'Операции → Закрытие месяца',
+        documentKind: 'Регламентная операция «Закрытие счетов 90, 91»',
+        checkPoints: [
+          'Убедитесь, что перед закрытием счёта 90 выполнены операции закрытия счетов 20, 26 и 44',
+          'В декабре дополнительно выполняется операция «Реформация баланса» для закрытия субсчетов 90.01–90.09 и переноса 99 на 84',
+        ],
+        repostInstruction: 'Операции → Закрытие месяца → Выполнить закрытие месяца',
+        verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 90 (свёрнутое сальдо по счёту 90 в целом = 0,00 ₽)',
+      },
       canAutoFixBy1C: true,
       autoFixActionLabel: 'Сформировать закрытие счёта 90 (90.09 ↔ 99.01.1)',
     });
@@ -311,12 +608,23 @@ export function runAuditDiagnostics(params: {
       accountCode: '91',
       title: 'Не закрыт счёт 91 «Прочие доходы и расходы» (91.09 — 99.01.1)',
       description: `Синтетический счёт 91 имеет ненулевое свёрнутое сальдо на конец периода (${Math.abs(residual).toFixed(2)} ₽).`,
+      accountingReason: `Сопоставление оборотов по прочим доходам (91.01) и прочим расходам (91.02, включая РКО банка и проценты) ежемесячно списывается с субсчёта 91.09 на счёт 99.01.1.`,
+      quickFixLabel: 'Закрыть счёт 91 кнопкой «Исправить всё автоматически»',
+      guide1C: {
+        menuPath: 'Операции → Закрытие месяца',
+        documentKind: 'Регламентная операция «Закрытие счетов 90, 91»',
+        checkPoints: [
+          'Проверьте заполнение субконто «Прочие доходы и расходы» в документах по счетам 91.01 и 91.02',
+        ],
+        repostInstruction: 'Операции → Закрытие месяца → Выполнить закрытие месяца',
+        verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 91 (сальдо в целом по счёту 91 = 0,00 ₽)',
+      },
       canAutoFixBy1C: true,
       autoFixActionLabel: 'Сформировать закрытие счёта 91 (91.09 ↔ 99.01.1)',
     });
   }
 
-  // 5. Per-operation requisite & posting checks
+  // 5. Per-operation requisite, amount & posting checks
   for (const op of operations) {
     if (op.isDuplicateIn1C && op.includeInProcessing) {
       issues.push({
@@ -328,6 +636,18 @@ export function runAuditDiagnostics(params: {
         description:
           op.duplicateReason ??
           'Операция совпадает с уже проведённым документом в БД 1С и может задвоить обороты.',
+        accountingReason: `Повторное проведение первичного документа с той же датой, суммой и контрагентом задвоит обороты по счетам расчётов и налоговую базу по НДС / налогу на прибыль.`,
+        quickFixLabel: 'Нажмите «Исправить всё автоматически» или снимите галочку включения документа во вкладке 2',
+        guide1C: {
+          menuPath: 'Администрирование → Обслуживание → Корректировка данных → Поиск и удаление дублей (или Журнал операций)',
+          documentKind: op.docType1C,
+          checkPoints: [
+            'Откройте Карточку счёта 51 / 60 / 62 за дату документа и проверьте, не введён ли документ дважды',
+            'Лишний экземпляр документа пометьте на удаление (Пометить на удаление → Удаление помеченных объектов)',
+          ],
+          repostInstruction: 'После помечания дубля на удаление перепроведите закрытие месяца',
+          verifyInOsv: 'Отчеты → Акт сверки расчетов с контрагентом и Карточка счета 60 / 62',
+        },
         canAutoFixBy1C: true,
         autoFixActionLabel: 'Исключить дубликат из загрузки',
       });
@@ -336,6 +656,46 @@ export function runAuditDiagnostics(params: {
 
   for (const op of activeOps) {
     if (op.autoGeneratedKind) continue;
+
+    // Missing primary amount check ("Требуется сумма")
+    if ((op.needsAmount || op.amount < 0.01) && op.category !== 'closing') {
+      issues.push({
+        id: `missing-amount-${op.id}`,
+        severity: 'error',
+        category: 'missing_amount',
+        operationId: op.id,
+        title: `Требуется указать сумму операции: «${op.description.slice(0, 58)}»`,
+        description:
+          op.amountCalculationNote ||
+          'В строке Excel не была указана сумма, и её невозможно однозначно вывести из остатков 68/69 или связанных авансов.',
+        accountingReason: `Согласно ст. 9 Федерального закона № 402-ФЗ «О бухгалтерском учёте» денежное измерение факта хозяйственной жизни — обязательный реквизит первичного учётного документа; документ с нулевой суммой не формирует бухгалтерских проводок.`,
+        quickFixLabel: 'Введите сумму документа с НДС в поле ниже и нажмите «Применить»',
+        guide1C: {
+          menuPath:
+            op.docType1C === 'СписаниеСРасчетногоСчета' || op.docType1C === 'ПоступлениеНаРасчетныйСчет'
+              ? 'Банк и касса → Банковские выписки'
+              : op.docType1C === 'РеализацияТоваровУслуг'
+                ? 'Продажи → Реализация (акты, накладные, УПД)'
+                : 'Покупки → Поступление (акты, накладные, УПД)',
+          documentKind: op.docType1C,
+          checkPoints: [
+            'Сверьте сумму с бумажным / ЭДО оригиналом первичного документа (платёжным поручением, ТОРГ-12, актом или УПД)',
+            'При оплате задолженности по налогам сверьте кредитовое сальдо по счетам 68 и 69 в ОСВ на дату платежа',
+          ],
+          repostInstruction: 'Укажите цену/сумму в документе → нажмите «Провести и закрыть»',
+          verifyInOsv: 'Отчеты → Движения документа (кнопка Дт/Кт в шапке документа 1С)',
+        },
+        canAutoFixBy1C: false,
+        inlineTarget: {
+          kind: 'operation_field',
+          operationId: op.id,
+          field: 'amount',
+          label: `Сумма операции (${op.date}): ${op.description.slice(0, 40)}`,
+          placeholder: 'Сумма в рублях, например: 120000',
+          currentValue: op.amount > 0 ? String(op.amount) : '',
+        },
+      });
+    }
 
     const needsCp = ![
       'closing',
@@ -365,28 +725,58 @@ export function runAuditDiagnostics(params: {
         operationId: op.id,
         title: 'Не указано наименование контрагента',
         description: `Документ «${op.description.slice(0, 70)}» (${op.amount.toFixed(2)} ₽): выберите контрагента / физлицо из базы 1С или введите наименование (от 2 символов).`,
+        accountingReason: `Субконто «Контрагенты» является обязательным аналитическим разрезом по счетам 60, 62, 75 и 76 в 1С БП 3.0. Без указания контрагента невозможна сверка расчётов и заполнение книг покупок/продаж.`,
+        quickFixLabel: 'Выберите контрагента из базы 1С или введите наименование и нажмите «Применить»',
+        guide1C: {
+          menuPath: 'Справочники → Покупки и продажи → Контрагенты',
+          documentKind: op.docType1C,
+          checkPoints: [
+            'В поле «Контрагент» документа выберите существующий элемент или создайте новую карточку по ИНН («Заполнить по ИНН»)',
+          ],
+          repostInstruction: 'Заполните поле «Контрагент» и «Договор» → «Провести и закрыть»',
+          verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 60 / 62 (проверить отсутствие пустого субконто «<...>»)',
+        },
         canAutoFixBy1C: canResolveFounder,
         inlineTarget: {
           kind: 'operation_field',
           operationId: op.id,
           field: 'counterpartyName',
           label: 'Наименование контрагента',
-          placeholder: 'Например: ООО «ТехноСнаб»',
+          placeholder: 'Например: ООО «Комус»',
           currentValue: trimmedCpName.length >= 2 ? trimmedCpName : '',
         },
       });
     } else if (needsCp && !isMatchedIn1C && !isValidRussianInnFormat(op.counterpartyInn)) {
       const resolvable = canResolveCounterpartyFrom1C(op, db1C);
+      const isEducational = op.counterpartySource === 'educational_unverified';
       issues.push({
         id: `missing-inn-${op.id}`,
-        severity: 'error',
+        severity: isEducational ? 'warning' : 'error',
         category: 'missing_requisite',
         operationId: op.id,
-        title: `Не заполнен ИНН контрагента: ${trimmedCpName}`,
+        title: isEducational
+          ? `Учебный контрагент (не найден в ЕГРЮЛ): ${trimmedCpName} — ИНН не заполнен`
+          : `Не заполнен ИНН контрагента: ${trimmedCpName}`,
         description: resolvable
-          ? `Контрагент найден в базе 1С — реквизиты подтянутся автоматически кнопкой «Автозаполнить и исправить всё по БД 1С».`
-          : `Новый контрагент (${trimmedCpName}) отсутствует в справочнике 1С. Укажите реальный ИНН (10 или 12 цифр) для создания карточки при экспорте.`,
-        canAutoFixBy1C: resolvable,
+          ? `Контрагент найден в базе 1С — реквизиты подтянутся автоматически кнопкой «Исправить всё автоматически».`
+          : isEducational
+            ? `Организация «${trimmedCpName}» отсутствует в справочнике 1С и в официальном реестре ЕГРЮЛ ФНС (учебный контрагент). При необходимости введите учебный/ручной ИНН (10 или 12 цифр) в блоке выше.`
+            : `Контрагент «${trimmedCpName}» отсутствует в справочнике 1С. Нажмите «Исправить всё автоматически» для поиска реального ИНН/КПП в ЕГРЮЛ ФНС или укажите ИНН вручную.`,
+        accountingReason: `По п. 5 ст. 169 НК РФ ИНН и КПП продавца/покупателя — обязательные реквизиты счёта-фактуры; при выгрузке декларации по НДС (разделы 8 и 9) ФНС проверяет ИНН/КПП каждого контрагента по базе ЕГРН/ЕГРЮЛ.`,
+        quickFixLabel: isEducational
+          ? 'Укажите ИНН вручную (если задан условием задачи) или оставьте учебную карточку'
+          : 'Нажмите «Проверить в ЕГРЮЛ» / «Исправить всё автоматически» или введите ИНН вручную',
+        guide1C: {
+          menuPath: 'Справочники → Покупки и продажи → Контрагенты',
+          documentKind: 'Справочник «Контрагенты» (карточка элемента)',
+          checkPoints: [
+            'Откройте карточку контрагента → введите ИНН или наименование в строку «Заполнить реквизиты по ИНН или наименованию» (сервис 1С:Контрагент)',
+            'Проверьте заполнение полей ИНН (10 цифр для ЮЛ / 12 для ИП), КПП (9 цифр для ЮЛ) и Основного банковского счёта',
+          ],
+          repostInstruction: 'Нажмите «Записать и закрыть» в карточке контрагента и перепроведите счёта-фактуры за квартал',
+          verifyInOsv: 'Отчеты → Экспресс-проверка ведения учета (контроль ИНН/КПП контрагентов в книге покупок и продаж)',
+        },
+        canAutoFixBy1C: resolvable || !isEducational,
         inlineTarget: {
           kind: 'operation_field',
           operationId: op.id,
@@ -423,7 +813,18 @@ export function runAuditDiagnostics(params: {
         title: `Не указан КПП юрлица: ${trimmedCpName}`,
         description:
           'Для корректного формирования книги покупок/продаж и счёта-фактуры в 1С БП 3.0 требуется КПП (9 цифр).',
-        canAutoFixBy1C: resolvableKpp,
+        accountingReason: `Для российской организации (10-значный ИНН) КПП состоит из 9 цифр (первые 4 — код ИФНС, далее «01001» для головной организации). Без КПП декларация по НДС не проходит форматно-логический контроль.`,
+        quickFixLabel: 'Подтянуть КПП из ЕГРЮЛ кнопкой «Исправить всё автоматически» или ввести 9 цифр вручную',
+        guide1C: {
+          menuPath: 'Справочники → Контрагенты → Карточка контрагента',
+          documentKind: 'Справочник «Контрагенты»',
+          checkPoints: [
+            'Проверьте поле «КПП» (9 знаков, для головного подразделения обычно первые 4 цифры ИНН + 01001)',
+          ],
+          repostInstruction: 'Запишите карточку контрагента («Записать и закрыть»)',
+          verifyInOsv: 'Отчеты → Книга покупок / Книга продаж (колонка ИНН/КПП продавца/покупателя)',
+        },
+        canAutoFixBy1C: true,
         inlineTarget: {
           kind: 'operation_field',
           operationId: op.id,
@@ -444,6 +845,18 @@ export function runAuditDiagnostics(params: {
         title: `Не заполнен договор контрагента (${op.counterpartyName || 'без имени'})`,
         description:
           'Счета 60 и 62 в 1С БП 3.0 ведутся в разрезе субконто «Договоры». Автоисправление подберёт договор из БД 1С или создаст основной договор.',
+        accountingReason: `Без субконто «Договоры» в 1С БП 3.0 не работает автоматический зачёт авансов между платёжным поручением и накладной/актом (остатки повисают развёрнуто на 60.01/60.02 или 62.01/62.02).`,
+        quickFixLabel: 'Нажмите «Исправить всё автоматически» для привязки/создания договора',
+        guide1C: {
+          menuPath: 'Справочники → Контрагенты → Договоры',
+          documentKind: `${op.docType1C} (реквизит «Договор»)`,
+          checkPoints: [
+            `Проверьте вид договора: «${['bank_in', 'sale_goods', 'sale_services'].includes(op.category) ? 'С покупателем' : 'С поставщиком'}»`,
+            'Выберите один и тот же договор и в банковской выписке, и в товарной накладной / акте',
+          ],
+          repostInstruction: 'Заполните поле «Договор» → «Провести и закрыть»',
+          verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 60 / 62 с детализацией по субконто «Договоры»',
+        },
         canAutoFixBy1C: true,
         inlineTarget: {
           kind: 'operation_field',
@@ -464,6 +877,17 @@ export function runAuditDiagnostics(params: {
         operationId: op.id,
         title: `Не указан склад учёта МПЗ (${op.docType1C})`,
         description: 'Для проведения документа движения ТМЦ в 1С БП 3.0 требуется реквизит «Склад».',
+        accountingReason: `Количественно-суммовой учёт на счетах 10, 41 и 43 ведётся в разрезе субконто «Склады». Несовпадение или отсутствие склада блокирует списание себестоимости при отгрузке.`,
+        quickFixLabel: 'Нажмите «Исправить всё автоматически» для подстановки склада из БД 1С',
+        guide1C: {
+          menuPath: 'Справочники → Товары и услуги → Склады',
+          documentKind: op.docType1C,
+          checkPoints: [
+            'Укажите «Основной склад» (тип склада: Оптовый) в шапке накладной поступления/реализации',
+          ],
+          repostInstruction: 'Выберите склад → «Провести и закрыть»',
+          verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 41.01 / 10.01 с группировкой по Складам',
+        },
         canAutoFixBy1C: true,
         inlineTarget: {
           kind: 'operation_field',
@@ -485,6 +909,17 @@ export function runAuditDiagnostics(params: {
         title: `Не выбрана статья затрат (${op.description.slice(0, 45)})`,
         description:
           'Для затратных счетов (20, 26, 44) необходимо заполнить аналитику «Статьи затрат».',
+        accountingReason: `Аналитика «Статьи затрат» определяет порядок закрытия затратных счетов в бухгалтерском учёте и классификацию прямых/косвенных расходов в налоговом учёте (ст. 318 НК РФ).`,
+        quickFixLabel: 'Нажмите «Исправить всё автоматически» для автоподбора статьи затрат',
+        guide1C: {
+          menuPath: 'Справочники → Доходы и расходы → Статьи затрат',
+          documentKind: op.docType1C,
+          checkPoints: [
+            'В табличной части «Услуги» откройте колонку «Счет учета» и выберите подходящую Статью затрат (вид расхода НУ: Прочие расходы / Материальные / Аренда)',
+          ],
+          repostInstruction: 'Проведите документ и перезапустите «Операции → Закрытие месяца»',
+          verifyInOsv: 'Отчеты → Анализ субконто «Статьи затрат» и ОСВ по счёту 26 / 20 / 44',
+        },
         canAutoFixBy1C: true,
         inlineTarget: {
           kind: 'operation_field',
@@ -497,7 +932,7 @@ export function runAuditDiagnostics(params: {
       });
     }
 
-    if (op.entries.length === 0) {
+    if (op.entries.length === 0 && !op.needsAmount && op.amount >= 0.01) {
       issues.push({
         id: `empty-entries-${op.id}`,
         severity: 'error',
@@ -505,6 +940,15 @@ export function runAuditDiagnostics(params: {
         operationId: op.id,
         title: `Отсутствуют проводки у операции «${op.description.slice(0, 50)}»`,
         description: 'Операция включена в расчёт, но список проводок пуст.',
+        accountingReason: `Непроведённый документ с ненулевой суммой (${op.amount.toFixed(2)} ₽) не отражается в регистре бухгалтерии и искажает ОСВ.`,
+        quickFixLabel: 'Нажмите «Исправить всё автоматически» для генерации проводок РСБУ',
+        guide1C: {
+          menuPath: 'Операции → Журнал операций',
+          documentKind: op.docType1C,
+          checkPoints: ['Откройте документ и нажмите «Провести» (проверьте движения по кнопке Дт/Кт)'],
+          repostInstruction: 'Провести и закрыть',
+          verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость за период',
+        },
         canAutoFixBy1C: true,
       });
     }
@@ -520,6 +964,15 @@ export function runAuditDiagnostics(params: {
           operationId: op.id,
           title: `Не указан счёт ${!dtOk ? 'Дебета' : 'Кредита'} в проводке`,
           description: `Операция «${op.description.slice(0, 60)}» на сумму ${entry.amount.toFixed(2)} ₽ содержит незаполненный счёт.`,
+          accountingReason: `Проводка без корреспондирующего счёта нарушает принцип двойной записи и разрывает баланс ОСВ.`,
+          quickFixLabel: 'Укажите рабочий субсчёт Плана счетов в поле ниже',
+          guide1C: {
+            menuPath: 'Операции → Операции, введенные вручную',
+            documentKind: op.docType1C,
+            checkPoints: ['Заполните Счет Дт и Счет Кт конечными субсчетами Плана счетов 1С БП 3.0'],
+            repostInstruction: 'Записать и закрыть',
+            verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость',
+          },
           canAutoFixBy1C: false,
           inlineTarget: {
             kind: 'entry_account',
@@ -532,7 +985,6 @@ export function runAuditDiagnostics(params: {
           },
         });
       } else {
-        // Warn if unknown account not in standard RSBU chart
         const dtInfo = getAccountInfo(entry.debit);
         const ktInfo = getAccountInfo(entry.credit);
         if (dtInfo.isGroup) {
@@ -544,6 +996,15 @@ export function runAuditDiagnostics(params: {
             accountCode: entry.debit,
             title: `Указан групповой счёт Дт ${entry.debit} вместо субсчёта`,
             description: `В 1С БП 3.0 проводки формируются по конечным субсчетам (например, ${entry.debit}.01 вместо ${entry.debit}).`,
+            accountingReason: `В Плане счетов 1С БП 3.0 у счёта-группы ${entry.debit} установлен признак «Запретить использование в проводках» — платформа не позволит записать движение без выбора субсчёта.`,
+            quickFixLabel: 'Заменить на рабочий субсчёт кнопкой «Исправить всё автоматически»',
+            guide1C: {
+              menuPath: 'Главное → План счетов → Счет ' + entry.debit,
+              documentKind: op.docType1C,
+              checkPoints: [`Выберите открытый субсчёт (например, ${entry.debit}.01) вместо счёта-группы ${entry.debit}`],
+              repostInstruction: 'Перепроведите документ после замены субсчёта',
+              verifyInOsv: `Отчеты → Оборотно-сальдовая ведомость по счету ${entry.debit} (по субсчетам)`,
+            },
             canAutoFixBy1C: true,
             inlineTarget: {
               kind: 'entry_account',
@@ -565,6 +1026,15 @@ export function runAuditDiagnostics(params: {
             accountCode: entry.credit,
             title: `Указан групповой счёт Кт ${entry.credit} вместо субсчёта`,
             description: `В 1С БП 3.0 проводки формируются по конечным субсчетам (например, ${entry.credit}.01 вместо ${entry.credit}).`,
+            accountingReason: `Счёт ${entry.credit} имеет подчинённые субсчета и в 1С БП 3.0 закрыт для прямого выбора в проводках.`,
+            quickFixLabel: 'Заменить на рабочий субсчёт кнопкой «Исправить всё автоматически»',
+            guide1C: {
+              menuPath: 'Главное → План счетов → Счет ' + entry.credit,
+              documentKind: op.docType1C,
+              checkPoints: [`Выберите открытый субсчёт (например, ${entry.credit}.01) вместо счёта-группы ${entry.credit}`],
+              repostInstruction: 'Перепроведите документ после замены субсчёта',
+              verifyInOsv: `Отчеты → Оборотно-сальдовая ведомость по счету ${entry.credit} (по субсчетам)`,
+            },
             canAutoFixBy1C: true,
             inlineTarget: {
               kind: 'entry_account',
@@ -613,13 +1083,17 @@ export function generatePeriodClosingOperations(params: {
   operations: QueuedOperation[];
   osv: OsvReport;
   periodEndDate: string;
-}): { newOperations: QueuedOperation[]; log: string[] } {
+}): {
+  newOperations: QueuedOperation[];
+  log: string[];
+  structuredChanges: AutoFixChangeRecord[];
+} {
   const { db1C, operations, osv, periodEndDate } = params;
   const closeDate = periodEndDate || db1C?.periodEnd || new Date().toISOString().slice(0, 10);
   const log: string[] = [];
+  const structuredChanges: AutoFixChangeRecord[] = [];
   const generated: QueuedOperation[] = [];
 
-  // Remove old auto-generated closing/offset ops first by caller if regenerating; here we inspect current osv
   const directCosting = db1C?.accountingPolicy.directCosting26To9008 ?? true;
   const nomGroup =
     db1C?.nomenclatureGroups[0]?.name || 'Основная номенклатурная группа';
@@ -648,6 +1122,13 @@ export function generatePeriodClosingOperations(params: {
         description: 'Зачёт ранее выданного аванса поставщикам',
       });
       log.push(`Сформирован зачёт авансов поставщикам Дт 60.01 Кт 60.02 на ${offset60.toFixed(2)} ₽`);
+      structuredChanges.push({
+        id: `chg-offset-60-${Date.now()}`,
+        whatWas: `Развёрнутое сальдо: Кт 60.01 (${acc6001!.endCredit.toFixed(2)} ₽) и Дт 60.02 (${acc6002!.endDebit.toFixed(2)} ₽)`,
+        whatBecame: `Проводка зачёта аванса Дт 60.01 Кт 60.02 на сумму ${offset60.toFixed(2)} ₽`,
+        basis: 'Правила зачёта выданных авансов при поступлении ТМЦ/услуг (ПБУ / ФСБУ, 1С БП 3.0)',
+        category: 'advance_offset',
+      });
     }
     if (offset62 > 0.01) {
       entries.push({
@@ -660,6 +1141,13 @@ export function generatePeriodClosingOperations(params: {
         description: 'Зачёт ранее полученного аванса от покупателей',
       });
       log.push(`Сформирован зачёт авансов покупателей Дт 62.02 Кт 62.01 на ${offset62.toFixed(2)} ₽`);
+      structuredChanges.push({
+        id: `chg-offset-62-${Date.now()}`,
+        whatWas: `Развёрнутое сальдо: Дт 62.01 (${acc6201!.endDebit.toFixed(2)} ₽) и Кт 62.02 (${acc6202!.endCredit.toFixed(2)} ₽)`,
+        whatBecame: `Проводка зачёта аванса Дт 62.02 Кт 62.01 на сумму ${offset62.toFixed(2)} ₽`,
+        basis: 'Зачёт предоплаты покупателя в счёт выполненной реализации (1С БП 3.0)',
+        category: 'advance_offset',
+      });
     }
 
     generated.push({
@@ -704,7 +1192,7 @@ export function generatePeriodClosingOperations(params: {
     });
   }
 
-  // 2. Advance VAT on remaining 62.02 balance (after offset62!)
+  // 2. Advance VAT on remaining 62.02 balance (after offset62)
   const isOsno = (db1C?.accountingPolicy.taxSystem ?? 'ОСНО') === 'ОСНО';
   const vatRate = db1C?.accountingPolicy.vatRate ?? 20;
   const remaining6202 = round2((acc6202?.endCredit ?? 0) - offset62);
@@ -713,7 +1201,6 @@ export function generatePeriodClosingOperations(params: {
     const current76AV = osv.leafRows.find((r) => r.code === '76.АВ')?.endDebit ?? 0;
     const deltaVat = round2(expected76AV - current76AV);
     if (deltaVat > 1) {
-      // Find buyer counterparty from 62.02 operations if available
       const advOp = operations.find((o) =>
         o.entries.some((e) => e.credit === '62.02')
       );
@@ -769,13 +1256,42 @@ export function generatePeriodClosingOperations(params: {
         ],
       });
       log.push(`Начислен НДС с авансов покупателей Дт 76.АВ Кт 68.02 на ${deltaVat.toFixed(2)} ₽`);
+      structuredChanges.push({
+        id: `chg-76av-${Date.now()}`,
+        whatWas: `Остаток Кт 62.02 (${remaining6202.toFixed(2)} ₽) без полного исчисления НДС на 76.АВ`,
+        whatBecame: `СФ на аванс: Дт 76.АВ Кт 68.02 на ${deltaVat.toFixed(2)} ₽ (${vatRate}/${100 + vatRate})`,
+        basis: 'П. 1 ст. 167 и п. 4 ст. 164 НК РФ (исчисление НДС с предоплаты на ОСНО)',
+        category: 'vat_calc',
+      });
     }
   }
 
-  // 3. Closing 26, 44.01, 90, 91
+  // 3. Closing 20.01, 26, 44.01, 90, 91
   const closingEntries = [];
   let addedTo9008 = 0;
   let addedTo9002 = 0;
+
+  const acc20 = osv.leafRows.find((r) => r.code === '20.01');
+  if (acc20 && acc20.endDebit > 0.01) {
+    closingEntries.push({
+      id: `close-20-${Date.now()}`,
+      debit: '90.02.1',
+      credit: '20.01',
+      debitSubconto: nomGroup,
+      creditSubconto: nomGroup,
+      amount: acc20.endDebit,
+      description: 'Закрытие счёта 20.01 в себестоимость продаж (90.02.1)',
+    });
+    addedTo9002 = round2(addedTo9002 + acc20.endDebit);
+    log.push(`Закрыт счёт 20.01 в Дт 90.02.1 на сумму ${acc20.endDebit.toFixed(2)} ₽`);
+    structuredChanges.push({
+      id: `chg-close-20-${Date.now()}`,
+      whatWas: `Незакрытое сальдо Дт 20.01 = ${acc20.endDebit.toFixed(2)} ₽`,
+      whatBecame: `Проводка Дт 90.02.1 Кт 20.01 = ${acc20.endDebit.toFixed(2)} ₽ (сальдо 20.01 = 0,00 ₽)`,
+      basis: 'Регламентная операция «Закрытие счетов 20, 23, 25, 26» 1С БП 3.0',
+      category: 'closing',
+    });
+  }
 
   const acc26 = osv.leafRows.find((r) => r.code === '26');
   if (acc26 && acc26.endDebit > 0.01) {
@@ -793,6 +1309,13 @@ export function generatePeriodClosingOperations(params: {
     });
     if (directCosting) addedTo9008 = acc26.endDebit;
     log.push(`Закрыт счёт 26 в Дт ${targetDt} на сумму ${acc26.endDebit.toFixed(2)} ₽`);
+    structuredChanges.push({
+      id: `chg-close-26-${Date.now()}`,
+      whatWas: `Незакрытое сальдо Дт 26 = ${acc26.endDebit.toFixed(2)} ₽`,
+      whatBecame: `Проводка Дт ${targetDt} Кт 26 = ${acc26.endDebit.toFixed(2)} ₽ (сальдо 26 = 0,00 ₽)`,
+      basis: 'Ежемесячное списание управленческих расходов (ФСБУ 5/2019, директ-костинг 1С БП 3.0)',
+      category: 'closing',
+    });
   }
 
   const acc4401 = osv.leafRows.find((r) => r.code === '44.01');
@@ -806,16 +1329,22 @@ export function generatePeriodClosingOperations(params: {
       amount: acc4401.endDebit,
       description: 'Списание расходов на продажу (44.01)',
     });
-    addedTo9002 = acc4401.endDebit;
+    addedTo9002 = round2(addedTo9002 + acc4401.endDebit);
     log.push(`Закрыт счёт 44.01 в Дт 90.02.1 на сумму ${acc4401.endDebit.toFixed(2)} ₽`);
+    structuredChanges.push({
+      id: `chg-close-44-${Date.now()}`,
+      whatWas: `Незакрытое сальдо Дт 44.01 = ${acc4401.endDebit.toFixed(2)} ₽`,
+      whatBecame: `Проводка Дт 90.02.1 Кт 44.01 = ${acc4401.endDebit.toFixed(2)} ₽ (сальдо 44.01 = 0,00 ₽)`,
+      basis: 'Регламентная операция закрытия счёта 44 «Издержки обращения»',
+      category: 'closing',
+    });
   }
 
-  // Net residual on 90 after closing 26 and 44.01
+  // Net residual on 90 after closing 20.01, 26 and 44.01
   const children90 = osv.leafRows.filter((r) => r.code.startsWith('90.'));
   const currentNet90DebitMinusCredit = round2(
     children90.reduce((s, r) => s + (r.endDebit - r.endCredit), 0) + addedTo9008 + addedTo9002
   );
-  // Note: if Credit > Debit, currentNet90DebitMinusCredit < 0 -> Profit! Close via Дт 90.09 Кт 99.01.1
   if (Math.abs(currentNet90DebitMinusCredit) > 0.01) {
     if (currentNet90DebitMinusCredit < 0) {
       const profit90 = round2(-currentNet90DebitMinusCredit);
@@ -829,6 +1358,13 @@ export function generatePeriodClosingOperations(params: {
         description: 'Определён финансовый результат (прибыль от продаж) за период',
       });
       log.push(`Закрыт счёт 90 (прибыль от продаж): Дт 90.09 Кт 99.01.1 на ${profit90.toFixed(2)} ₽`);
+      structuredChanges.push({
+        id: `chg-close-90-${Date.now()}`,
+        whatWas: `Свёрнутое сальдо Кт 90 = ${profit90.toFixed(2)} ₽`,
+        whatBecame: `Дт 90.09 Кт 99.01.1 = ${profit90.toFixed(2)} ₽ (прибыль от продаж, сальдо 90 = 0,00 ₽)`,
+        basis: 'Регламентное закрытие счёта 90 «Продажи» по итогам месяца (План счетов РСБУ)',
+        category: 'closing',
+      });
     } else {
       const loss90 = round2(currentNet90DebitMinusCredit);
       closingEntries.push({
@@ -841,6 +1377,13 @@ export function generatePeriodClosingOperations(params: {
         description: 'Определён финансовый результат (убыток от продаж) за период',
       });
       log.push(`Закрыт счёт 90 (убыток от продаж): Дт 99.01.1 Кт 90.09 на ${loss90.toFixed(2)} ₽`);
+      structuredChanges.push({
+        id: `chg-close-90-${Date.now()}`,
+        whatWas: `Свёрнутое сальдо Дт 90 = ${loss90.toFixed(2)} ₽`,
+        whatBecame: `Дт 99.01.1 Кт 90.09 = ${loss90.toFixed(2)} ₽ (убыток от продаж, сальдо 90 = 0,00 ₽)`,
+        basis: 'Регламентное закрытие счёта 90 «Продажи» по итогам месяца (План счетов РСБУ)',
+        category: 'closing',
+      });
     }
   }
 
@@ -862,6 +1405,13 @@ export function generatePeriodClosingOperations(params: {
         description: 'Закрытие счёта 91 (превышение прочих доходов над расходами)',
       });
       log.push(`Закрыт счёт 91 (прибыль): Дт 91.09 Кт 99.01.1 на ${profit91.toFixed(2)} ₽`);
+      structuredChanges.push({
+        id: `chg-close-91-${Date.now()}`,
+        whatWas: `Свёрнутое сальдо Кт 91 = ${profit91.toFixed(2)} ₽`,
+        whatBecame: `Дт 91.09 Кт 99.01.1 = ${profit91.toFixed(2)} ₽ (сальдо 91 = 0,00 ₽)`,
+        basis: 'Регламентное закрытие счёта 91 «Прочие доходы и расходы» (План счетов РСБУ)',
+        category: 'closing',
+      });
     } else {
       const loss91 = round2(net91DebitMinusCredit);
       closingEntries.push({
@@ -874,6 +1424,13 @@ export function generatePeriodClosingOperations(params: {
         description: 'Закрытие счёта 91 (превышение прочих расходов над доходами)',
       });
       log.push(`Закрыт счёт 91 (сальдо прочих расходов): Дт 99.01.1 Кт 91.09 на ${loss91.toFixed(2)} ₽`);
+      structuredChanges.push({
+        id: `chg-close-91-${Date.now()}`,
+        whatWas: `Свёрнутое сальдо Дт 91 = ${loss91.toFixed(2)} ₽`,
+        whatBecame: `Дт 99.01.1 Кт 91.09 = ${loss91.toFixed(2)} ₽ (сальдо 91 = 0,00 ₽)`,
+        basis: 'Регламентное закрытие счёта 91 «Прочие доходы и расходы» (План счетов РСБУ)',
+        category: 'closing',
+      });
     }
   }
 
@@ -885,7 +1442,7 @@ export function generatePeriodClosingOperations(params: {
       sourceFileName: 'Регламентная операция 1С',
       date: closeDate,
       docNumber: 'РЕГЛ-ЗАКР',
-      description: 'Регламентное закрытие счетов затрат и финансовых результатов (26, 90, 91)',
+      description: 'Регламентное закрытие счетов затрат и финансовых результатов (20, 26, 44, 90, 91)',
       category: 'closing',
       docType1C: 'ЗакрытиеМесяца',
       amount: totalCloseAmt,
@@ -921,7 +1478,7 @@ export function generatePeriodClosingOperations(params: {
     });
   }
 
-  return { newOperations: generated, log };
+  return { newOperations: generated, log, structuredChanges };
 }
 
 export function autoFixAllBy1CDb(params: {
@@ -929,29 +1486,144 @@ export function autoFixAllBy1CDb(params: {
   operations: QueuedOperation[];
   calculateCurrentOsv: (ops: QueuedOperation[]) => OsvReport;
   periodEndDate: string;
+  reportingYear?: number;
+  defaultBik?: string;
 }): {
   operations: QueuedOperation[];
   fixedCount: number;
   log: string[];
+  structuredChanges: AutoFixChangeRecord[];
 } {
-  const { db1C, operations, calculateCurrentOsv, periodEndDate } = params;
+  const {
+    db1C,
+    operations,
+    calculateCurrentOsv,
+    periodEndDate,
+    reportingYear,
+    defaultBik = DEFAULT_SBERBANK_BIK,
+  } = params;
   let fixedCount = 0;
   const log: string[] = [];
+  const structuredChanges: AutoFixChangeRecord[] = [];
+
+  const recordChange = (
+    whatWas: string,
+    whatBecame: string,
+    basis: string,
+    category: AutoFixChangeRecord['category'],
+    operationId?: string
+  ) => {
+    structuredChanges.push({
+      id: `fix-${structuredChanges.length + 1}-${Date.now()}`,
+      whatWas,
+      whatBecame,
+      basis,
+      category,
+      operationId,
+    });
+  };
 
   // Remove stale auto-generated ops before recalculating fresh ones
   const manualAndImportedOps = operations.filter((op) => !op.autoGeneratedKind);
+  const enrichedOps: QueuedOperation[] = [];
 
-  const enrichedOps: QueuedOperation[] = manualAndImportedOps.map((origOp) => {
-    let op = { ...origOp, bindings: { ...origOp.bindings }, entries: origOp.entries.map((e) => ({ ...e })) };
+  for (const origOp of manualAndImportedOps) {
+    let op: QueuedOperation = {
+      ...origOp,
+      bindings: { ...origOp.bindings },
+      entries: origOp.entries.map((e) => ({ ...e })),
+    };
+
+    // 0a. Normalize stray template years (e.g. 2020 / 2024) to reportingYear if reportingYear is specified
+    if (reportingYear && op.date && !op.date.startsWith(`${reportingYear}-`)) {
+      const prevDate = op.date;
+      const normDate = normalizeOperationDateToReportingYear(op.date, reportingYear);
+      if (normDate && normDate !== prevDate) {
+        op.date = normDate;
+        fixedCount++;
+        log.push(`Нормализована дата документа: ${prevDate} → ${normDate}`);
+        recordChange(
+          `Дата документа: ${prevDate}`,
+          `Дата документа: ${normDate}`,
+          `Приведение шаблонного года Excel к рабочему отчётному году ${reportingYear}`,
+          'date_year',
+          op.id
+        );
+      }
+    }
+
+    // 0b. Extract inline requisites (ИНН/КПП/р/сч/БИК/количество/цена) from description if missing
+    const inlineReq = extractRequisitesFromFreeText(op.description, reportingYear);
+    if (!op.counterpartyInn && inlineReq.inn) {
+      op.counterpartyInn = inlineReq.inn;
+      op.counterpartySource = 'excel_explicit';
+      fixedCount++;
+      log.push(`Из текста операции извлечён ИНН ${inlineReq.inn}`);
+      recordChange(
+        'ИНН контрагента: не заполнен',
+        `ИНН: ${inlineReq.inn}`,
+        'Прямое извлечение реквизитов из текста первичной операции',
+        'counterparty_requisites',
+        op.id
+      );
+    }
+    if (!op.counterpartyKpp && inlineReq.kpp) {
+      op.counterpartyKpp = inlineReq.kpp;
+      fixedCount++;
+      recordChange(
+        'КПП контрагента: не заполнен',
+        `КПП: ${inlineReq.kpp}`,
+        'Прямое извлечение КПП из текста операции',
+        'counterparty_requisites',
+        op.id
+      );
+    }
+    if (!op.counterpartyBankAccount && inlineReq.bankAccount) {
+      op.counterpartyBankAccount = inlineReq.bankAccount;
+      fixedCount++;
+      recordChange(
+        'Расчётный счёт получателя: не заполнен',
+        `р/сч ${inlineReq.bankAccount}`,
+        'Извлечение банковских реквизитов из текста операции',
+        'bank_bik',
+        op.id
+      );
+    }
+    if (!op.counterpartyBik && inlineReq.bik) {
+      op.counterpartyBik = inlineReq.bik;
+      op.counterpartyBankName = inlineReq.bankName;
+      fixedCount++;
+      recordChange(
+        'БИК банка контрагента: по умолчанию',
+        `БИК ${inlineReq.bik} (${inlineReq.bankName})`,
+        'Прямое указание БИК в тексте операции (приоритет над банком по умолчанию)',
+        'bank_bik',
+        op.id
+      );
+    }
+    if (!op.organizationBik) {
+      op.organizationBik = db1C?.organization.bik || defaultBik;
+      op.organizationBankName = db1C?.organization.bankName || DEFAULT_SBERBANK_NAME;
+    }
 
     // 1. Disable accidental duplicates if enabled
     if (op.isDuplicateIn1C && op.includeInProcessing) {
       op.includeInProcessing = false;
       fixedCount++;
       log.push(`Исключён из расчёта дубликат документа: «${op.description.slice(0, 50)}»`);
+      recordChange(
+        `Дубликат включён в расчёт: «${op.description.slice(0, 45)}»`,
+        'Исключён из проведения (защита от задвоения оборотов)',
+        op.duplicateReason || 'Совпадение с уже проведённым документом в базе 1С',
+        'duplicate_guard',
+        op.id
+      );
     }
 
-    if (!op.includeInProcessing) return op;
+    if (!op.includeInProcessing) {
+      enrichedOps.push(op);
+      continue;
+    }
 
     // Sanitize accidental <2-char counterparty fragment
     if (op.counterpartyName.trim().length > 0 && op.counterpartyName.trim().length < 2) {
@@ -961,10 +1633,64 @@ export function autoFixAllBy1CDb(params: {
       op.bindings.counterparty = { status: 'missing', note: 'Не указан контрагент' };
     }
 
+    // Auto-compute missing amount if op.amount === 0 using sequential batch context!
+    if ((op.amount < 0.01 || op.needsAmount) && op.category !== 'closing') {
+      const seqCtx: BatchSequentialContext = {
+        priorOperations: enrichedOps,
+        reportingYear,
+        defaultBik,
+        defaultBankName: DEFAULT_SBERBANK_NAME,
+        assumeInvoiceOnVatPurchase: true,
+      };
+      const recomputed = bindAndGenerateOperation(
+        {
+          rowKey: op.rowKey,
+          sourceFileName: op.sourceFileName,
+          date: op.date,
+          docNumber: op.docNumber,
+          description: op.description,
+          amount: 0,
+          quantity: op.quantity ?? inlineReq.quantity,
+          unitPrice: op.unitPrice ?? inlineReq.unitPrice,
+          counterpartyName: op.counterpartyName || inlineReq.counterparty,
+          counterpartyInn: op.counterpartyInn,
+          counterpartyKpp: op.counterpartyKpp,
+          counterpartyBankAccount: op.counterpartyBankAccount,
+          counterpartyBik: op.counterpartyBik,
+          counterpartyBankName: op.counterpartyBankName,
+          counterpartySource: op.counterpartySource,
+          egrulCandidates: op.egrulCandidates,
+          contractName: op.contractName,
+          nomenclatureName: op.nomenclatureName || inlineReq.nomenclatureHint,
+          warehouseName: op.warehouseName,
+          expenseItemName: op.expenseItemName,
+          cashFlowItemName: op.cashFlowItemName,
+        },
+        db1C,
+        op.id,
+        seqCtx
+      );
+      if (recomputed.amount >= 0.01) {
+        op = recomputed;
+        fixedCount++;
+        log.push(
+          `Рассчитана пустая сумма операции «${op.description.slice(0, 45)}»: ${op.amount.toFixed(2)} ₽`
+        );
+        recordChange(
+          'Сумма операции: не заполнена (0,00 ₽)',
+          `Сумма: ${op.amount.toFixed(2)} ₽ (${op.entries.length} провод.)`,
+          op.amountCalculationNote || 'Авторасчёт по связанным операциям и сальдо счетов',
+          'amount_calc',
+          op.id
+        );
+      }
+    }
+
     // Auto-extract founder FIO for 75.01 contributions if missing
     if (!op.counterpartyName.trim() && isFounderContributionText(op.description)) {
       const rebuiltFounder = bindAndGenerateOperation(
         {
+          rowKey: op.rowKey,
           sourceFileName: op.sourceFileName,
           date: op.date,
           docNumber: op.docNumber,
@@ -983,6 +1709,13 @@ export function autoFixAllBy1CDb(params: {
         log.push(
           `Определён учредитель «${op.counterpartyName}» для взноса в уставный капитал (счёт 75.01)`
         );
+        recordChange(
+          'Субконто 75.01: не заполнено',
+          `Учредитель: ${op.counterpartyName} (Дт 51/50 Кт 75.01, без НДС)`,
+          'Извлечение ФИО учредителя из текста операции и привязка к справочнику Физлиц 1С',
+          'founder_75',
+          op.id
+        );
       }
     }
 
@@ -997,6 +1730,7 @@ export function autoFixAllBy1CDb(params: {
 
       if (directPersonOrCp) {
         const wasMatched = op.bindings.counterparty.status === 'matched_1c';
+        const prevCpLabel = `${op.counterpartyName} (ИНН: ${op.counterpartyInn || 'пусто'})`;
         const nameChanged = op.counterpartyName !== directPersonOrCp.name;
         const innAdded = !op.counterpartyInn && Boolean(directPersonOrCp.inn);
         const kppAdded = !op.counterpartyKpp && Boolean(directPersonOrCp.kpp);
@@ -1009,6 +1743,7 @@ export function autoFixAllBy1CDb(params: {
           op.counterpartyKpp = directPersonOrCp.kpp;
         }
         op.counterpartyKind = directPersonOrCp.kind;
+        op.counterpartySource = 'db_1c';
         op.bindings.counterparty = {
           status: 'matched_1c',
           matchedName: directPersonOrCp.name,
@@ -1019,6 +1754,13 @@ export function autoFixAllBy1CDb(params: {
           fixedCount++;
           log.push(
             `Привязан элемент справочника 1С (${directPersonOrCp.source}): «${directPersonOrCp.name}»`
+          );
+          recordChange(
+            prevCpLabel,
+            `${op.counterpartyName} (ИНН ${op.counterpartyInn || '—'}, код 1С ${directPersonOrCp.code1C || '—'})`,
+            `Сопоставление со справочником 1С «${directPersonOrCp.source}»`,
+            'directory_binding',
+            op.id
           );
         }
       } else if (norm.length >= 3) {
@@ -1034,6 +1776,7 @@ export function autoFixAllBy1CDb(params: {
         });
 
         if (matchedCp) {
+          const prevLabel = `${op.counterpartyName} (ИНН: ${op.counterpartyInn || 'пусто'})`;
           let changed = false;
           if (op.counterpartyName !== matchedCp.name) {
             op.counterpartyName = matchedCp.name;
@@ -1047,6 +1790,7 @@ export function autoFixAllBy1CDb(params: {
             op.counterpartyKpp = matchedCp.kpp;
             changed = true;
           }
+          op.counterpartySource = 'db_1c';
           op.bindings.counterparty = {
             status: 'matched_1c',
             matchedName: matchedCp.name,
@@ -1056,9 +1800,15 @@ export function autoFixAllBy1CDb(params: {
           if (changed) {
             fixedCount++;
             log.push(`Подтянуты реквизиты из справочника 1С для контрагента «${matchedCp.name}»`);
+            recordChange(
+              prevLabel,
+              `${matchedCp.name} (ИНН ${matchedCp.inn}, КПП ${matchedCp.kpp || '—'})`,
+              'Автоподбор карточки из справочника «Контрагенты» базы 1С',
+              'directory_binding',
+              op.id
+            );
           }
         } else {
-          // Check ВсеДокументы history
           const histDoc = db1C.documents.find((d) => {
             const dn = normalizeEntityKey(d.counterparty);
             return dn.length >= 4 && (dn.includes(norm) || norm.includes(dn));
@@ -1066,8 +1816,16 @@ export function autoFixAllBy1CDb(params: {
           if (histDoc) {
             if (!op.counterpartyInn && histDoc.counterpartyInn) {
               op.counterpartyInn = histDoc.counterpartyInn;
+              op.counterpartySource = 'db_1c';
               fixedCount++;
               log.push(`Подтянут ИНН из журнала документов 1С для «${histDoc.counterparty}»`);
+              recordChange(
+                `ИНН «${op.counterpartyName}»: пусто`,
+                `ИНН: ${histDoc.counterpartyInn}`,
+                'История проведённых документов базы 1С (ВсеДокументы)',
+                'counterparty_requisites',
+                op.id
+              );
             }
             if (!op.contractName && histDoc.contract) {
               op.contractName = histDoc.contract;
@@ -1105,6 +1863,13 @@ export function autoFixAllBy1CDb(params: {
         };
         fixedCount++;
         log.push(`Подобран договор 1С «${fromDir.name}» для «${op.counterpartyName}»`);
+        recordChange(
+          `Договор (${op.counterpartyName}): не указан`,
+          `Договор: «${fromDir.name}»`,
+          'Справочник «ДоговорыКонтрагентов» базы 1С',
+          'directory_binding',
+          op.id
+        );
       } else if (fromDocs?.contract) {
         op.contractName = fromDocs.contract;
         op.bindings.contract = {
@@ -1113,6 +1878,13 @@ export function autoFixAllBy1CDb(params: {
         };
         fixedCount++;
         log.push(`Подобран договор из истории документов 1С: «${fromDocs.contract}»`);
+        recordChange(
+          `Договор (${op.counterpartyName}): не указан`,
+          `Договор: «${fromDocs.contract}»`,
+          'Журнал документов базы 1С',
+          'directory_binding',
+          op.id
+        );
       } else if (op.counterpartyName) {
         op.contractName = 'Основной договор';
         op.bindings.contract = {
@@ -1121,6 +1893,13 @@ export function autoFixAllBy1CDb(params: {
         };
         fixedCount++;
         log.push(`Назначен «Основной договор» для контрагента «${op.counterpartyName}»`);
+        recordChange(
+          `Договор (${op.counterpartyName}): не указан`,
+          '«Основной договор» (автосоздание при выгрузке)',
+          'Обязательность субконто «Договоры» на счетах 60/62 в 1С БП 3.0',
+          'directory_binding',
+          op.id
+        );
       }
     }
 
@@ -1138,6 +1917,13 @@ export function autoFixAllBy1CDb(params: {
         };
         fixedCount++;
         log.push(`Проставлен склад из БД 1С: «${whFromDb}»`);
+        recordChange(
+          'Склад МПЗ: не выбран',
+          `Склад: «${whFromDb}»`,
+          'Справочник «Склады» базы 1С',
+          'directory_binding',
+          op.id
+        );
       } else {
         op.warehouseName = 'Основной склад';
         op.bindings.warehouse = {
@@ -1145,6 +1931,13 @@ export function autoFixAllBy1CDb(params: {
           note: 'Склад будет создан при экспорте в 1С',
         };
         fixedCount++;
+        recordChange(
+          'Склад МПЗ: не выбран',
+          'Склад: «Основной склад»',
+          'Обязательный реквизит складского учёта счетов 10 / 41 в 1С БП 3.0',
+          'directory_binding',
+          op.id
+        );
       }
     }
 
@@ -1166,6 +1959,13 @@ export function autoFixAllBy1CDb(params: {
         op.bindings.expenseItem = { status: 'matched_1c', matchedName: histExpName };
         fixedCount++;
         log.push(`Подобрана статья затрат по аналогии с проводками 1С: «${histExpName}»`);
+        recordChange(
+          'Статья затрат: не выбрана',
+          `Статья затрат: «${histExpName}»`,
+          'Анализ предыдущих проводок по данному поставщику в базе 1С',
+          'directory_binding',
+          op.id
+        );
       } else if (fallbackExp) {
         op.expenseItemName = fallbackExp;
         op.bindings.expenseItem = {
@@ -1174,6 +1974,13 @@ export function autoFixAllBy1CDb(params: {
           matchedCode1C: db1C?.expenseItems[0]?.code1C,
         };
         fixedCount++;
+        recordChange(
+          'Статья затрат: не выбрана',
+          `Статья затрат: «${fallbackExp}»`,
+          'Справочник «Статьи затрат» базы 1С',
+          'directory_binding',
+          op.id
+        );
       } else {
         op.expenseItemName = 'Прочие общехозяйственные расходы';
         op.bindings.expenseItem = {
@@ -1181,13 +1988,21 @@ export function autoFixAllBy1CDb(params: {
           note: 'Статья затрат будет создана при экспорте',
         };
         fixedCount++;
+        recordChange(
+          'Статья затрат: не выбрана',
+          '«Прочие общехозяйственные расходы»',
+          'Стандартная аналитика счёта 26 в 1С БП 3.0',
+          'directory_binding',
+          op.id
+        );
       }
     }
 
-    // 6. Regenerate entries if empty, or fix group accounts -> subaccounts & update subconto strings
-    if (op.entries.length === 0) {
+    // 6. Regenerate entries if empty (and amount > 0), or fix group accounts -> subaccounts & update subconto strings
+    if (op.entries.length === 0 && op.amount >= 0.01) {
       op = bindAndGenerateOperation(
         {
+          rowKey: op.rowKey,
           sourceFileName: op.sourceFileName,
           date: op.date,
           docNumber: op.docNumber,
@@ -1200,6 +2015,11 @@ export function autoFixAllBy1CDb(params: {
           counterpartyName: op.counterpartyName,
           counterpartyInn: op.counterpartyInn,
           counterpartyKpp: op.counterpartyKpp,
+          counterpartyBankAccount: op.counterpartyBankAccount,
+          counterpartyBik: op.counterpartyBik,
+          counterpartyBankName: op.counterpartyBankName,
+          counterpartySource: op.counterpartySource,
+          egrulCandidates: op.egrulCandidates,
           contractName: op.contractName,
           nomenclatureName: op.nomenclatureName,
           warehouseName: op.warehouseName,
@@ -1209,7 +2029,14 @@ export function autoFixAllBy1CDb(params: {
           categoryHint: op.category,
         },
         db1C,
-        op.id
+        op.id,
+        {
+          priorOperations: enrichedOps,
+          reportingYear,
+          defaultBik,
+          defaultBankName: DEFAULT_SBERBANK_NAME,
+          assumeInvoiceOnVatPurchase: true,
+        }
       );
       fixedCount++;
     } else {
@@ -1218,12 +2045,28 @@ export function autoFixAllBy1CDb(params: {
         let dt = entry.debit;
         let kt = entry.credit;
         if (DEFAULT_SUBACCOUNT_MAP[dt]) {
+          const oldDt = dt;
           dt = DEFAULT_SUBACCOUNT_MAP[dt];
           fixedCount++;
+          recordChange(
+            `Счёт Дт: ${oldDt} (групповой)`,
+            `Счёт Дт: ${dt}`,
+            'Замена группового счёта на рабочий субсчёт Плана счетов 1С БП 3.0',
+            'directory_binding',
+            op.id
+          );
         }
         if (DEFAULT_SUBACCOUNT_MAP[kt]) {
+          const oldKt = kt;
           kt = DEFAULT_SUBACCOUNT_MAP[kt];
           fixedCount++;
+          recordChange(
+            `Счёт Кт: ${oldKt} (групповой)`,
+            `Счёт Кт: ${kt}`,
+            'Замена группового счёта на рабочий субсчёт Плана счетов 1С БП 3.0',
+            'directory_binding',
+            op.id
+          );
         }
         return {
           ...entry,
@@ -1243,10 +2086,10 @@ export function autoFixAllBy1CDb(params: {
       });
     }
 
-    return op;
-  });
+    enrichedOps.push(op);
+  }
 
-  // 7. Check if 60.01 or 62.01 has red balance because payment was posted to 60.01/62.01 instead of 60.02/62.02
+  // 7. Reclassify red 60.01 / 62.01 balances to advance accounts 60.02 / 62.02
   let intermediateOsv = calculateCurrentOsv(enrichedOps);
   const row6001 = intermediateOsv.leafRows.find((r) => r.code === '60.01');
   if (row6001 && row6001.hasRedEnd) {
@@ -1257,7 +2100,16 @@ export function autoFixAllBy1CDb(params: {
             e.debit = '60.02';
             e.description = 'Перечислен аванс поставщику (переклассифицировано с 60.01)';
             fixedCount++;
-            log.push(`Устранена краснота по 60.01: оплата «${op.counterpartyName}» перенесена на счёт авансов 60.02`);
+            log.push(
+              `Устранена краснота по 60.01: оплата «${op.counterpartyName}» перенесена на счёт авансов 60.02`
+            );
+            recordChange(
+              `Проводка оплаты «${op.counterpartyName}»: Дт 60.01 Кт 51`,
+              'Дт 60.02 Кт 51 (выданный аванс поставщику)',
+              'Устранение отрицательного сальдо по пассивному расчётному субсчёту 60.01',
+              'advance_offset',
+              op.id
+            );
           }
         }
       }
@@ -1274,7 +2126,16 @@ export function autoFixAllBy1CDb(params: {
             e.credit = '62.02';
             e.description = 'Получен аванс от покупателя (переклассифицировано с 62.01)';
             fixedCount++;
-            log.push(`Устранена краснота по 62.01: оплата от «${op.counterpartyName}» перенесена на счёт авансов 62.02`);
+            log.push(
+              `Устранена краснота по 62.01: оплата от «${op.counterpartyName}» перенесена на счёт авансов 62.02`
+            );
+            recordChange(
+              `Проводка поступления от «${op.counterpartyName}»: Дт 51 Кт 62.01`,
+              'Дт 51 Кт 62.02 (полученный аванс от покупателя)',
+              'Устранение отрицательного сальдо по активному субсчёту 62.01',
+              'advance_offset',
+              op.id
+            );
           }
         }
       }
@@ -1283,21 +2144,24 @@ export function autoFixAllBy1CDb(params: {
   }
 
   // 8. Generate advance offsets, advance VAT, and period closing operations
-  const { newOperations, log: closeLog } = generatePeriodClosingOperations({
-    db1C,
-    operations: enrichedOps,
-    osv: intermediateOsv,
-    periodEndDate,
-  });
+  const { newOperations, log: closeLog, structuredChanges: closeChanges } =
+    generatePeriodClosingOperations({
+      db1C,
+      operations: enrichedOps,
+      osv: intermediateOsv,
+      periodEndDate,
+    });
 
   if (newOperations.length > 0) {
     fixedCount += newOperations.length;
     log.push(...closeLog);
+    structuredChanges.push(...closeChanges);
   }
 
   return {
     operations: [...enrichedOps, ...newOperations],
     fixedCount,
     log,
+    structuredChanges,
   };
 }

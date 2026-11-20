@@ -10,6 +10,7 @@ import {
   FileCode2,
   FileJson,
   HardDriveDownload,
+  Landmark,
   Layers,
 } from 'lucide-react';
 import { useAccountant } from '@/context/AccountantContext';
@@ -19,8 +20,12 @@ import { ExportFormat1C } from '@/types/accounting';
 export function Tab4Export1C() {
   const {
     db1C,
+    reportingYear,
     operations,
     osvReport,
+    accompanyingActions,
+    lastImportStats,
+    autoFixChanges,
     exportMode,
     setExportMode,
     activeTab,
@@ -39,9 +44,11 @@ export function Tab4Export1C() {
         db1C,
         operations,
         osv: osvReport,
+        reportingYear,
         fullState: {
           version: 2,
           activeTab,
+          reportingYear,
           db1C,
           balanceAnchorOverride,
           includeQueuedInOsv,
@@ -49,6 +56,8 @@ export function Tab4Export1C() {
           operations,
           resolvedInlineNotes: {},
           exportMode,
+          lastImportStats,
+          autoFixChanges,
         },
       }),
     [
@@ -56,10 +65,13 @@ export function Tab4Export1C() {
       db1C,
       operations,
       osvReport,
+      reportingYear,
       activeTab,
       balanceAnchorOverride,
       includeQueuedInOsv,
       periodFilter,
+      lastImportStats,
+      autoFixChanges,
     ]
   );
 
@@ -107,7 +119,7 @@ export function Tab4Export1C() {
         >
           <div className="flex items-center justify-between">
             <span className="text-sm font-semibold text-zinc-950 dark:text-white">
-              Режим А: Дозагрузить в текущую БД 1С
+              Режим А: Дозагрузить в текущую БД 1С ({reportingYear} г.)
             </span>
             <Layers
               className={`w-4 h-4 ${
@@ -116,7 +128,7 @@ export function Tab4Export1C() {
             />
           </div>
           <p className="mt-1.5 text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
-            Создаёт только недостающие элементы справочников (без дублей, с проверкой по ИНН и наименованию) и проводит новые документы и регламентные операции периода.
+            Создаёт недостающие элементы справочников, договоры и банковские счета (с БИК Сбербанка 044030653 или явными реквизитами из операций) и проводит новые документы {reportingYear} года.
           </p>
         </button>
 
@@ -131,7 +143,7 @@ export function Tab4Export1C() {
         >
           <div className="flex items-center justify-between">
             <span className="text-sm font-semibold text-zinc-950 dark:text-white">
-              Режим Б: Развернуть с нуля в чистую БД 1С
+              Режим Б: Развернуть с нуля в чистую БД 1С ({reportingYear} г.)
             </span>
             <DatabaseBackup
               className={`w-4 h-4 ${
@@ -140,13 +152,13 @@ export function Tab4Export1C() {
             />
           </div>
           <p className="mt-1.5 text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
-            Создаёт Организацию со всеми реквизитами, переносит полные справочники, формирует начальные остатки через счёт 000 на начало периода и проводит все документы.
+            Создаёт Организацию, банковские счета, полные справочники, формирует начальные остатки через счёт 000 на начало {reportingYear} года и проводит все документы.
           </p>
         </button>
       </div>
 
       {/* Export Package Counters */}
-      <div className="grid grid-cols-2 sm:grid-cols-6 gap-2.5 text-xs">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5 text-xs">
         <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3">
           <div className="text-zinc-500">Контрагенты</div>
           <div className="mt-1 text-base font-mono font-semibold tabular-nums">
@@ -157,6 +169,12 @@ export function Tab4Export1C() {
           <div className="text-zinc-500">Договоры</div>
           <div className="mt-1 text-base font-mono font-semibold tabular-nums">
             {bundle.stats.contractsCount}
+          </div>
+        </div>
+        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3">
+          <div className="text-zinc-500">Банк. счета (БИК)</div>
+          <div className="mt-1 text-base font-mono font-semibold tabular-nums text-amber-700 dark:text-amber-400">
+            {bundle.stats.bankAccountsCount ?? 0}
           </div>
         </div>
         <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3">
@@ -184,6 +202,16 @@ export function Tab4Export1C() {
           </div>
         </div>
       </div>
+
+      {accompanyingActions.length > 0 && (
+        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/40 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-600 dark:text-zinc-400">
+          <span className="inline-flex items-center gap-1.5">
+            <Landmark className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+            В пакет выгрузки включены сопутствующие объекты 1С БП 3.0 ({accompanyingActions.length}): банковские счета (НайтиИлиСоздатьБанковскийСчет), договоры, счёта-фактуры и зачёты авансов.
+          </span>
+          <span className="font-mono text-[11px]">Отчётный год: {reportingYear}</span>
+        </div>
+      )}
 
       {/* Format Tabs + Download Actions + Code Preview */}
       <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] overflow-hidden">
@@ -314,7 +342,7 @@ export function Tab4Export1C() {
           {format === 'bsl' && (
             <span>
               Готовый серверный код для <strong>1С:Бухгалтерия 8.3 (ред. 3.0)</strong>: включает процедуру{' '}
-              <code className="font-mono">ВыполнитьЗагрузку()</code>, идемпотентный поиск по ИНН/наименованию, проведение документов БП 3.0 и обработку исключений <code className="font-mono">Попытка ... Исключение</code>.
+              <code className="font-mono">ВыполнитьЗагрузку()</code>, идемпотентный поиск по ИНН/наименованию, регистрацию банковских счетов (<code className="font-mono">НайтиИлиСоздатьБанковскийСчет</code>), проведение документов БП 3.0 и обработку исключений <code className="font-mono">Попытка ... Исключение</code>.
             </span>
           )}
           {format === 'xml_edo' && (

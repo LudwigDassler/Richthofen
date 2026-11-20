@@ -298,8 +298,36 @@ export interface AccountingEntry {
 
 export type VatRule = 'included' | 'on_top' | 'none' | ' zero';
 
+export const DEFAULT_REPORTING_YEAR = 2026;
+export const DEFAULT_SBERBANK_BIK = '044030653';
+export const DEFAULT_SBERBANK_NAME = 'СЕВЕРО-ЗАПАДНЫЙ БАНК ПАО СБЕРБАНК';
+export const DEFAULT_SBERBANK_CORR = '30101810500000000653';
+
+export interface EgrulCandidate {
+  inn: string;
+  kpp: string;
+  ogrn: string;
+  name: string;
+  fullName: string;
+  address?: string;
+  leaderName?: string;
+  kind: 'ЮридическоеЛицо' | 'ИндивидуальныйПредприниматель';
+  region?: string;
+  isActive: boolean;
+  source: 'egrul_fns' | 'dadata';
+}
+
+export type CounterpartyResolutionSource =
+  | 'excel_explicit'
+  | 'db_1c'
+  | 'egrul_verified'
+  | 'educational_unverified'
+  | 'manual'
+  | 'unresolved';
+
 export interface QueuedOperation {
   id: string;
+  rowKey?: string;
   createdAt: string;
   sourceFileName: string;
   date: string;
@@ -310,6 +338,8 @@ export interface QueuedOperation {
   category: OperationCategory;
   docType1C: DocType1CBP30;
   amount: number;
+  needsAmount?: boolean;
+  amountCalculationNote?: string;
   vatRate: number;
   vatRule: 'included' | 'on_top' | 'none';
   vatAmount: number;
@@ -319,6 +349,16 @@ export interface QueuedOperation {
   counterpartyName: string;
   counterpartyInn: string;
   counterpartyKpp: string;
+  counterpartyOgrn?: string;
+  counterpartyBankAccount?: string;
+  counterpartyBik?: string;
+  counterpartyBankName?: string;
+  counterpartyCorrAccount?: string;
+  counterpartySource?: CounterpartyResolutionSource;
+  egrulCandidates?: EgrulCandidate[];
+  organizationBik?: string;
+  organizationBankName?: string;
+  organizationBankAccount?: string;
   counterpartyKind: 'ЮридическоеЛицо' | 'ИндивидуальныйПредприниматель' | 'ФизическоеЛицо';
   contractName: string;
   contractNumber: string;
@@ -342,6 +382,77 @@ export interface QueuedOperation {
     cashFlowItem: EntityBindingStatus;
   };
   entries: AccountingEntry[];
+}
+
+export interface SkippedExcelRowReason {
+  fileName: string;
+  sheetName?: string;
+  rowNumber: number;
+  rawPreview: string;
+  reason: string;
+}
+
+export interface BatchImportCompletenessStats {
+  filesUploaded: number;
+  excelOperationRowsTotal: number;
+  importedOperationsCount: number;
+  generatedPostingsCount: number;
+  skippedRowsCount: number;
+  skippedReasons: SkippedExcelRowReason[];
+  sheetDefaults: {
+    defaultBik: string;
+    defaultBankName: string;
+    defaultCorrAccount: string;
+    reportingYear: number;
+    rawHeaderNotes: string[];
+  };
+}
+
+export interface AccompanyingAction1C {
+  id: string;
+  kind:
+    | 'create_bank_account'
+    | 'create_counterparty'
+    | 'create_contract'
+    | 'register_sf_incoming'
+    | 'register_sf_outgoing'
+    | 'offset_advance'
+    | 'month_closing';
+  title: string;
+  details: string;
+  bik?: string;
+  bankName?: string;
+  accountNumber?: string;
+  counterpartyName?: string;
+  docType1C: string;
+  menuPath1C: string;
+}
+
+export interface AutoFixChangeRecord {
+  id: string;
+  whatWas: string;
+  whatBecame: string;
+  basis: string;
+  category:
+    | 'date_year'
+    | 'bank_bik'
+    | 'counterparty_requisites'
+    | 'amount_calc'
+    | 'vat_calc'
+    | 'advance_offset'
+    | 'founder_75'
+    | 'closing'
+    | 'directory_binding'
+    | 'duplicate_guard';
+  operationId?: string;
+}
+
+export interface AuditGuide1CBP30 {
+  menuPath: string;
+  documentKind: string;
+  checkPoints: string[];
+  repostInstruction: string;
+  verifyInOsv: string;
 }
 
 export interface OsvAccountRow {
@@ -396,6 +507,7 @@ export type InlineFieldTarget =
       kind: 'operation_field';
       operationId: string;
       field:
+        | 'amount'
         | 'counterpartyInn'
         | 'counterpartyKpp'
         | 'counterpartyName'
@@ -424,14 +536,19 @@ export interface AuditIssue {
   severity: AuditSeverity;
   category:
     | 'missing_requisite'
+    | 'missing_amount'
     | 'unbalanced_entry'
     | 'red_balance'
     | 'unclosed_period'
     | 'unoffset_advance'
     | 'duplicate_doc'
+    | 'vat_discrepancy'
     | 'osv_disbalance';
   title: string;
   description: string;
+  accountingReason?: string;
+  quickFixLabel?: string;
+  guide1C?: AuditGuide1CBP30;
   accountCode?: string;
   operationId?: string;
   canAutoFixBy1C: boolean;
@@ -452,6 +569,7 @@ export type WorkspaceTab =
 export interface PersistedWorkbenchStateV2 {
   version: 2;
   activeTab: WorkspaceTab;
+  reportingYear?: number;
   db1C: Database1CSnapshot | null;
   balanceAnchorOverride: BalanceAnchorOverride;
   includeQueuedInOsv: boolean;
@@ -462,4 +580,7 @@ export interface PersistedWorkbenchStateV2 {
   operations: QueuedOperation[];
   resolvedInlineNotes: Record<string, string>;
   exportMode: ExportMode1C;
+  lastImportStats?: BatchImportCompletenessStats | null;
+  autoFixChanges?: AutoFixChangeRecord[];
 }
+

@@ -5,13 +5,18 @@ import {
   AlertCircle,
   AlertTriangle,
   ArrowRight,
+  BookOpenCheck,
   Building2,
   Calculator,
   Check,
   CheckCircle2,
   ChevronDown,
   ExternalLink,
+  Landmark,
+  Loader2,
   RotateCcw,
+  Search,
+  ShieldCheck,
   Sparkles,
   User,
 } from 'lucide-react';
@@ -20,17 +25,24 @@ import {
   DirectoryAutocompleteOption1C,
   InlineFieldTarget,
 } from '@/types/accounting';
+import { parseRussianNumber } from '@/lib/import1c';
 
 export function Tab3AuditAutofix() {
   const {
     auditIssues,
     directoryOptions1C,
     pendingNewCounterparties,
+    accompanyingActions,
     autoFixLogs,
+    autoFixChanges,
+    isLookingUpEgrul,
     operations,
     db1C,
+    reportingYear,
     runSmartAutoFixAll,
     runClosingAndOffsetsOnly,
+    lookupCounterpartiesInEgrul,
+    selectEgrulCandidateForCounterparty,
     applyInlineAuditValue,
     bindOperationTo1CDirectoryItem,
     resetNewCounterparty,
@@ -75,6 +87,17 @@ export function Tab3AuditAutofix() {
   ) => {
     const raw =
       draftValues[draftKey] !== undefined ? draftValues[draftKey] : fallbackCurrent;
+
+    if (target.kind === 'operation_field' && target.field === 'amount') {
+      const amt = parseRussianNumber(raw);
+      if (!Number.isFinite(amt) || amt <= 0) {
+        setFieldErrors((prev) => ({
+          ...prev,
+          [draftKey]: 'Введите положительную сумму операции в рублях.',
+        }));
+        return;
+      }
+    }
 
     if (target.kind === 'operation_field' && target.field === 'counterpartyName') {
       if (raw.trim().length < 2) {
@@ -133,7 +156,7 @@ export function Tab3AuditAutofix() {
     (cp) => cp.needsInn || cp.needsKpp
   );
 
-  // 3. Other manual inline targets (e.g. missing debit/credit account code in manual posting)
+  // 3. Other manual inline targets (e.g. missing primary amount or missing debit/credit account code)
   const otherManualTargets = auditIssues.filter(
     (issue) =>
       !issue.canAutoFixBy1C &&
@@ -161,10 +184,10 @@ export function Tab3AuditAutofix() {
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div className="space-y-1">
             <h2 className="text-base font-semibold text-zinc-950 dark:text-white">
-              Диагностика учёта, реквизит-контроль и автоисправление по базе 1С
+              Экспертный аудит 1С:Бухгалтерия 8.3 (ред. 3.0), сверка ЕГРЮЛ и автоисправление ({reportingYear} г.)
             </h2>
             <p className="text-xs text-zinc-600 dark:text-zinc-400 max-w-3xl">
-              Проверка выявляет только реальные ошибки: незаполненные ИНН/КПП/договоры/склады, красноту по активным и пассивным счетам, незачтённые авансы (60.02 / 62.02) и незакрытые счета периода (26, 44.01, 90, 91).
+              Проверяет двойную запись, реквизиты контрагентов (справочник 1С + официальный реестр ЕГРЮЛ ФНС), расчёт сумм налогов (68/69) и авансов (60.02/62.02), банковские счета (по умолчанию ПАО Сбербанк БИК 044030653), вычеты НДС (19 → 68.02) и закрытие месяца (20, 26, 44, 90, 91).
             </p>
           </div>
 
@@ -172,10 +195,15 @@ export function Tab3AuditAutofix() {
             <button
               type="button"
               onClick={runSmartAutoFixAll}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded bg-amber-600 hover:bg-amber-700 text-white text-xs sm:text-sm font-semibold transition-colors"
+              disabled={isLookingUpEgrul}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded bg-amber-600 hover:bg-amber-700 disabled:opacity-60 text-white text-xs sm:text-sm font-semibold transition-colors"
             >
-              <Sparkles className="w-4 h-4" />
-              Автозаполнить и исправить всё по БД 1С
+              {isLookingUpEgrul ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Sparkles className="w-4 h-4" />
+              )}
+              Исправить всё автоматически
               {autoFixableCount > 0 && (
                 <span className="px-1.5 py-0.5 rounded bg-amber-800/60 font-mono text-[11px]">
                   {autoFixableCount}
@@ -191,6 +219,22 @@ export function Tab3AuditAutofix() {
               <Calculator className="w-4 h-4 text-zinc-500" />
               Зачёт авансов + Закрытие месяца
             </button>
+
+            {pendingNewCounterparties.length > 0 && (
+              <button
+                type="button"
+                disabled={isLookingUpEgrul}
+                onClick={() => void lookupCounterpartiesInEgrul()}
+                className="inline-flex items-center gap-1.5 px-3 py-2.5 rounded border border-sky-300 dark:border-sky-800 bg-sky-50/60 dark:bg-sky-950/30 hover:bg-sky-100/70 dark:hover:bg-sky-950/50 text-xs font-medium text-sky-800 dark:text-sky-300 disabled:opacity-50"
+              >
+                {isLookingUpEgrul ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Search className="w-3.5 h-3.5" />
+                )}
+                Проверить ИНН/КПП в ЕГРЮЛ
+              </button>
+            )}
           </div>
         </div>
 
@@ -239,22 +283,104 @@ export function Tab3AuditAutofix() {
         </div>
       </div>
 
-      {/* Auto-fix Execution Log */}
-      {autoFixLogs.length > 0 && (
-        <div className="rounded border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/50 dark:bg-emerald-950/20 p-4 space-y-2">
-          <div className="flex items-center gap-2 text-xs font-semibold text-emerald-800 dark:text-emerald-300">
-            <CheckCircle2 className="w-4 h-4 shrink-0" />
-            Выполненные автоматические исправления по данным БД 1С ({autoFixLogs.length}):
+      {/* Structured Auto-Fix Audit Trail: Что было -> Что стало -> Основание */}
+      {(autoFixChanges.length > 0 || autoFixLogs.length > 0) && (
+        <div className="rounded border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/40 dark:bg-emerald-950/20 overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-emerald-200/80 dark:border-emerald-900/50 flex items-center justify-between gap-2 text-xs font-semibold text-emerald-900 dark:text-emerald-300">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+              <span>
+                Протокол автоматических исправлений (Что было → Что стало → Основание):{' '}
+                {autoFixChanges.length || autoFixLogs.length}
+              </span>
+            </div>
           </div>
-          <ul className="space-y-1 text-xs text-emerald-900/90 dark:text-emerald-200/90 pl-6 list-disc">
-            {autoFixLogs.map((entry, idx) => (
-              <li key={idx}>{entry}</li>
-            ))}
-          </ul>
+
+          {autoFixChanges.length > 0 ? (
+            <div className="overflow-x-auto max-h-72 overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-emerald-100/60 dark:bg-emerald-950/50 text-emerald-900 dark:text-emerald-200 border-b border-emerald-200/70 dark:border-emerald-900/50">
+                  <tr>
+                    <th className="py-2 px-3 text-left font-semibold w-1/4">Что было</th>
+                    <th className="py-2 px-3 text-left font-semibold w-1/3">Что стало</th>
+                    <th className="py-2 px-3 text-left font-semibold">Основание (1С / РСБУ / ЕГРЮЛ)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-emerald-200/50 dark:divide-emerald-900/40 bg-white/70 dark:bg-zinc-950/40">
+                  {autoFixChanges.map((rec) => (
+                    <tr key={rec.id}>
+                      <td className="py-2 px-3 font-mono text-[11px] text-zinc-600 dark:text-zinc-400">
+                        {rec.whatWas}
+                      </td>
+                      <td className="py-2 px-3 font-mono text-[11px] font-semibold text-emerald-800 dark:text-emerald-300">
+                        {rec.whatBecame}
+                      </td>
+                      <td className="py-2 px-3 text-zinc-700 dark:text-zinc-300">
+                        {rec.basis}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <ul className="p-4 space-y-1 text-xs text-emerald-900/90 dark:text-emerald-200/90 pl-8 list-disc">
+              {autoFixLogs.map((entry, idx) => (
+                <li key={idx}>{entry}</li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 
-      {/* Manual Requisites Block — Local Drafts + 1C Combobox + Delete/Reset */}
+      {/* Accompanying 1C BP 3.0 Actions Summary (Bank Accounts BIK 044030653, Contracts, SF, Offsets) */}
+      {accompanyingActions.length > 0 && (
+        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/40 flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2 font-semibold text-zinc-900 dark:text-zinc-100">
+              <Landmark className="w-4 h-4 text-amber-600" />
+              <span>
+                Сопутствующие объекты и регламентные операции для 1С:Бухгалтерия 8.3 ({accompanyingActions.length})
+              </span>
+            </div>
+            <span className="text-[11px] text-zinc-500">
+              Формируются автоматически при выгрузке в .bsl / .xml
+            </span>
+          </div>
+          <div className="divide-y divide-zinc-100 dark:divide-zinc-800 max-h-60 overflow-y-auto">
+            {accompanyingActions.map((act) => (
+              <div
+                key={act.id}
+                className="px-4 py-2.5 flex flex-col md:flex-row md:items-center justify-between gap-2 text-xs"
+              >
+                <div className="space-y-0.5 min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+                      {act.title}
+                    </span>
+                    {act.bik && (
+                      <span className="px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 font-mono text-[10px]">
+                        БИК {act.bik}
+                      </span>
+                    )}
+                    {act.accountNumber && (
+                      <span className="px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 font-mono text-[10px]">
+                        р/с {act.accountNumber}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-zinc-600 dark:text-zinc-400">{act.details}</div>
+                </div>
+                <div className="text-[11px] font-mono text-zinc-500 shrink-0">
+                  {act.menuPath1C}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Manual Requisites Block — Local Drafts + 1C Combobox + EGRUL Lookup + Delete/Reset */}
       {totalManualBlockCount > 0 && (
         <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418]">
           <div className="px-4 py-3 rounded-t border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/40">
@@ -262,7 +388,7 @@ export function Tab3AuditAutofix() {
               Реквизиты новых элементов для ручного дозаполнения ({totalManualBlockCount})
             </h3>
             <p className="text-xs text-zinc-500">
-              Выберите существующий элемент из справочников 1С («Контрагенты» / «ФизическиеЛица») или введите реквизит и нажмите «Применить» (либо клавишу Enter).
+              Выберите существующий элемент из справочников 1С («Контрагенты» / «ФизическиеЛица»), проверьте реальный ИНН/КПП через ЕГРЮЛ ФНС или введите реквизит и нажмите «Применить» (либо клавишу Enter).
             </p>
           </div>
 
@@ -336,7 +462,7 @@ export function Tab3AuditAutofix() {
                 <React.Fragment key={cp.key}>
                   {cp.needsInn && (
                     <div className="px-4 py-3 flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs">
-                      <div className="space-y-0.5 min-w-0">
+                      <div className="space-y-1 min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-medium text-zinc-900 dark:text-zinc-100">
                             ИНН контрагента: {cp.name}
@@ -344,10 +470,49 @@ export function Tab3AuditAutofix() {
                           <span className="px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-[10px] font-mono text-zinc-600 dark:text-zinc-400">
                             Операций: {cp.operationIds.length}
                           </span>
+                          {cp.source === 'educational_unverified' && (
+                            <span className="px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-[10px] font-medium">
+                              Учебный контрагент (не найден в ЕГРЮЛ)
+                            </span>
+                          )}
+                          {cp.source === 'egrul_verified' && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-sky-100 dark:bg-sky-950/60 text-sky-800 dark:text-sky-300 text-[10px] font-medium">
+                              <ShieldCheck className="w-3 h-3" />
+                              Проверено ЕГРЮЛ
+                            </span>
+                          )}
                         </div>
                         <div className="text-zinc-500">
-                          Новый контрагент отсутствует в справочнике 1С. Введите 10 или 12 цифр ИНН и нажмите «Применить» (или Enter).
+                          {cp.source === 'educational_unverified'
+                            ? 'Организация отсутствует в справочнике 1С и не найдена в ЕГРЮЛ ФНС. Выдуманный ИНН не подставляется — при необходимости введите учебный ИНН (10 или 12 цифр) и нажмите «Применить».'
+                            : 'Новый контрагент отсутствует в справочнике 1С. Нажмите «ЕГРЮЛ» для поиска реального ИНН/КПП или введите 10/12 цифр ИНН и нажмите «Применить» (либо Enter).'}
                         </div>
+                        {cp.egrulCandidates.length > 1 && (
+                          <div className="pt-0.5">
+                            <select
+                              aria-label={`Выбор подразделения ЕГРЮЛ для ${cp.name}`}
+                              onChange={(e) => {
+                                const found = cp.egrulCandidates.find(
+                                  (c) => `${c.inn}:${c.kpp}` === e.target.value
+                                );
+                                if (found) {
+                                  selectEgrulCandidateForCounterparty(cp.key, found);
+                                }
+                              }}
+                              className="px-2 py-1 rounded border border-sky-300 dark:border-sky-800 bg-sky-50/50 dark:bg-sky-950/30 font-mono text-[11px]"
+                            >
+                              {cp.egrulCandidates.map((cand, idx) => (
+                                <option
+                                  key={`${cand.inn}-${cand.kpp}-${idx}`}
+                                  value={`${cand.inn}:${cand.kpp}`}
+                                >
+                                  {cand.name} — ИНН {cand.inn}
+                                  {cand.kpp ? ` / КПП ${cand.kpp}` : ''} ({cand.region || 'РФ'})
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
                         {fieldErrors[innDraftKey] && (
                           <div className="text-[11px] font-medium text-red-600 dark:text-red-400">
                             {fieldErrors[innDraftKey]}
@@ -356,6 +521,23 @@ export function Tab3AuditAutofix() {
                       </div>
 
                       <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 shrink-0">
+                        {cp.kind !== 'ФизическоеЛицо' && (
+                          <button
+                            type="button"
+                            disabled={isLookingUpEgrul}
+                            onClick={() => void lookupCounterpartiesInEgrul(cp.key)}
+                            title="Найти реальные ИНН и КПП в официальном реестре ЕГРЮЛ ФНС"
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-sky-300 dark:border-sky-800 bg-sky-50/70 dark:bg-sky-950/40 hover:bg-sky-100 dark:hover:bg-sky-950/60 text-sky-800 dark:text-sky-300 text-xs font-medium disabled:opacity-50"
+                          >
+                            {isLookingUpEgrul ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Search className="w-3.5 h-3.5" />
+                            )}
+                            ЕГРЮЛ
+                          </button>
+                        )}
+
                         <input
                           type="text"
                           inputMode="numeric"
@@ -371,7 +553,7 @@ export function Tab3AuditAutofix() {
                             }
                           }}
                           placeholder="10 или 12 цифр ИНН"
-                          className="w-48 sm:w-52 px-3 py-1.5 rounded border border-amber-400 dark:border-amber-700 bg-white dark:bg-zinc-900 font-mono tabular-nums text-xs focus:outline-none focus:ring-1 focus:ring-amber-500"
+                          className="w-44 sm:w-48 px-3 py-1.5 rounded border border-amber-400 dark:border-amber-700 bg-white dark:bg-zinc-900 font-mono tabular-nums text-xs focus:outline-none focus:ring-1 focus:ring-amber-500"
                         />
 
                         <button
@@ -419,6 +601,16 @@ export function Tab3AuditAutofix() {
                       </div>
 
                       <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          disabled={isLookingUpEgrul}
+                          onClick={() => void lookupCounterpartiesInEgrul(cp.key)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-sky-300 dark:border-sky-800 bg-sky-50/70 dark:bg-sky-950/40 text-sky-800 dark:text-sky-300 text-xs font-medium"
+                        >
+                          <Search className="w-3.5 h-3.5" />
+                          ЕГРЮЛ
+                        </button>
+
                         <input
                           type="text"
                           inputMode="numeric"
@@ -434,7 +626,7 @@ export function Tab3AuditAutofix() {
                             }
                           }}
                           placeholder="9 цифр КПП"
-                          className="w-48 sm:w-52 px-3 py-1.5 rounded border border-amber-400 dark:border-amber-700 bg-white dark:bg-zinc-900 font-mono tabular-nums text-xs focus:outline-none focus:ring-1 focus:ring-amber-500"
+                          className="w-44 sm:w-48 px-3 py-1.5 rounded border border-amber-400 dark:border-amber-700 bg-white dark:bg-zinc-900 font-mono tabular-nums text-xs focus:outline-none focus:ring-1 focus:ring-amber-500"
                         />
 
                         <button
@@ -468,7 +660,7 @@ export function Tab3AuditAutofix() {
               );
             })}
 
-            {/* C. Other manual requisite fields (e.g. missing debit/credit account code) */}
+            {/* C. Other manual requisite fields (e.g. missing primary amount or debit/credit account code) */}
             {otherManualTargets.map((issue) => {
               const target = issue.inlineTarget!;
               const draftKey = `other:${issue.id}`;
@@ -476,6 +668,11 @@ export function Tab3AuditAutofix() {
                 draftValues[draftKey] !== undefined
                   ? draftValues[draftKey]
                   : target.currentValue;
+              const isAmountField =
+                target.kind === 'operation_field' && target.field === 'amount';
+              const canCommitOther = isAmountField
+                ? parseRussianNumber(draftVal) > 0
+                : draftVal.trim().length >= 2;
 
               return (
                 <div
@@ -497,6 +694,7 @@ export function Tab3AuditAutofix() {
                   <div className="flex items-center gap-2 shrink-0">
                     <input
                       type="text"
+                      inputMode={isAmountField ? 'decimal' : 'text'}
                       aria-label={target.label}
                       value={draftVal}
                       onChange={(e) => setDraft(draftKey, e.target.value)}
@@ -511,7 +709,7 @@ export function Tab3AuditAutofix() {
                     />
                     <button
                       type="button"
-                      disabled={draftVal.trim().length < 2}
+                      disabled={!canCommitOther}
                       onClick={() =>
                         commitTargetValue(draftKey, target, target.currentValue)
                       }
@@ -528,11 +726,11 @@ export function Tab3AuditAutofix() {
         </div>
       )}
 
-      {/* Full Diagnostics List */}
+      {/* Full Diagnostics List — 1C:Бухгалтерия 8.3 (ред. 3.0) Chief Accountant Audit Cards */}
       <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] overflow-hidden">
         <div className="px-4 py-3 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/40 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-zinc-950 dark:text-white">
-            Результаты аудита ОСВ и очереди документов
+            Результаты экспертного аудита ОСВ и пошаговые инструкции для 1С:БП 3.0
           </h3>
           <span className="text-xs text-zinc-500 font-mono tabular-nums">
             Всего проверок: {auditIssues.length === 0 ? '0 замечаний' : `${auditIssues.length}`}
@@ -547,12 +745,12 @@ export function Tab3AuditAutofix() {
             </div>
             <p className="text-xs text-zinc-500 max-w-md mx-auto">
               {db1C || operations.length > 0
-                ? 'Двойная запись соблюдена, краснота по счетам отсутствует, обязательные реквизиты и закрывающие операции заполнены. Данные готовы к выгрузке в 1С 8.3.'
+                ? 'Двойная запись соблюдена, краснота по счетам отсутствует, обязательные реквизиты, зачёты авансов и закрывающие операции заполнены. Данные готовы к выгрузке в 1С 8.3.'
                 : 'Загрузите базу 1С или файлы с операциями для запуска комплексной бухгалтерской проверки.'}
             </p>
           </div>
         ) : (
-          <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+          <div className="divide-y divide-zinc-200/80 dark:divide-zinc-800">
             {auditIssues.map((issue) => {
               const diagKey = `diag:${issue.id}`;
               const diagTarget = issue.inlineTarget;
@@ -560,83 +758,135 @@ export function Tab3AuditAutofix() {
                 diagTarget && draftValues[diagKey] !== undefined
                   ? draftValues[diagKey]
                   : diagTarget?.currentValue ?? '';
+              const isAmountTarget =
+                diagTarget?.kind === 'operation_field' && diagTarget.field === 'amount';
+              const canSaveDiag = isAmountTarget
+                ? parseRussianNumber(diagVal) > 0
+                : diagVal.trim().length >= 2;
 
               return (
                 <div
                   key={issue.id}
-                  className="px-4 py-3 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs hover:bg-zinc-50/70 dark:hover:bg-zinc-900/30"
+                  className="p-4 space-y-3 text-xs hover:bg-zinc-50/50 dark:hover:bg-zinc-900/20"
                 >
-                  <div className="flex items-start gap-2.5">
-                    {issue.severity === 'error' ? (
-                      <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-                    ) : (
-                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                    )}
-                    <div className="space-y-0.5">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-semibold text-zinc-900 dark:text-zinc-100">
-                          {issue.title}
-                        </span>
-                        {issue.accountCode && (
-                          <span className="px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 font-mono text-[11px]">
-                            Счёт {issue.accountCode}
+                  {/* Header + Quick Fix Row */}
+                  <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-3">
+                    <div className="flex items-start gap-2.5">
+                      {issue.severity === 'error' ? (
+                        <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                      ) : (
+                        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                      )}
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-semibold text-zinc-950 dark:text-zinc-100">
+                            {issue.title}
                           </span>
+                          {issue.accountCode && (
+                            <span className="px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 font-mono text-[11px]">
+                              Счёт {issue.accountCode}
+                            </span>
+                          )}
+                          {issue.canAutoFixBy1C && (
+                            <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 text-[10px] font-medium">
+                              Автоисправление (1С / ЕГРЮЛ)
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-zinc-700 dark:text-zinc-300">{issue.description}</p>
+                        {issue.accountingReason && (
+                          <p className="text-zinc-500 dark:text-zinc-400">
+                            <strong className="font-medium text-zinc-700 dark:text-zinc-300">
+                              Бухгалтерская причина:{' '}
+                            </strong>
+                            {issue.accountingReason}
+                          </p>
                         )}
-                        {issue.canAutoFixBy1C && (
-                          <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 text-[10px] font-medium">
-                            Автоисправление по БД 1С
-                          </span>
+                        {issue.quickFixLabel && (
+                          <p className="text-amber-800 dark:text-amber-300 font-medium">
+                            Быстрое решение в приложении: {issue.quickFixLabel}
+                          </p>
+                        )}
+                        {fieldErrors[diagKey] && (
+                          <p className="text-[11px] font-medium text-red-600 dark:text-red-400">
+                            {fieldErrors[diagKey]}
+                          </p>
                         )}
                       </div>
-                      <p className="text-zinc-600 dark:text-zinc-400">{issue.description}</p>
-                      {fieldErrors[diagKey] && (
-                        <p className="text-[11px] font-medium text-red-600 dark:text-red-400">
-                          {fieldErrors[diagKey]}
-                        </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 shrink-0 pl-6 lg:pl-0">
+                      {diagTarget && (
+                        <>
+                          <input
+                            type="text"
+                            aria-label={diagTarget.label}
+                            value={diagVal}
+                            onChange={(e) => setDraft(diagKey, e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                commitTargetValue(diagKey, diagTarget, diagTarget.currentValue);
+                              }
+                            }}
+                            placeholder={diagTarget.placeholder}
+                            className="w-44 px-2.5 py-1 rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono tabular-nums text-xs focus:outline-none focus:border-amber-600"
+                          />
+                          <button
+                            type="button"
+                            disabled={!canSaveDiag}
+                            onClick={() =>
+                              commitTargetValue(diagKey, diagTarget, diagTarget.currentValue)
+                            }
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-950 disabled:opacity-40 text-xs font-medium"
+                          >
+                            Сохранить
+                          </button>
+                        </>
+                      )}
+                      {issue.operationId && (
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('import_postings')}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300"
+                        >
+                          К документу
+                          <ExternalLink className="w-3 h-3" />
+                        </button>
                       )}
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-2 shrink-0 pl-6 md:pl-0">
-                    {diagTarget && issue.canAutoFixBy1C && (
-                      <>
-                        <input
-                          type="text"
-                          aria-label={diagTarget.label}
-                          value={diagVal}
-                          onChange={(e) => setDraft(diagKey, e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              commitTargetValue(diagKey, diagTarget, diagTarget.currentValue);
-                            }
-                          }}
-                          placeholder={diagTarget.placeholder}
-                          className="w-44 px-2.5 py-1 rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono tabular-nums text-xs focus:outline-none focus:border-amber-600"
-                        />
-                        <button
-                          type="button"
-                          disabled={diagVal.trim().length < 2}
-                          onClick={() =>
-                            commitTargetValue(diagKey, diagTarget, diagTarget.currentValue)
-                          }
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-950 disabled:opacity-40 text-xs font-medium"
-                        >
-                          Сохранить
-                        </button>
-                      </>
-                    )}
-                    {issue.operationId && (
-                      <button
-                        type="button"
-                        onClick={() => setActiveTab('import_postings')}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300"
-                      >
-                        К документу
-                        <ExternalLink className="w-3 h-3" />
-                      </button>
-                    )}
-                  </div>
+                  {/* Step-by-step instruction inside 1С:Бухгалтерия 8.3 (ред. 3.0) */}
+                  {issue.guide1C && (
+                    <div className="ml-6 rounded border border-zinc-200/90 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-900/50 p-3 space-y-1.5 text-[11px]">
+                      <div className="flex flex-wrap items-center gap-2 font-semibold text-zinc-800 dark:text-zinc-200">
+                        <BookOpenCheck className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                        <span>Как исправить в 1С:Бухгалтерия 8.3 (ред. 3.0):</span>
+                        <span className="font-mono font-normal px-1.5 py-0.5 rounded bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700">
+                          {issue.guide1C.menuPath}
+                        </span>
+                        <span className="text-zinc-500 font-normal">
+                          · Объект: {issue.guide1C.documentKind}
+                        </span>
+                      </div>
+                      <ul className="pl-5 list-disc space-y-0.5 text-zinc-600 dark:text-zinc-400">
+                        {issue.guide1C.checkPoints.map((pt, idx) => (
+                          <li key={idx}>{pt}</li>
+                        ))}
+                      </ul>
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 pt-0.5 text-zinc-600 dark:text-zinc-400">
+                        <span>
+                          <strong className="text-zinc-800 dark:text-zinc-200">Действие:</strong>{' '}
+                          {issue.guide1C.repostInstruction}
+                        </span>
+                        <span>
+                          <strong className="text-zinc-800 dark:text-zinc-200">Проверка:</strong>{' '}
+                          {issue.guide1C.verifyInOsv}
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}

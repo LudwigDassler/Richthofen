@@ -93,6 +93,7 @@ export function calculateOsvReport(params: {
   operations: QueuedOperation[];
   dateFrom?: string;
   dateTo?: string;
+  reportingYear?: number;
   balanceAnchorOverride?: BalanceAnchorOverride;
   includeQueuedOperations?: boolean;
 }): OsvReport {
@@ -101,9 +102,15 @@ export function calculateOsvReport(params: {
     operations,
     dateFrom = '',
     dateTo = '',
+    reportingYear,
     balanceAnchorOverride = 'auto',
     includeQueuedOperations = true,
   } = params;
+
+  const reportingYearStart =
+    reportingYear && reportingYear >= 1990 && reportingYear <= 2100
+      ? `${reportingYear}-01-01`
+      : '';
 
   const { mode: effectiveMode, description: balanceModeDescription } =
     resolveEffectiveBalanceMode(db1C, balanceAnchorOverride);
@@ -146,16 +153,28 @@ export function calculateOsvReport(params: {
     map.set(acc, round2((map.get(acc) ?? 0) + delta));
   };
 
+  const dbPeriodEndsBeforeReportingYear = Boolean(
+    reportingYearStart && db1C?.periodEnd && db1C.periodEnd < reportingYearStart
+  );
+
   if (db1C && db1C.rawBalances.length > 0) {
     if (effectiveMode === 'explicit_start_end') {
       for (const b of db1C.rawBalances) {
-        addNet(baseStartNetMap, b.account, b.startDebit - b.startCredit);
-        if (dbMovements.length === 0 && (b.turnoverDebit !== 0 || b.turnoverCredit !== 0)) {
-          const prev = explicitNoPostingsTurnoverMap.get(b.account) ?? { dt: 0, kt: 0 };
-          explicitNoPostingsTurnoverMap.set(b.account, {
-            dt: round2(prev.dt + b.turnoverDebit),
-            kt: round2(prev.kt + b.turnoverCredit),
-          });
+        if (dbMovements.length === 0 && dbPeriodEndsBeforeReportingYear) {
+          // Historical 1C period ended before 01.01.<reportingYear>: its ending balance is our opening balance!
+          const endNet = b.hasExplicitEnd
+            ? b.endDebit - b.endCredit
+            : b.startDebit - b.startCredit + b.turnoverDebit - b.turnoverCredit;
+          addNet(baseStartNetMap, b.account, endNet);
+        } else {
+          addNet(baseStartNetMap, b.account, b.startDebit - b.startCredit);
+          if (dbMovements.length === 0 && (b.turnoverDebit !== 0 || b.turnoverCredit !== 0)) {
+            const prev = explicitNoPostingsTurnoverMap.get(b.account) ?? { dt: 0, kt: 0 };
+            explicitNoPostingsTurnoverMap.set(b.account, {
+              dt: round2(prev.dt + b.turnoverDebit),
+              kt: round2(prev.kt + b.turnoverCredit),
+            });
+          }
         }
       }
     } else if (effectiveMode === 'end_balances_reconstructed_start') {
@@ -179,22 +198,31 @@ export function calculateOsvReport(params: {
     } else {
       // 'start_balances_forward_end' or 'balances_only'
       for (const b of db1C.rawBalances) {
-        const startNet = b.hasExplicitStart
-          ? b.startDebit - b.startCredit
-          : b.rawDebit - b.rawCredit;
-        addNet(baseStartNetMap, b.account, startNet);
-        if (dbMovements.length === 0 && (b.turnoverDebit !== 0 || b.turnoverCredit !== 0)) {
-          const prev = explicitNoPostingsTurnoverMap.get(b.account) ?? { dt: 0, kt: 0 };
-          explicitNoPostingsTurnoverMap.set(b.account, {
-            dt: round2(prev.dt + b.turnoverDebit),
-            kt: round2(prev.kt + b.turnoverCredit),
-          });
+        if (dbMovements.length === 0 && dbPeriodEndsBeforeReportingYear && b.hasExplicitEnd) {
+          addNet(baseStartNetMap, b.account, b.endDebit - b.endCredit);
+        } else {
+          const startNet = b.hasExplicitStart
+            ? b.startDebit - b.startCredit
+            : b.rawDebit - b.rawCredit;
+          addNet(baseStartNetMap, b.account, startNet);
+          if (
+            dbMovements.length === 0 &&
+            !dbPeriodEndsBeforeReportingYear &&
+            (b.turnoverDebit !== 0 || b.turnoverCredit !== 0)
+          ) {
+            const prev = explicitNoPostingsTurnoverMap.get(b.account) ?? { dt: 0, kt: 0 };
+            explicitNoPostingsTurnoverMap.set(b.account, {
+              dt: round2(prev.dt + b.turnoverDebit),
+              kt: round2(prev.kt + b.turnoverCredit),
+            });
+          }
         }
       }
     }
   }
 
-  // Step 2: Partition movements relative to [dateFrom, dateTo]
+  // Step 2: Partition movements relative to [dateFrom, dateTo] and reportingYearStart
+  // - Historical 1C DB movements prior to 01.01.<reportingYear> ALWAYS roll into opening balance
   // - date < dateFrom -> rolls into periodStartNet
   // - dateFrom <= date <= dateTo -> period turnovers
   // - date > dateTo -> excluded from selected period view
@@ -209,7 +237,11 @@ export function calculateOsvReport(params: {
   const allMovements = [...dbMovements, ...queuedMovements];
   for (const m of allMovements) {
     const d = m.date;
-    const isBeforeStart = Boolean(dateFrom && d && d < dateFrom);
+    const isHistoricalDbBeforeReportingYear = Boolean(
+      m.source === 'db' && reportingYearStart && d && d < reportingYearStart
+    );
+    const isBeforeStart =
+      isHistoricalDbBeforeReportingYear || Boolean(dateFrom && d && d < dateFrom);
     const isAfterEnd = Boolean(dateTo && d && d > dateTo);
 
     if (isBeforeStart) {

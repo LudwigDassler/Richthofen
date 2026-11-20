@@ -28,6 +28,7 @@ export function Tab1DatabaseOsv() {
   const {
     db1C,
     syncStatus,
+    reportingYear,
     operations,
     osvReport,
     balanceAnchorOverride,
@@ -35,7 +36,6 @@ export function Tab1DatabaseOsv() {
     includeQueuedInOsv,
     setIncludeQueuedInOsv,
     periodFilter,
-    setPeriodFilter,
     load1CJsonFile,
     syncWith1CEndpoint,
     setActiveTab,
@@ -52,6 +52,17 @@ export function Tab1DatabaseOsv() {
   const [selectedDirKey, setSelectedDirKey] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [docKindFilter, setDocKindFilter] = useState<string>('ALL');
+  const [showHistoricalArchive, setShowHistoricalArchive] = useState<boolean>(false);
+
+  const reportingYearCutoff = `${reportingYear}-01-01`;
+  const historicalPostingsCount = useMemo(
+    () => (db1C ? db1C.postings.filter((p) => p.date && p.date < reportingYearCutoff).length : 0),
+    [db1C, reportingYearCutoff]
+  );
+  const historicalDocsCount = useMemo(
+    () => (db1C ? db1C.documents.filter((d) => d.date && d.date < reportingYearCutoff).length : 0),
+    [db1C, reportingYearCutoff]
+  );
 
   const activeOpsCount = operations.filter((o) => o.includeInProcessing && !o.isDuplicateIn1C).length;
 
@@ -117,6 +128,7 @@ export function Tab1DatabaseOsv() {
 
     for (const p of db1C?.postings ?? []) {
       if (matchesAcc(p.debit) || matchesAcc(p.credit)) {
+        if (p.date && p.date < reportingYearCutoff) continue;
         if (periodFilter.dateFrom && p.date && p.date < periodFilter.dateFrom) continue;
         if (periodFilter.dateTo && p.date && p.date > periodFilter.dateTo) continue;
         items.push({
@@ -162,6 +174,7 @@ export function Tab1DatabaseOsv() {
     operations,
     periodFilter.dateFrom,
     periodFilter.dateTo,
+    reportingYearCutoff,
   ]);
 
   const exportOsvToExcel = () => {
@@ -487,16 +500,21 @@ export function Tab1DatabaseOsv() {
           <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/50 text-xs text-zinc-600 dark:text-zinc-400">
             <span>
               <strong className="font-medium text-zinc-800 dark:text-zinc-200">
-                Методика расчёта сальдо:{' '}
+                Методика расчёта сальдо ({reportingYear} г.):{' '}
               </strong>
               {osvReport.balanceModeDescription}
+              {historicalPostingsCount > 0 && (
+                <span className="ml-1.5 text-amber-700 dark:text-amber-400">
+                  · Архивные проводки до 01.01.{reportingYear} ({historicalPostingsCount} шт.) свёрнуты во входящее сальдо
+                </span>
+              )}
             </span>
             <span className="font-mono tabular-nums">
               {periodFilter.dateFrom || periodFilter.dateTo
                 ? `Период отбора: ${formatDateRu(periodFilter.dateFrom)} — ${formatDateRu(
                     periodFilter.dateTo
                   )}`
-                : 'Все даты'}
+                : `Отчётный ${reportingYear} год`}
             </span>
           </div>
 
@@ -916,33 +934,46 @@ export function Tab1DatabaseOsv() {
           {/* 3. ВсеДокументы */}
           {explorerSection === 'documents' && (
             <div className="space-y-2">
-              <div className="px-4 pt-3 flex flex-wrap items-center gap-1.5 text-xs">
-                <span className="text-zinc-500">Вид документа:</span>
-                <button
-                  type="button"
-                  onClick={() => setDocKindFilter('ALL')}
-                  className={`px-2 py-1 rounded ${
-                    docKindFilter === 'ALL'
-                      ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
-                      : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
-                  }`}
-                >
-                  Все ({db1C.documents.length})
-                </button>
-                {Array.from(new Set(db1C.documents.map((d) => d.documentKind))).map((kind) => (
+              <div className="px-4 pt-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-zinc-500">Вид документа:</span>
                   <button
-                    key={kind}
                     type="button"
-                    onClick={() => setDocKindFilter(kind)}
+                    onClick={() => setDocKindFilter('ALL')}
                     className={`px-2 py-1 rounded ${
-                      docKindFilter === kind
+                      docKindFilter === 'ALL'
                         ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
                         : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
                     }`}
                   >
-                    {kind}
+                    Все ({db1C.documents.length})
                   </button>
-                ))}
+                  {Array.from(new Set(db1C.documents.map((d) => d.documentKind))).map((kind) => (
+                    <button
+                      key={kind}
+                      type="button"
+                      onClick={() => setDocKindFilter(kind)}
+                      className={`px-2 py-1 rounded ${
+                        docKindFilter === kind
+                          ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
+                          : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
+                      }`}
+                    >
+                      {kind}
+                    </button>
+                  ))}
+                </div>
+                {historicalDocsCount > 0 && (
+                  <label className="inline-flex items-center gap-1.5 cursor-pointer text-zinc-600 dark:text-zinc-400">
+                    <input
+                      type="checkbox"
+                      checked={showHistoricalArchive}
+                      onChange={(e) => setShowHistoricalArchive(e.target.checked)}
+                      className="rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                    />
+                    <span>Показать архив до {reportingYear} г. ({historicalDocsCount})</span>
+                  </label>
+                )}
               </div>
 
               <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
@@ -961,6 +992,10 @@ export function Tab1DatabaseOsv() {
                   </thead>
                   <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
                     {db1C.documents
+                      .filter(
+                        (d) =>
+                          showHistoricalArchive || !d.date || d.date >= reportingYearCutoff
+                      )
                       .filter((d) => docKindFilter === 'ALL' || d.documentKind === docKindFilter)
                       .filter((d) => {
                         if (!searchQuery.trim()) return true;
@@ -1005,29 +1040,50 @@ export function Tab1DatabaseOsv() {
 
           {/* 4. Проводки */}
           {explorerSection === 'postings' && (
-            <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
-              <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-zinc-50 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 text-zinc-500">
-                  <tr>
-                    <th className="py-2 px-3 text-left">Дата</th>
-                    <th className="py-2 px-3 text-left">Регистратор</th>
-                    <th className="py-2 px-3 text-left">Дт</th>
-                    <th className="py-2 px-3 text-left">Субконто Дт</th>
-                    <th className="py-2 px-3 text-left">Кт</th>
-                    <th className="py-2 px-3 text-left">Субконто Кт</th>
-                    <th className="py-2 px-3 text-right">Сумма</th>
-                    <th className="py-2 px-3 text-left">Содержание</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                  {db1C.postings
-                    .filter((p) => {
-                      if (!searchQuery.trim()) return true;
-                      const q = searchQuery.toLowerCase();
-                      return `${p.date} ${p.debit} ${p.credit} ${p.documentLabel} ${p.description} ${p.debitSubconto.join(' ')} ${p.creditSubconto.join(' ')}`
-                        .toLowerCase()
-                        .includes(q);
-                    })
+            <div className="space-y-2">
+              {historicalPostingsCount > 0 && (
+                <div className="px-4 pt-3 flex items-center justify-between text-xs text-zinc-600 dark:text-zinc-400">
+                  <span>
+                    По умолчанию отображаются проводки отчётного {reportingYear} года (архив до 01.01.{reportingYear} учтён во входящем сальдо ОСВ).
+                  </span>
+                  <label className="inline-flex items-center gap-1.5 cursor-pointer shrink-0">
+                    <input
+                      type="checkbox"
+                      checked={showHistoricalArchive}
+                      onChange={(e) => setShowHistoricalArchive(e.target.checked)}
+                      className="rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                    />
+                    <span>Показать архив до {reportingYear} г. ({historicalPostingsCount})</span>
+                  </label>
+                </div>
+              )}
+              <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
+                <table className="w-full text-xs">
+                  <thead className="sticky top-0 bg-zinc-50 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 text-zinc-500">
+                    <tr>
+                      <th className="py-2 px-3 text-left">Дата</th>
+                      <th className="py-2 px-3 text-left">Регистратор</th>
+                      <th className="py-2 px-3 text-left">Дт</th>
+                      <th className="py-2 px-3 text-left">Субконто Дт</th>
+                      <th className="py-2 px-3 text-left">Кт</th>
+                      <th className="py-2 px-3 text-left">Субконто Кт</th>
+                      <th className="py-2 px-3 text-right">Сумма</th>
+                      <th className="py-2 px-3 text-left">Содержание</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                    {db1C.postings
+                      .filter(
+                        (p) =>
+                          showHistoricalArchive || !p.date || p.date >= reportingYearCutoff
+                      )
+                      .filter((p) => {
+                        if (!searchQuery.trim()) return true;
+                        const q = searchQuery.toLowerCase();
+                        return `${p.date} ${p.debit} ${p.credit} ${p.documentLabel} ${p.description} ${p.debitSubconto.join(' ')} ${p.creditSubconto.join(' ')}`
+                          .toLowerCase()
+                          .includes(q);
+                      })
                     .map((p) => (
                       <tr key={p.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-900/40">
                         <td className="py-1.5 px-3 font-mono tabular-nums whitespace-nowrap">
@@ -1052,6 +1108,7 @@ export function Tab1DatabaseOsv() {
                     ))}
                 </tbody>
               </table>
+              </div>
             </div>
           )}
 
