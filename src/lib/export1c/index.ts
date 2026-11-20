@@ -144,15 +144,16 @@ export function buildExportBundle(params: {
   }
 
   for (const op of activeNewOps) {
+    const trimmedCp = op.counterpartyName.trim();
     if (
-      op.counterpartyName &&
+      trimmedCp.length >= 2 &&
       (mode === 'clean_db' || op.bindings.counterparty.status === 'new_for_1c')
     ) {
-      const key = op.counterpartyInn || op.counterpartyName.toLowerCase();
+      const key = op.counterpartyInn || trimmedCp.toLowerCase();
       if (!cpMap.has(key)) {
         cpMap.set(key, {
-          name: op.counterpartyName,
-          fullName: op.counterpartyName,
+          name: trimmedCp,
+          fullName: trimmedCp,
           inn: op.counterpartyInn,
           kpp: op.counterpartyKpp,
           kind: op.counterpartyKind,
@@ -161,7 +162,7 @@ export function buildExportBundle(params: {
     }
 
     if (
-      op.counterpartyName &&
+      trimmedCp.length >= 2 &&
       op.contractName &&
       (mode === 'clean_db' || op.bindings.contract.status === 'new_for_1c')
     ) {

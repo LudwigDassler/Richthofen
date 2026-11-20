@@ -1,6 +1,7 @@
 import {
   AccountingEntry,
   Database1CSnapshot,
+  DirectoryAutocompleteOption1C,
   DocType1CBP30,
   EntityBindingStatus,
   OperationCategory,
@@ -43,7 +44,316 @@ export function inferCounterpartyKind(
   ) {
     return 'ЮридическоеЛицо';
   }
+  // Check if name looks like a 2- or 3-part Russian FIO or Surname + Initials
+  if (
+    /^[А-ЯЁ][а-яё]+(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.?|[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?))$/u.test(
+      name.trim()
+    )
+  ) {
+    return 'ФизическоеЛицо';
+  }
   return 'ЮридическоеЛицо';
+}
+
+export function isFounderContributionText(text: string): boolean {
+  return /поступлен\p{L}*\s+(?:на\s+расч[её]тн\p{L}+\s+сч[её]т\s+|на\s+р\/с\s+)?доли(?=$|[^\p{L}])|оплат\p{L}*\s+доли(?=$|[^\p{L}])|внесени\p{L}*\s+доли(?=$|[^\p{L}])|взнос\p{L}*\s+в\s+уставн\p{L}+\s+капитал|вклад\p{L}*\s+в\s+уставн\p{L}+\s+капитал|формирован\p{L}*\s+уставн\p{L}+\s+капитал|взнос\p{L}*\s+учредител/iu.test(
+    text
+  );
+}
+
+export function extractFounderFioFromDescription(text: string): string {
+  const cleaned = text.replace(/[«»"'„“”()]/g, ' ').replace(/\s+/g, ' ').trim();
+  const re =
+    /(?:доли(?:\s+в\s+уставн\p{L}+\s+капитал\p{L}*)?(?:\s+учредителя|\s+участника|\s+от)?|взнос\p{L}*\s+в\s+уставн\p{L}+\s+капитал\p{L}*\s+(?:от\s+)?(?:учредителя\s+|участника\s+)?|вклад\p{L}*\s+в\s+уставн\p{L}+\s+капитал\p{L}*\s+(?:от\s+)?(?:учредителя\s+|участника\s+)?|(?:от\s+)?(?:учредителя|участника))\s+([А-ЯЁ][а-яё]+(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.|[А-ЯЁ]\.|[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?))?)/u;
+  const m = cleaned.match(re);
+  if (m && m[1]) {
+    const candidate = m[1]
+      .replace(/\s+(?:Сумма|НДС|Без|По|Договор|Счет|Счёт|В|На).*$/u, '')
+      .trim();
+    if (candidate.length >= 2) {
+      return candidate;
+    }
+  }
+  return '';
+}
+
+function normalizeGenitiveFioToNominative(rawFio: string): string {
+  const parts = rawFio.trim().split(/\s+/);
+  if (parts.length === 3) {
+    const [sur, given, patr] = parts;
+    // Unambiguous masculine genitive: e.g. "Иванова Ивана Ивановича" -> "Иванов Иван Иванович"
+    if (/(?:овича|евича|ича)$/iu.test(patr) && /[ая]$/iu.test(given)) {
+      const nomSur = /(?:ова|ева|ёва|ина|ына)$/iu.test(sur)
+        ? sur.slice(0, -1)
+        : /(?:ого|его)$/iu.test(sur)
+          ? sur.replace(/(?:ого|его)$/iu, 'ий')
+          : /а$/iu.test(sur)
+            ? sur.slice(0, -1)
+            : sur;
+      const nomGiven = /я$/iu.test(given) ? `${given.slice(0, -1)}й` : given.slice(0, -1);
+      const nomPatr = patr.slice(0, -1);
+      if (nomSur.length >= 2 && nomGiven.length >= 2) {
+        return `${nomSur} ${nomGiven} ${nomPatr}`;
+      }
+    }
+    // Unambiguous feminine genitive: e.g. "Морозовой Елены Сергеевны" -> "Морозова Елена Сергеевна"
+    if (/(?:овны|евны|ичны|иничны)$/iu.test(patr) && /[ыи]$/iu.test(given)) {
+      const nomSur = /(?:овой|евой|ёвой|иной|ыной)$/iu.test(sur)
+        ? `${sur.slice(0, -2)}а`
+        : /(?:ской|цкой)$/iu.test(sur)
+          ? `${sur.slice(0, -2)}ая`
+          : sur;
+      const nomGiven = /и$/iu.test(given) && /[кгхжшщчц]и$/iu.test(given)
+        ? `${given.slice(0, -1)}а`
+        : /и$/iu.test(given)
+          ? `${given.slice(0, -1)}я`
+          : `${given.slice(0, -1)}а`;
+      const nomPatr = `${patr.slice(0, -1)}а`;
+      if (nomSur.length >= 2 && nomGiven.length >= 2) {
+        return `${nomSur} ${nomGiven} ${nomPatr}`;
+      }
+    }
+  }
+  return rawFio.trim();
+}
+
+export function russianSurnameMatches(candidateSurname: string, dbNominativeSurname: string): boolean {
+  const cand = candidateSurname.toLowerCase().replace(/ё/g, 'е').trim();
+  const nom = dbNominativeSurname.toLowerCase().replace(/ё/g, 'е').trim();
+  if (cand.length < 2 || nom.length < 2) return false;
+  if (cand === nom) return true;
+
+  const forms = new Set<string>([nom]);
+  if (/(?:ов|ев|ин|ын)$/.test(nom)) {
+    forms.add(`${nom}а`);
+    forms.add(`${nom}у`);
+    forms.add(`${nom}ым`);
+    forms.add(`${nom}е`);
+  } else if (/(?:ова|ева|ина|ына)$/.test(nom)) {
+    const stem = nom.slice(0, -1);
+    forms.add(`${stem}ой`);
+    forms.add(`${stem}у`);
+  } else if (/(?:ский|цкий|ской|цкой|ой)$/.test(nom)) {
+    const stem = nom.slice(0, -2);
+    forms.add(`${stem}ого`);
+    forms.add(`${stem}ому`);
+    forms.add(`${stem}им`);
+    forms.add(`${stem}ым`);
+    forms.add(`${stem}ом`);
+  } else if (/(?:ская|цкая|ая|яя)$/.test(nom)) {
+    const stem = nom.slice(0, -2);
+    forms.add(`${stem}ой`);
+    forms.add(`${stem}ей`);
+    forms.add(`${stem}ую`);
+    forms.add(`${stem}юю`);
+  } else if (nom.endsWith('а')) {
+    const stem = nom.slice(0, -1);
+    forms.add(`${stem}ы`);
+    forms.add(`${stem}и`);
+    forms.add(`${stem}е`);
+    forms.add(`${stem}у`);
+    forms.add(`${stem}ой`);
+    forms.add(`${stem}ей`);
+  } else if (nom.endsWith('я')) {
+    const stem = nom.slice(0, -1);
+    forms.add(`${stem}и`);
+    forms.add(`${stem}е`);
+    forms.add(`${stem}ю`);
+    forms.add(`${stem}ей`);
+  } else if (nom.endsWith('ь')) {
+    const stem = nom.slice(0, -1);
+    forms.add(`${stem}я`);
+    forms.add(`${stem}ю`);
+    forms.add(`${stem}ем`);
+    forms.add(`${stem}и`);
+  } else if (nom.endsWith('й')) {
+    const stem = nom.slice(0, -1);
+    forms.add(`${stem}я`);
+    forms.add(`${stem}ю`);
+    forms.add(`${stem}ем`);
+    forms.add(`${stem}ого`);
+    forms.add(`${stem}ому`);
+  } else if (/[бвгджзклмнпрстфхцчшщ]$/.test(nom)) {
+    forms.add(`${nom}а`);
+    forms.add(`${nom}у`);
+    forms.add(`${nom}ом`);
+    forms.add(`${nom}ем`);
+    forms.add(`${nom}е`);
+  }
+
+  return forms.has(cand);
+}
+
+function fioTokensMatch(candText: string, dbName: string): boolean {
+  const candTokens = (candText.match(/\p{L}+/gu) ?? []).map((t) =>
+    t.toLowerCase().replace(/ё/g, 'е')
+  );
+  const dbTokens = (dbName.match(/\p{L}+/gu) ?? []).map((t) =>
+    t.toLowerCase().replace(/ё/g, 'е')
+  );
+  if (candTokens.length === 0 || dbTokens.length === 0) return false;
+  // Exclude legal entity names from FIO inflection matching
+  const legalStopWords = new Set(['ооо', 'пао', 'зао', 'ао', 'гуп', 'муп', 'общество', 'компания', 'завод']);
+  if (dbTokens.some((t) => legalStopWords.has(t)) || candTokens.some((t) => legalStopWords.has(t))) {
+    return false;
+  }
+  const dbOffset = dbTokens[0] === 'ип' ? 1 : 0;
+  const candOffset = candTokens[0] === 'ип' ? 1 : 0;
+  const dbSur = dbTokens[dbOffset];
+  const candSur = candTokens[candOffset];
+  if (!dbSur || !candSur || dbSur.length < 2 || candSur.length < 2) return false;
+
+  if (!russianSurnameMatches(candSur, dbSur)) return false;
+
+  const dbGiven = dbTokens[dbOffset + 1];
+  const candGiven = candTokens[candOffset + 1];
+  if (dbGiven && candGiven && dbGiven[0] !== candGiven[0]) {
+    return false;
+  }
+
+  const dbPatr = dbTokens[dbOffset + 2];
+  const candPatr = candTokens[candOffset + 2];
+  if (dbPatr && candPatr && dbPatr[0] !== candPatr[0]) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Returns unified autocomplete and lookup entries from `ВсеСправочники.Контрагенты`
+ * and `ВсеСправочники.ФизическиеЛица` of the loaded 1C database.
+ */
+export function get1CCounterpartyAndIndividualOptions(
+  db1C: Database1CSnapshot | null
+): DirectoryAutocompleteOption1C[] {
+  if (!db1C) return [];
+  const options: DirectoryAutocompleteOption1C[] = [];
+  const seenKeys = new Set<string>();
+
+  for (const cp of db1C.counterparties) {
+    const trimmed = cp.name.trim();
+    if (trimmed.length < 2) continue;
+    const cleanInn = (cp.inn ?? '').replace(/\D/g, '');
+    const cleanKpp = (cp.kpp ?? '').replace(/\D/g, '');
+    const kindRaw = (cp.kind ?? '').toLowerCase();
+    const kind: DirectoryAutocompleteOption1C['kind'] = /физ/i.test(kindRaw)
+      ? 'ФизическоеЛицо'
+      : /предпринимат|ип/i.test(kindRaw)
+        ? 'ИндивидуальныйПредприниматель'
+        : inferCounterpartyKind(trimmed, cleanInn);
+
+    const key = `cp:${normalizeEntityKey(trimmed) || trimmed.toLowerCase()}:${cleanInn}`;
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+
+    options.push({
+      id: cp.id,
+      name: trimmed,
+      fullName: cp.fullName || trimmed,
+      inn: cleanInn,
+      kpp: cleanKpp,
+      code1C: cp.code1C,
+      source: 'Контрагенты',
+      kind,
+      defaultContract: cp.defaultContract,
+    });
+  }
+
+  for (const ind of db1C.individuals) {
+    const trimmed = ind.name.trim();
+    if (trimmed.length < 2) continue;
+    const rawInn = ind.extra?.inn || (/^\d{10,12}$/.test(ind.kind ?? '') ? ind.kind! : '');
+    const cleanInn = rawInn.replace(/\D/g, '');
+    const normKey = normalizeEntityKey(trimmed) || trimmed.toLowerCase();
+
+    // Skip duplicate if exact same person with same INN is already listed under Контрагенты
+    const alreadyInCp = options.some(
+      (o) =>
+        (normalizeEntityKey(o.name) === normKey ||
+          (cleanInn && o.inn === cleanInn)) &&
+        o.kind === 'ФизическоеЛицо'
+    );
+    if (alreadyInCp) continue;
+
+    const key = `ind:${normKey}:${cleanInn}`;
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+
+    options.push({
+      id: ind.id,
+      name: trimmed,
+      fullName: ind.extra?.fullName || trimmed,
+      inn: cleanInn,
+      kpp: '',
+      code1C: ind.code1C,
+      source: 'ФизическиеЛица',
+      kind: 'ФизическоеЛицо',
+    });
+  }
+
+  return options;
+}
+
+export function matchPersonOrCounterpartyIn1C(
+  candidateName: string,
+  candidateInn: string,
+  db1C: Database1CSnapshot | null
+): DirectoryAutocompleteOption1C | null {
+  if (!db1C) return null;
+  const trimmedName = candidateName.trim();
+  const cleanInn = candidateInn.replace(/\D/g, '');
+  if (trimmedName.length < 2 && cleanInn.length < 10) return null;
+
+  const options = get1CCounterpartyAndIndividualOptions(db1C);
+  const normCand = normalizeEntityKey(trimmedName);
+
+  // 1. Exact INN match
+  if (cleanInn.length === 10 || cleanInn.length === 12) {
+    const byInn = options.find((o) => o.inn === cleanInn);
+    if (byInn) return byInn;
+  }
+
+  // 2. Exact normalized name or fullName match
+  if (normCand.length >= 2) {
+    const exact = options.find((o) => {
+      const dbNorm = normalizeEntityKey(o.name);
+      const dbFullNorm = normalizeEntityKey(o.fullName ?? '');
+      return dbNorm === normCand || (Boolean(dbFullNorm) && dbFullNorm === normCand);
+    });
+    if (exact) return exact;
+  }
+
+  // 3. Inflected Russian FIO / Surname+Initials match (for Контрагенты & ФизическиеЛица)
+  if (trimmedName.length >= 2) {
+    const byFio = options.find(
+      (o) => fioTokensMatch(trimmedName, o.name) || (o.fullName && fioTokensMatch(trimmedName, o.fullName))
+    );
+    if (byFio) return byFio;
+  }
+
+  return null;
+}
+
+export function findPersonMentionedInDescription1C(
+  description: string,
+  db1C: Database1CSnapshot | null
+): DirectoryAutocompleteOption1C | null {
+  if (!db1C || !description.trim()) return null;
+  const options = get1CCounterpartyAndIndividualOptions(db1C);
+  const words = description.match(/[А-ЯЁ][а-яё]+/gu) ?? [];
+  for (let i = 0; i < words.length; i++) {
+    const window3 = words.slice(i, i + 3).join(' ');
+    const window1 = words[i];
+    for (const opt of options) {
+      if (opt.source === 'ФизическиеЛица' || opt.kind === 'ФизическоеЛицо') {
+        if (fioTokensMatch(window3, opt.name) || fioTokensMatch(window1, opt.name)) {
+          return opt;
+        }
+      }
+    }
+  }
+  return null;
 }
 
 export function checkDuplicateIn1CDb(
@@ -227,6 +537,19 @@ function detectCategoryAndDocType(
     return { category: 'payroll_payout', docType1C: 'СписаниеСРасчетногоСчета' };
   }
 
+  // Founder contribution to charter capital (счёт 75.01 — взнос в УК / оплата доли учредителя)
+  if (
+    draft.explicitCredit === '75.01' ||
+    draft.explicitCredit === '75' ||
+    isFounderContributionText(itemAndDescText)
+  ) {
+    const isCash = /(?:^|[^\p{L}])пко(?=$|[^\p{L}])|в кассу|наличн/iu.test(itemAndDescText);
+    return {
+      category: 'founder_contribution',
+      docType1C: isCash ? 'ПоступлениеНаличных' : 'ПоступлениеНаРасчетныйСчет',
+    };
+  }
+
   // Explicit bank hints
   if (
     draft.directionHint === 'in' ||
@@ -358,6 +681,10 @@ export function bindAndGenerateOperation(
   const isOsno = (db1C?.accountingPolicy.taxSystem ?? 'ОСНО') === 'ОСНО';
 
   let cpName = (draft.counterpartyName ?? '').trim();
+  // Never accept <2-character single-letter fragments as a counterparty name
+  if (cpName.length < 2) {
+    cpName = '';
+  }
   let cpInn = (draft.counterpartyInn ?? '').replace(/\D/g, '');
   let cpKpp = (draft.counterpartyKpp ?? '').replace(/\D/g, '');
   let contractName = (draft.contractName ?? '').trim();
@@ -370,8 +697,34 @@ export function bindAndGenerateOperation(
   const employeeName = (draft.employeeName ?? '').trim();
 
   const descNormForLookup = normalizeEntityKey(draft.description);
+  const founderShareOp =
+    draft.categoryHint === 'founder_contribution' ||
+    draft.explicitCredit === '75.01' ||
+    draft.explicitCredit === '75' ||
+    isFounderContributionText(draft.description);
 
-  // If counterparty was not extracted by legal-entity regex, check if any known 1C counterparty name appears in description
+  // Extract founder FIO for charter capital share contributions ("Поступление на расчетный счет доли <ФИО>")
+  if (!cpName && founderShareOp) {
+    const extractedFounderFio = extractFounderFioFromDescription(draft.description);
+    if (extractedFounderFio) {
+      const matchedFounder1C = matchPersonOrCounterpartyIn1C(extractedFounderFio, cpInn, db1C);
+      if (matchedFounder1C) {
+        cpName = matchedFounder1C.name;
+        cpInn = matchedFounder1C.inn || cpInn;
+        cpKpp = matchedFounder1C.kpp || cpKpp;
+      } else {
+        cpName = normalizeGenitiveFioToNominative(extractedFounderFio);
+      }
+    } else if (db1C) {
+      const mentionedPerson = findPersonMentionedInDescription1C(draft.description, db1C);
+      if (mentionedPerson) {
+        cpName = mentionedPerson.name;
+        cpInn = mentionedPerson.inn || cpInn;
+      }
+    }
+  }
+
+  // If counterparty was not extracted by legal-entity regex, check if any known 1C counterparty or individual appears in description
   if (!cpName && !cpInn && db1C && descNormForLookup) {
     const foundCpInDesc = db1C.counterparties.find((c) => {
       const cn = normalizeEntityKey(c.name);
@@ -381,6 +734,12 @@ export function bindAndGenerateOperation(
       cpName = foundCpInDesc.name;
       cpInn = foundCpInDesc.inn || '';
       cpKpp = foundCpInDesc.kpp || '';
+    } else {
+      const foundPerson = findPersonMentionedInDescription1C(draft.description, db1C);
+      if (foundPerson) {
+        cpName = foundPerson.name;
+        cpInn = foundPerson.inn || '';
+      }
     }
   }
 
@@ -395,36 +754,32 @@ export function bindAndGenerateOperation(
     }
   }
 
-  // --- 1. Bind Counterparty strictly against 1C DB ---
+  // --- 1. Bind Counterparty / Individual strictly against 1C DB (Контрагенты + ФизическиеЛица) ---
   let cpBinding: EntityBindingStatus = { status: 'not_required' };
   let matchedCpIdName = '';
+  let matchedCpKind: DirectoryAutocompleteOption1C['kind'] | undefined;
 
   if (cpName || cpInn) {
-    const normCp = normalizeEntityKey(cpName);
-    const matchedCp = db1C?.counterparties.find((c) => {
-      const dbInn = c.inn.replace(/\D/g, '');
-      if (cpInn && dbInn && cpInn === dbInn) return true;
-      if (normCp) {
-        const dbNorm = normalizeEntityKey(c.name);
-        const dbFullNorm = normalizeEntityKey(c.fullName ?? '');
-        return dbNorm === normCp || (dbFullNorm && dbFullNorm === normCp);
-      }
-      return false;
-    });
+    const matched1C = matchPersonOrCounterpartyIn1C(cpName, cpInn, db1C);
 
-    if (matchedCp) {
-      cpName = matchedCp.name;
-      cpInn = matchedCp.inn || cpInn;
-      cpKpp = matchedCp.kpp || cpKpp;
-      matchedCpIdName = matchedCp.name;
-      if (!contractName && matchedCp.defaultContract) {
-        contractName = matchedCp.defaultContract;
+    if (matched1C) {
+      cpName = matched1C.name;
+      cpInn = matched1C.inn || cpInn;
+      cpKpp = matched1C.kpp || cpKpp;
+      matchedCpIdName = matched1C.name;
+      matchedCpKind = matched1C.kind;
+      if (!contractName && matched1C.defaultContract && !founderShareOp) {
+        contractName = matched1C.defaultContract;
       }
       cpBinding = {
         status: 'matched_1c',
-        matchedName: matchedCp.name,
-        matchedCode1C: matchedCp.code1C,
-        matchedInn: matchedCp.inn,
+        matchedName: matched1C.name,
+        matchedCode1C: matched1C.code1C,
+        matchedInn: matched1C.inn,
+        note:
+          matched1C.source === 'ФизическиеЛица'
+            ? 'Привязано к справочнику 1С «ФизическиеЛица»'
+            : undefined,
       };
     } else if (db1C) {
       cpBinding = {
@@ -632,6 +987,7 @@ export function bindAndGenerateOperation(
   const needsCashFlow = [
     'bank_out',
     'bank_in',
+    'founder_contribution',
     'tax_payment',
     'bank_fee',
     'payroll_payout',
@@ -653,26 +1009,30 @@ export function bindAndGenerateOperation(
     } else {
       // Match standard 1C cash flow item if present in DB
       const targetPattern =
-        category === 'bank_in' || category === 'cash_in'
-          ? /поступление от продажи|оплата от покупател/i
-          : category === 'tax_payment'
-            ? /налог|бюджет/i
-            : category === 'payroll_payout'
-              ? /оплата труда/i
-              : /оплата товаров, работ, услуг|поставщик/i;
+        category === 'founder_contribution'
+          ? /вклад\p{L}*\s+собственник|уставн\p{L}+\s+капитал|учредител/iu
+          : category === 'bank_in' || category === 'cash_in'
+            ? /поступление от продажи|оплата от покупател/i
+            : category === 'tax_payment'
+              ? /налог|бюджет/i
+              : category === 'payroll_payout'
+                ? /оплата труда/i
+                : /оплата товаров, работ, услуг|поставщик/i;
       const foundDds = db1C?.cashFlowItems.find((d) => targetPattern.test(d.name));
       if (foundDds) {
         cashFlowItemName = foundDds.name;
         cashFlowBinding = { status: 'matched_1c', matchedName: foundDds.name, matchedCode1C: foundDds.code1C };
       } else {
         cashFlowItemName =
-          category === 'bank_in' || category === 'cash_in'
-            ? 'Поступление от продажи продукции и товаров, выполнения работ, оказания услуг'
-            : category === 'tax_payment'
-              ? 'Прочие налоги и сборы'
-              : category === 'payroll_payout'
-                ? 'Оплата труда'
-                : 'Оплата товаров, работ, услуг, сырья и иных оборотных активов';
+          category === 'founder_contribution'
+            ? 'Поступления денежных вкладов собственников (участников)'
+            : category === 'bank_in' || category === 'cash_in'
+              ? 'Поступление от продажи продукции и товаров, выполнения работ, оказания услуг'
+              : category === 'tax_payment'
+                ? 'Прочие налоги и сборы'
+                : category === 'payroll_payout'
+                  ? 'Оплата труда'
+                  : 'Оплата товаров, работ, услуг, сырья и иных оборотных активов';
         cashFlowBinding = {
           status: db1C ? 'new_for_1c' : 'not_required',
           note: 'Типовая статья ДДС 1С БП 3.0',
@@ -686,6 +1046,7 @@ export function bindAndGenerateOperation(
   const nonVatCategories: OperationCategory[] = [
     'tax_payment',
     'bank_fee',
+    'founder_contribution',
     'payroll_accrual',
     'payroll_payout',
     'closing',
@@ -804,6 +1165,19 @@ export function bindAndGenerateOperation(
             'Исчислен НДС с полученного аванса (СФ на аванс)'
           );
         }
+        break;
+      }
+
+      case 'founder_contribution': {
+        const cashOrBankDt = docType1C === 'ПоступлениеНаличных' ? '50.01' : '51';
+        pushEntry(
+          cashOrBankDt,
+          '75.01',
+          totalWithVat,
+          cashOrBankDt === '51' ? bankSubconto : cashFlowItemName,
+          cpName || 'Учредитель',
+          draft.description || 'Взнос учредителя в уставный капитал (оплата доли)'
+        );
         break;
       }
 
@@ -1152,7 +1526,11 @@ export function bindAndGenerateOperation(
     counterpartyName: cpName,
     counterpartyInn: cpInn,
     counterpartyKpp: cpKpp,
-    counterpartyKind: inferCounterpartyKind(cpName, cpInn),
+    counterpartyKind:
+      matchedCpKind ??
+      (category === 'founder_contribution' && !/^\s*(ооо|ао|пао|зао|гуп|муп)(?=$|[^\p{L}])/iu.test(cpName)
+        ? 'ФизическоеЛицо'
+        : inferCounterpartyKind(cpName, cpInn)),
     contractName,
     contractNumber,
     contractDate,
@@ -1184,7 +1562,11 @@ export function rebindOperationsAgainst1CDb(
   return operations.map((op) => {
     if (op.autoGeneratedKind) return op;
 
-    // Re-check bindings and deduplication while preserving user-edited entries if manually customized
+    const cleanCpName = op.counterpartyName.trim().length >= 2 ? op.counterpartyName.trim() : '';
+    const shouldUpgradeFounderShare =
+      op.category !== 'founder_contribution' && isFounderContributionText(op.description);
+
+    // Re-check bindings and deduplication while preserving user-edited entries unless upgrading founder share
     const rebound = bindAndGenerateOperation(
       {
         sourceFileName: op.sourceFileName,
@@ -1200,9 +1582,9 @@ export function rebindOperationsAgainst1CDb(
         quantity: op.quantity,
         unitPrice: op.unitPrice,
         hasInvoiceSF: op.hasInvoiceSF,
-        counterpartyName: op.counterpartyName,
-        counterpartyInn: op.counterpartyInn,
-        counterpartyKpp: op.counterpartyKpp,
+        counterpartyName: cleanCpName,
+        counterpartyInn: cleanCpName ? op.counterpartyInn : '',
+        counterpartyKpp: cleanCpName ? op.counterpartyKpp : '',
         contractName: op.contractName,
         contractNumber: op.contractNumber,
         contractDate: op.contractDate,
@@ -1211,8 +1593,8 @@ export function rebindOperationsAgainst1CDb(
         expenseItemName: op.expenseItemName,
         cashFlowItemName: op.cashFlowItemName,
         employeeName: op.employeeName,
-        docTypeHint: op.docType1C,
-        categoryHint: op.category,
+        docTypeHint: shouldUpgradeFounderShare ? undefined : op.docType1C,
+        categoryHint: shouldUpgradeFounderShare ? undefined : op.category,
       },
       db1C,
       op.id
@@ -1220,7 +1602,90 @@ export function rebindOperationsAgainst1CDb(
 
     return {
       ...rebound,
-      entries: op.entries.length > 0 ? op.entries : rebound.entries,
+      includeInProcessing: op.includeInProcessing,
+      entries:
+        !shouldUpgradeFounderShare && op.entries.length > 0 ? op.entries : rebound.entries,
     };
+  });
+}
+
+/**
+ * Cleans up corrupted single-character (`length < 2`) or orphaned manually entered
+ * counterparties upon hydrating state from `localStorage`, and rebinds founder contributions.
+ */
+export function sanitizeHydratedOperations(
+  operations: QueuedOperation[],
+  db1C: Database1CSnapshot | null
+): QueuedOperation[] {
+  return operations.map((op) => {
+    if (op.autoGeneratedKind) return op;
+
+    const rawTrimmed = (op.counterpartyName ?? '').trim();
+    const hadCorruptedShortName = rawTrimmed.length > 0 && rawTrimmed.length < 2;
+    const isFounderOp = isFounderContributionText(op.description);
+
+    if (hadCorruptedShortName || (isFounderOp && (op.category !== 'founder_contribution' || !rawTrimmed))) {
+      const rebuilt = bindAndGenerateOperation(
+        {
+          sourceFileName: op.sourceFileName,
+          date: op.date,
+          docNumber: op.docNumber,
+          incomingDocNumber: op.incomingDocNumber,
+          incomingDocDate: op.incomingDocDate,
+          description: op.description,
+          amount: op.amount,
+          vatRate: isFounderOp ? 0 : op.vatRate,
+          vatRule: isFounderOp ? 'none' : op.vatRule,
+          vatAmount: isFounderOp ? 0 : op.vatAmount,
+          quantity: op.quantity,
+          unitPrice: op.unitPrice,
+          hasInvoiceSF: op.hasInvoiceSF,
+          counterpartyName: hadCorruptedShortName ? '' : rawTrimmed,
+          counterpartyInn: hadCorruptedShortName ? '' : op.counterpartyInn,
+          counterpartyKpp: hadCorruptedShortName ? '' : op.counterpartyKpp,
+          contractName: isFounderOp ? '' : op.contractName,
+          contractNumber: isFounderOp ? '' : op.contractNumber,
+          contractDate: isFounderOp ? '' : op.contractDate,
+          nomenclatureName: op.nomenclatureName,
+          warehouseName: op.warehouseName,
+          expenseItemName: op.expenseItemName,
+          cashFlowItemName: isFounderOp ? '' : op.cashFlowItemName,
+          employeeName: op.employeeName,
+          docTypeHint: isFounderOp ? undefined : op.docType1C,
+          categoryHint: isFounderOp ? undefined : op.category,
+        },
+        db1C,
+        op.id
+      );
+      return {
+        ...rebuilt,
+        includeInProcessing: op.includeInProcessing,
+      };
+    }
+
+    // Also re-verify if an existing named counterparty actually matches 1C Контрагенты / ФизическиеЛица
+    if (rawTrimmed.length >= 2 && db1C && op.bindings.counterparty.status !== 'matched_1c') {
+      const matched = matchPersonOrCounterpartyIn1C(rawTrimmed, op.counterpartyInn, db1C);
+      if (matched) {
+        return {
+          ...op,
+          counterpartyName: matched.name,
+          counterpartyInn: matched.inn || op.counterpartyInn,
+          counterpartyKpp: matched.kpp || op.counterpartyKpp,
+          counterpartyKind: matched.kind,
+          bindings: {
+            ...op.bindings,
+            counterparty: {
+              status: 'matched_1c',
+              matchedName: matched.name,
+              matchedCode1C: matched.code1C,
+              matchedInn: matched.inn,
+            },
+          },
+        };
+      }
+    }
+
+    return op;
   });
 }

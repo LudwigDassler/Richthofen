@@ -434,7 +434,7 @@ export const CHART_OF_ACCOUNTS: AccountInfo[] = [
     code: '75.01',
     name: 'Расчеты по вкладам в уставный (складочный) капитал',
     parentCode: '75',
-    type: 'active',
+    type: 'active-passive',
     subconto: ['Контрагенты'],
     category: 'Расчеты',
     isGroup: false,

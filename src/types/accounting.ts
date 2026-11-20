@@ -110,6 +110,18 @@ export interface DirectorySimpleItem1C {
   isNewFor1C?: boolean;
 }
 
+export interface DirectoryAutocompleteOption1C {
+  id: string;
+  name: string;
+  fullName?: string;
+  inn: string;
+  kpp: string;
+  code1C?: string;
+  source: 'Контрагенты' | 'ФизическиеЛица';
+  kind: 'ЮридическоеЛицо' | 'ИндивидуальныйПредприниматель' | 'ФизическоеЛицо';
+  defaultContract?: string;
+}
+
 export interface BankAccount1C {
   id: string;
   code1C?: string;
@@ -259,6 +271,7 @@ export type OperationCategory =
   | 'payroll_payout'
   | 'tax_payment'
   | 'bank_fee'
+  | 'founder_contribution'
   | 'penalty_claim'
   | 'advance_offset'
   | 'advance_vat'

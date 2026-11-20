@@ -1,3 +1,4 @@
+import { sanitizeHydratedOperations } from '@/lib/engine/postingEngine';
 import { PersistedWorkbenchStateV2 } from '@/types/accounting';
 
 export const STORAGE_KEY_V2 = 'app_state_v2';
@@ -34,18 +35,22 @@ export function loadWorkbenchState(): PersistedWorkbenchStateV2 | null {
       window.localStorage.removeItem(STORAGE_KEY_V2);
       return null;
     }
+    const db1C = parsed.db1C ?? null;
+    const rawOperations = Array.isArray(parsed.operations) ? parsed.operations : [];
+    const sanitizedOperations = sanitizeHydratedOperations(rawOperations, db1C);
+
     return {
       version: 2,
       activeTab: parsed.activeTab ?? 'db_osv',
-      db1C: parsed.db1C ?? null,
+      db1C,
       balanceAnchorOverride: parsed.balanceAnchorOverride ?? 'auto',
       includeQueuedInOsv: parsed.includeQueuedInOsv ?? true,
       periodFilter: parsed.periodFilter ?? {
-        dateFrom: parsed.db1C?.periodStart ?? '',
-        dateTo: parsed.db1C?.periodEnd ?? '',
+        dateFrom: db1C?.periodStart ?? '',
+        dateTo: db1C?.periodEnd ?? '',
       },
-      operations: Array.isArray(parsed.operations) ? parsed.operations : [],
-      resolvedInlineNotes: parsed.resolvedInlineNotes ?? {},
+      operations: sanitizedOperations,
+      resolvedInlineNotes: {},
       exportMode: parsed.exportMode ?? 'incremental',
     };
   } catch {

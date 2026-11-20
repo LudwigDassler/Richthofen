@@ -728,15 +728,18 @@ export function normalize1CDatabaseExport(
 
   const mapSimpleDir = (patterns: RegExp[], prefix: string): DirectorySimpleItem1C[] =>
     findDirRows(rawDirectories, patterns)
-      .map((row, idx) => {
+      .map((row, idx): DirectorySimpleItem1C | null => {
         const name = pickStr(row, ['Наименование', 'ФИО', 'Представление', 'name']);
         if (!name) return null;
+        const inn = pickStr(row, ['ИНН', 'inn']).replace(/\D/g, '');
+        const fullName = pickStr(row, ['НаименованиеПолное', 'ПолноеИмя', 'ФИОПолное', 'fullName']);
         return {
           id: `${prefix}-${idx + 1}`,
           code1C: pickStr(row, ['Код', 'ТабельныйНомер', 'Code']),
           name,
           kind: pickStr(row, ['ВидРасхода', 'ВидДвижения', 'ВидСтатьи', 'Должность', 'ИНН']),
-        } as DirectorySimpleItem1C;
+          extra: inn || fullName ? { ...(inn ? { inn } : {}), ...(fullName ? { fullName } : {}) } : undefined,
+        };
       })
       .filter((x): x is DirectorySimpleItem1C => x !== null);
 

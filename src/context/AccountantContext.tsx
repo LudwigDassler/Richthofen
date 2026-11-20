@@ -12,6 +12,7 @@ import {
   AuditIssue,
   BalanceAnchorOverride,
   Database1CSnapshot,
+  DirectoryAutocompleteOption1C,
   ExportMode1C,
   InlineFieldTarget,
   OsvReport,
@@ -27,10 +28,17 @@ import {
   autoFixAllBy1CDb,
   bindAndGenerateOperation,
   calculateOsvReport,
+  computePendingNewCounterparties,
   generatePeriodClosingOperations,
+  get1CCounterpartyAndIndividualOptions,
+  getCounterpartyGroupKey,
+  inferCounterpartyKind,
+  matchPersonOrCounterpartyIn1C,
   normalizeEntityKey,
+  PendingNewCounterpartyInfo,
   rebindOperationsAgainst1CDb,
   runAuditDiagnostics,
+  sanitizeHydratedOperations,
 } from '@/lib/engine';
 import {
   BatchImportResult,
@@ -65,6 +73,8 @@ interface AccountantContextValue {
   operations: QueuedOperation[];
   osvReport: OsvReport;
   auditIssues: AuditIssue[];
+  directoryOptions1C: DirectoryAutocompleteOption1C[];
+  pendingNewCounterparties: PendingNewCounterpartyInfo[];
   autoFixLogs: string[];
   exportMode: ExportMode1C;
   setExportMode: (mode: ExportMode1C) => void;
@@ -83,7 +93,15 @@ interface AccountantContextValue {
   clearAllOperations: () => void;
   runSmartAutoFixAll: () => { fixedCount: number; log: string[] };
   runClosingAndOffsetsOnly: () => { addedCount: number; log: string[] };
-  applyInlineAuditValue: (target: InlineFieldTarget, value: string) => void;
+  applyInlineAuditValue: (
+    target: InlineFieldTarget,
+    value: string
+  ) => { ok: boolean; error?: string };
+  bindOperationTo1CDirectoryItem: (
+    operationId: string,
+    item: DirectoryAutocompleteOption1C
+  ) => void;
+  resetNewCounterparty: (counterpartyNameOrKey: string) => number;
   resetWorkbench: () => Promise<void>;
 }
 
@@ -182,7 +200,9 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
                 dateFrom: incoming.periodStart,
                 dateTo: incoming.periodEnd,
               });
-              setOperations((prevOps) => rebindOperationsAgainst1CDb(prevOps, incoming));
+              setOperations((prevOps) =>
+                rebindOperationsAgainst1CDb(sanitizeHydratedOperations(prevOps, incoming), incoming)
+              );
               return incoming;
             }
             return current;
@@ -252,7 +272,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
             pushNotice(
               'info',
               data.message ||
-                'В .cache/1c_latest_raw.json пока нет выгрузки. Загрузите JSON-выгрузку 1С вручную или отправьте POST на /api/1c-sync.'
+                'На сервере /api/1c-sync пока нет сохранённой выгрузки. Загрузите JSON-выгрузку 1С вручную или отправьте POST на /api/1c-sync.'
             );
           }
         }
@@ -492,6 +512,16 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     [db1C, operations, osvReport]
   );
 
+  const directoryOptions1C = useMemo(
+    () => get1CCounterpartyAndIndividualOptions(db1C),
+    [db1C]
+  );
+
+  const pendingNewCounterparties = useMemo(
+    () => computePendingNewCounterparties(operations, db1C),
+    [operations, db1C]
+  );
+
   const runSmartAutoFixAll = useCallback(() => {
     const endDate =
       periodFilter.dateTo || db1C?.periodEnd || new Date().toISOString().slice(0, 10);
@@ -557,58 +587,374 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     return { addedCount: newOperations.length, log };
   }, [db1C, operations, periodFilter.dateFrom, periodFilter.dateTo, balanceAnchorOverride, pushNotice]);
 
-  const applyInlineAuditValue = useCallback(
-    (target: InlineFieldTarget, rawValue: string) => {
-      const value = rawValue.trim();
-      setOperations((prev) => {
-        const sourceOp = prev.find((o) => o.id === target.operationId);
-        const sameCpKey =
-          sourceOp?.counterpartyName ? normalizeEntityKey(sourceOp.counterpartyName) : '';
+  const bindOperationTo1CDirectoryItem = useCallback(
+    (operationId: string, item: DirectoryAutocompleteOption1C) => {
+      setOperations((prev) =>
+        prev.map((op) => {
+          if (op.id !== operationId) return op;
 
-        return prev.map((op) => {
-          if (target.kind === 'entry_account') {
+          const needsCtr = [
+            'bank_out',
+            'bank_in',
+            'purchase_goods',
+            'purchase_materials',
+            'purchase_services',
+            'sale_goods',
+            'sale_services',
+            'advance_offset',
+          ].includes(op.category);
+
+          let contractName = op.contractName;
+          let contractNumber = op.contractNumber;
+          let contractDate = op.contractDate;
+          let contractBinding = op.bindings.contract;
+
+          if (needsCtr && !contractName) {
+            const matchedCtr =
+              db1C?.contracts.find(
+                (c) =>
+                  (item.inn && c.counterpartyInn?.replace(/\D/g, '') === item.inn) ||
+                  normalizeEntityKey(c.counterpartyName) === normalizeEntityKey(item.name)
+              ) ?? null;
+
+            if (matchedCtr) {
+              contractName = matchedCtr.name;
+              contractNumber = matchedCtr.number || contractNumber;
+              contractDate = matchedCtr.date || contractDate;
+              contractBinding = {
+                status: 'matched_1c',
+                matchedName: matchedCtr.name,
+                matchedCode1C: matchedCtr.code1C,
+              };
+            } else if (item.defaultContract) {
+              contractName = item.defaultContract;
+              contractBinding = {
+                status: 'matched_1c',
+                matchedName: item.defaultContract,
+              };
+            }
+          }
+
+          const cpSubconto = [item.name, contractName].filter(Boolean).join(' / ');
+          const updatedEntries = op.entries.map((e) => ({
+            ...e,
+            debitSubconto:
+              e.debit.startsWith('60') || e.debit.startsWith('62') || e.debit.startsWith('76')
+                ? cpSubconto || item.name
+                : e.debit === '75.01'
+                  ? item.name
+                  : e.debitSubconto,
+            creditSubconto:
+              e.credit.startsWith('60') || e.credit.startsWith('62') || e.credit.startsWith('76')
+                ? cpSubconto || item.name
+                : e.credit === '75.01'
+                  ? item.name
+                  : e.creditSubconto,
+          }));
+
+          return {
+            ...op,
+            counterpartyName: item.name,
+            counterpartyInn: item.inn || '',
+            counterpartyKpp: item.kpp || '',
+            counterpartyKind: item.kind,
+            contractName,
+            contractNumber,
+            contractDate,
+            bindings: {
+              ...op.bindings,
+              counterparty: {
+                status: 'matched_1c',
+                matchedName: item.name,
+                matchedCode1C: item.code1C,
+                matchedInn: item.inn,
+                note:
+                  item.source === 'ФизическиеЛица'
+                    ? 'Привязано к справочнику 1С «ФизическиеЛица»'
+                    : undefined,
+              },
+              contract: contractBinding,
+            },
+            entries: updatedEntries,
+          };
+        })
+      );
+      pushNotice(
+        'success',
+        `Привязан элемент из БД 1С (${item.source}): «${item.name}»`
+      );
+    },
+    [db1C, pushNotice]
+  );
+
+  const resetNewCounterparty = useCallback(
+    (counterpartyNameOrKey: string): number => {
+      const targetKey = getCounterpartyGroupKey(counterpartyNameOrKey);
+      const rawLower = counterpartyNameOrKey.trim().toLowerCase();
+      let clearedCount = 0;
+
+      setOperations((prev) =>
+        prev.map((op) => {
+          if (op.autoGeneratedKind) return op;
+          if (op.bindings.counterparty.status === 'matched_1c') return op;
+
+          const opTrimmed = op.counterpartyName.trim();
+          if (!opTrimmed) return op;
+
+          const opKey = getCounterpartyGroupKey(opTrimmed);
+          if (opKey !== targetKey && opTrimmed.toLowerCase() !== rawLower) {
+            return op;
+          }
+
+          clearedCount++;
+          const needsCp = ![
+            'closing',
+            'payroll_accrual',
+            'payroll_payout',
+            'bank_fee',
+            'tax_payment',
+          ].includes(op.category);
+
+          const shouldResetContract = op.bindings.contract.status === 'new_for_1c';
+
+          const cleanedEntries = op.entries.map((e) => ({
+            ...e,
+            debitSubconto:
+              e.debit.startsWith('60') ||
+              e.debit.startsWith('62') ||
+              e.debit === '75.01' ||
+              e.debit === '76.АВ'
+                ? ''
+                : e.debitSubconto,
+            creditSubconto:
+              e.credit.startsWith('60') ||
+              e.credit.startsWith('62') ||
+              e.credit === '75.01'
+                ? ''
+                : e.creditSubconto,
+          }));
+
+          return {
+            ...op,
+            counterpartyName: '',
+            counterpartyInn: '',
+            counterpartyKpp: '',
+            contractName: shouldResetContract ? '' : op.contractName,
+            bindings: {
+              ...op.bindings,
+              counterparty: needsCp
+                ? { status: 'missing', note: 'Не указан контрагент' }
+                : { status: 'not_required' },
+              contract: shouldResetContract
+                ? { status: 'missing', note: 'Не указан договор' }
+                : op.bindings.contract,
+            },
+            entries: cleanedEntries,
+          };
+        })
+      );
+
+      if (clearedCount > 0) {
+        pushNotice(
+          'info',
+          `Контрагент «${counterpartyNameOrKey.trim()}» сброшен (очищена привязка в операциях: ${clearedCount}).`
+        );
+      }
+      return clearedCount;
+    },
+    [pushNotice]
+  );
+
+  const applyInlineAuditValue = useCallback(
+    (
+      target: InlineFieldTarget,
+      rawValue: string
+    ): { ok: boolean; error?: string } => {
+      const value = rawValue.trim();
+
+      if (target.kind === 'entry_account') {
+        if (value.length < 2) {
+          return { ok: false, error: 'Укажите корректный код счёта РСБУ (например, 26 или 60.01).' };
+        }
+        setOperations((prev) =>
+          prev.map((op) => {
             if (op.id !== target.operationId) return op;
             return {
               ...op,
               entries: op.entries.map((e) =>
-                e.id === target.entryId
-                  ? { ...e, [target.side]: value }
-                  : e
+                e.id === target.entryId ? { ...e, [target.side]: value } : e
               ),
             };
-          }
+          })
+        );
+        return { ok: true };
+      }
 
-          // Propagate INN / KPP / Contract across all operations of the exact same counterparty!
+      if (target.field === 'counterpartyName') {
+        if (value.length < 2) {
+          return {
+            ok: false,
+            error: 'Наименование контрагента должно содержать не менее 2 символов.',
+          };
+        }
+        const matched1C = matchPersonOrCounterpartyIn1C(value, '', db1C);
+        if (matched1C) {
+          bindOperationTo1CDirectoryItem(target.operationId, matched1C);
+          return { ok: true };
+        }
+
+        setOperations((prev) =>
+          prev.map((op) => {
+            if (op.id !== target.operationId) return op;
+            const cpSub = [value, op.contractName].filter(Boolean).join(' / ');
+            return {
+              ...op,
+              counterpartyName: value,
+              counterpartyKind: inferCounterpartyKind(value, op.counterpartyInn),
+              bindings: {
+                ...op.bindings,
+                counterparty: {
+                  status: 'new_for_1c',
+                  note: 'Новый элемент (будет создан при экспорте в 1С)',
+                },
+              },
+              entries: op.entries.map((e) => ({
+                ...e,
+                debitSubconto:
+                  e.debit.startsWith('60') || e.debit.startsWith('62')
+                    ? cpSub
+                    : e.debit === '75.01'
+                      ? value
+                      : e.debitSubconto,
+                creditSubconto:
+                  e.credit.startsWith('60') || e.credit.startsWith('62')
+                    ? cpSub
+                    : e.credit === '75.01'
+                      ? value
+                      : e.creditSubconto,
+              })),
+            };
+          })
+        );
+        return { ok: true };
+      }
+
+      if (target.field === 'counterpartyInn') {
+        const digits = value.replace(/\D/g, '');
+        if (digits.length !== 10 && digits.length !== 12) {
+          return {
+            ok: false,
+            error: 'Введите ровно 10 (юрлицо) или 12 (ИП / физлицо) цифр ИНН.',
+          };
+        }
+
+        setOperations((prev) => {
+          const sourceOp = prev.find((o) => o.id === target.operationId);
+          const sameCpKey = sourceOp?.counterpartyName
+            ? getCounterpartyGroupKey(sourceOp.counterpartyName)
+            : '';
+          const matchedByInn = matchPersonOrCounterpartyIn1C(
+            sourceOp?.counterpartyName ?? '',
+            digits,
+            db1C
+          );
+
+          return prev.map((op) => {
+            const isSameOp = op.id === target.operationId;
+            const isSameCp =
+              Boolean(sameCpKey) &&
+              getCounterpartyGroupKey(op.counterpartyName) === sameCpKey;
+            if (!isSameOp && !isSameCp) return op;
+
+            if (matchedByInn) {
+              return {
+                ...op,
+                counterpartyName: matchedByInn.name,
+                counterpartyInn: matchedByInn.inn || digits,
+                counterpartyKpp: matchedByInn.kpp || op.counterpartyKpp,
+                counterpartyKind: matchedByInn.kind,
+                bindings: {
+                  ...op.bindings,
+                  counterparty: {
+                    status: 'matched_1c',
+                    matchedName: matchedByInn.name,
+                    matchedCode1C: matchedByInn.code1C,
+                    matchedInn: matchedByInn.inn || digits,
+                  },
+                },
+              };
+            }
+
+            return {
+              ...op,
+              counterpartyInn: digits,
+              counterpartyKind: inferCounterpartyKind(op.counterpartyName, digits),
+            };
+          });
+        });
+        return { ok: true };
+      }
+
+      if (target.field === 'counterpartyKpp') {
+        const digits = value.replace(/\D/g, '');
+        if (digits.length !== 9) {
+          return { ok: false, error: 'Введите ровно 9 цифр КПП.' };
+        }
+        setOperations((prev) => {
+          const sourceOp = prev.find((o) => o.id === target.operationId);
+          const sameCpKey = sourceOp?.counterpartyName
+            ? getCounterpartyGroupKey(sourceOp.counterpartyName)
+            : '';
+          return prev.map((op) => {
+            const isSameOp = op.id === target.operationId;
+            const isSameCp =
+              Boolean(sameCpKey) &&
+              getCounterpartyGroupKey(op.counterpartyName) === sameCpKey;
+            if (!isSameOp && !isSameCp) return op;
+            return { ...op, counterpartyKpp: digits };
+          });
+        });
+        return { ok: true };
+      }
+
+      if (!value) {
+        return { ok: false, error: 'Поле не может быть пустым.' };
+      }
+
+      setOperations((prev) => {
+        const sourceOp = prev.find((o) => o.id === target.operationId);
+        const sameCpKey = sourceOp?.counterpartyName
+          ? getCounterpartyGroupKey(sourceOp.counterpartyName)
+          : '';
+
+        return prev.map((op) => {
           const isSameOp = op.id === target.operationId;
           const isPropagatableCpField =
-            (target.field === 'counterpartyInn' ||
-              target.field === 'counterpartyKpp' ||
-              target.field === 'contractName') &&
-            sameCpKey &&
-            normalizeEntityKey(op.counterpartyName) === sameCpKey;
+            target.field === 'contractName' &&
+            Boolean(sameCpKey) &&
+            getCounterpartyGroupKey(op.counterpartyName) === sameCpKey;
 
           if (!isSameOp && !isPropagatableCpField) return op;
 
           const updated = { ...op, bindings: { ...op.bindings } };
-          if (target.field === 'counterpartyInn') {
-            updated.counterpartyInn = value.replace(/\D/g, '');
-          } else if (target.field === 'counterpartyKpp') {
-            updated.counterpartyKpp = value.replace(/\D/g, '');
-          } else if (target.field === 'contractName') {
+          if (target.field === 'contractName') {
             updated.contractName = value;
-            updated.bindings.contract = value
-              ? { status: 'new_for_1c', note: 'Заполнено вручную (будет создан при экспорте)' }
-              : { status: 'missing', note: 'Не указан договор' };
+            updated.bindings.contract = {
+              status: 'new_for_1c',
+              note: 'Заполнено вручную (будет создан при экспорте)',
+            };
           } else if (target.field === 'warehouseName') {
             updated.warehouseName = value;
-            updated.bindings.warehouse = value
-              ? { status: 'new_for_1c', note: 'Заполнено вручную' }
-              : { status: 'missing' };
+            updated.bindings.warehouse = {
+              status: 'new_for_1c',
+              note: 'Заполнено вручную',
+            };
           } else if (target.field === 'expenseItemName') {
             updated.expenseItemName = value;
-            updated.bindings.expenseItem = value
-              ? { status: 'new_for_1c', note: 'Заполнено вручную' }
-              : { status: 'missing' };
+            updated.bindings.expenseItem = {
+              status: 'new_for_1c',
+              note: 'Заполнено вручную',
+            };
           } else {
             updated[target.field] = value;
           }
@@ -616,8 +962,10 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
           return updated;
         });
       });
+
+      return { ok: true };
     },
-    []
+    [db1C, bindOperationTo1CDirectoryItem]
   );
 
   const resetWorkbench = useCallback(async () => {
@@ -654,6 +1002,8 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       operations,
       osvReport,
       auditIssues,
+      directoryOptions1C,
+      pendingNewCounterparties,
       autoFixLogs,
       exportMode,
       setExportMode,
@@ -671,6 +1021,8 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       runSmartAutoFixAll,
       runClosingAndOffsetsOnly,
       applyInlineAuditValue,
+      bindOperationTo1CDirectoryItem,
+      resetNewCounterparty,
       resetWorkbench,
     }),
     [
@@ -687,6 +1039,8 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       operations,
       osvReport,
       auditIssues,
+      directoryOptions1C,
+      pendingNewCounterparties,
       autoFixLogs,
       exportMode,
       notice,
@@ -703,6 +1057,8 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       runSmartAutoFixAll,
       runClosingAndOffsetsOnly,
       applyInlineAuditValue,
+      bindOperationTo1CDirectoryItem,
+      resetNewCounterparty,
       resetWorkbench,
     ]
   );

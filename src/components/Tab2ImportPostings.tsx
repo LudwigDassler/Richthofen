@@ -37,10 +37,12 @@ export function Tab2ImportPostings() {
   const {
     db1C,
     operations,
+    directoryOptions1C,
     importOperationFiles,
     importOperationsFromText,
     addBlankOperation,
     updateOperation,
+    bindOperationTo1CDirectoryItem,
     rebuildSingleOperationPostings,
     removeOperation,
     clearAllOperations,
@@ -96,9 +98,13 @@ export function Tab2ImportPostings() {
         ))}
       </datalist>
       <datalist id="db1c-counterparties-list">
-        {(db1C?.counterparties ?? []).map((cp) => (
-          <option key={cp.id} value={cp.name}>
-            {cp.inn ? `ИНН ${cp.inn}` : ''}
+        {directoryOptions1C.map((opt) => (
+          <option key={`${opt.source}:${opt.id}`} value={opt.name}>
+            {opt.source === 'ФизическиеЛица'
+              ? `Физлица 1С${opt.inn ? ` · ИНН ${opt.inn}` : ''}`
+              : opt.inn
+                ? `Контрагенты 1С · ИНН ${opt.inn}`
+                : 'Контрагенты 1С'}
           </option>
         ))}
       </datalist>
@@ -304,7 +310,9 @@ export function Tab2ImportPostings() {
               index={index + 1}
               op={op}
               dbConnected={Boolean(db1C)}
+              directoryOptions1C={directoryOptions1C}
               onUpdate={(updater) => updateOperation(op.id, updater)}
+              onBind1C={(item) => bindOperationTo1CDirectoryItem(op.id, item)}
               onRebuild={() => rebuildSingleOperationPostings(op.id)}
               onRemove={() => removeOperation(op.id)}
             />
@@ -319,14 +327,18 @@ function OperationEditorCard({
   index,
   op,
   dbConnected,
+  directoryOptions1C,
   onUpdate,
+  onBind1C,
   onRebuild,
   onRemove,
 }: {
   index: number;
   op: QueuedOperation;
   dbConnected: boolean;
+  directoryOptions1C: import('@/types/accounting').DirectoryAutocompleteOption1C[];
   onUpdate: (updater: (prev: QueuedOperation) => QueuedOperation) => void;
+  onBind1C: (item: import('@/types/accounting').DirectoryAutocompleteOption1C) => void;
   onRebuild: () => void;
   onRemove: () => void;
 }) {
@@ -498,10 +510,33 @@ function OperationEditorCard({
               type="text"
               list="db1c-counterparties-list"
               value={op.counterpartyName}
-              onChange={(e) =>
-                onUpdate((prev) => ({ ...prev, counterpartyName: e.target.value }))
-              }
-              placeholder="ООО «...» / ИП ..."
+              onChange={(e) => {
+                const nextVal = e.target.value;
+                const exact1C = directoryOptions1C.find(
+                  (d) => d.name.toLowerCase() === nextVal.trim().toLowerCase()
+                );
+                if (exact1C) {
+                  onBind1C(exact1C);
+                  return;
+                }
+                onUpdate((prev) => ({ ...prev, counterpartyName: nextVal }));
+              }}
+              onBlur={(e) => {
+                const trimmed = e.target.value.trim();
+                if (trimmed.length > 0 && trimmed.length < 2) {
+                  onUpdate((prev) => ({
+                    ...prev,
+                    counterpartyName: '',
+                    counterpartyInn: '',
+                    counterpartyKpp: '',
+                    bindings: {
+                      ...prev.bindings,
+                      counterparty: { status: 'missing', note: 'Не указан контрагент' },
+                    },
+                  }));
+                }
+              }}
+              placeholder="ООО «...» / ИП / ФИО учредителя..."
               className="w-full px-2.5 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs"
             />
           </div>
