@@ -1,6 +1,7 @@
 import {
   Database1CSnapshot,
   DocType1CBP30,
+  OperationCardProfile,
   OperationCategory,
   OperationMentorGuide1C,
   QueuedOperation,
@@ -21,6 +22,7 @@ export const DOC_TYPE_LABELS_1C: Record<DocType1CBP30, string> = {
   ПоступлениеНаличных: 'Поступление наличных (ПКО)',
   ВыдачаНаличных: 'Выдача наличных (РКО)',
   НачислениеЗарплаты: 'Начисление зарплаты и взносов',
+  ПриемНаРаботу: 'Приём на работу (кадровый приказ)',
   ВедомостьВБанк: 'Ведомость в банк',
   ВедомостьВКассу: 'Ведомость в кассу',
   АвансовыйОтчет: 'Авансовый отчёт',
@@ -39,6 +41,7 @@ const INTERNAL_NO_COUNTERPARTY_CATEGORIES = new Set<OperationCategory>([
   'cash_bank_internal',
   'depreciation_accrual',
   'insurance_accrual',
+  'hr_hire',
   'payroll_accrual',
   'payroll_payout',
   'bank_fee',
@@ -46,36 +49,117 @@ const INTERNAL_NO_COUNTERPARTY_CATEGORIES = new Set<OperationCategory>([
   'closing',
 ]);
 
-const INTERNAL_CONTEXTUAL_CARD_CATEGORIES = new Set<OperationCategory>([
+const WAREHOUSE_PRODUCTION_CATEGORIES = new Set<OperationCategory>([
   'materials_writeoff',
   'workwear_issue',
-  'os_commissioning',
   'production_output',
   'warehouse_transfer',
-  'cash_bank_internal',
-  'depreciation_accrual',
-  'insurance_accrual',
-  'payroll_accrual',
-  'closing',
+]);
+
+const WAREHOUSE_PRODUCTION_DOC_TYPES = new Set<DocType1CBP30>([
+  'РасходМатериалов',
+  'ПередачаМатериаловВЭксплуатацию',
+  'ВыпускПродукции',
+  'ПеремещениеТоваров',
 ]);
 
 export function doesOperationRequireCounterparty(category: OperationCategory): boolean {
   return !INTERNAL_NO_COUNTERPARTY_CATEGORIES.has(category);
 }
 
+/**
+ * Strictly warehouse / production internal operations (NEVER includes payroll, HR, OS, or closing!).
+ */
 export function isInternalWarehouseOrProductionOp(
   op: Pick<QueuedOperation, 'category' | 'docType1C'>
 ): boolean {
-  if (INTERNAL_CONTEXTUAL_CARD_CATEGORIES.has(op.category)) return true;
-  return [
-    'РасходМатериалов',
-    'ПередачаМатериаловВЭксплуатацию',
-    'ПринятиеКУчетуОС',
-    'ВыпускПродукции',
-    'ПеремещениеТоваров',
-    'НачислениеЗарплаты',
-    'ЗакрытиеМесяца',
-  ].includes(op.docType1C);
+  if (WAREHOUSE_PRODUCTION_CATEGORIES.has(op.category)) return true;
+  return WAREHOUSE_PRODUCTION_DOC_TYPES.has(op.docType1C);
+}
+
+/**
+ * Maps every operation to one of the 5 strict contextual UI card profiles:
+ * 1. 'trade_services' — Поступление / Реализация / Оплата контрагентам / Зачёт авансов
+ * 2. 'warehouse_production' — РасходМатериалов / ПередачаМатериаловВЭксплуатацию / ВыпускПродукции / ПеремещениеТоваров
+ * 3. 'hr_payroll' — ПриемНаРаботу / НачислениеЗарплаты / ВедомостьВБанк / ВедомостьВКассу / Выплата ЗП
+ * 4. 'os_regulatory' — ПринятиеКУчетуОС / Начисление амортизации / ЗакрытиеМесяца
+ * 5. 'taxes_bank_founders' — Уплата налогов и взносов / Комиссия банка РКО / Вклад учредителя 75.01 / Касса<->Банк
+ */
+export function getOperationCardProfile(
+  op: Pick<QueuedOperation, 'category' | 'docType1C'>
+): OperationCardProfile {
+  if (
+    op.category === 'hr_hire' ||
+    op.category === 'payroll_accrual' ||
+    op.category === 'insurance_accrual' ||
+    op.category === 'payroll_payout' ||
+    op.docType1C === 'ПриемНаРаботу' ||
+    op.docType1C === 'НачислениеЗарплаты' ||
+    op.docType1C === 'ВедомостьВБанк' ||
+    op.docType1C === 'ВедомостьВКассу'
+  ) {
+    return 'hr_payroll';
+  }
+
+  if (
+    op.category === 'os_commissioning' ||
+    op.category === 'depreciation_accrual' ||
+    op.category === 'closing' ||
+    op.docType1C === 'ПринятиеКУчетуОС' ||
+    op.docType1C === 'ЗакрытиеМесяца'
+  ) {
+    return 'os_regulatory';
+  }
+
+  if (isInternalWarehouseOrProductionOp(op)) {
+    return 'warehouse_production';
+  }
+
+  if (
+    op.category === 'tax_payment' ||
+    op.category === 'bank_fee' ||
+    op.category === 'founder_contribution' ||
+    op.category === 'cash_bank_internal'
+  ) {
+    return 'taxes_bank_founders';
+  }
+
+  return 'trade_services';
+}
+
+export function getOperationStatusBadgeText(
+  op: Pick<
+    QueuedOperation,
+    'category' | 'docType1C' | 'readinessStatus' | 'needsAmount' | 'amountMode' | 'amount'
+  >
+): string {
+  const profile = getOperationCardProfile(op);
+  if (op.readinessStatus === 'critical_error' || op.needsAmount) {
+    return 'Требует проверки';
+  }
+  if (op.category === 'hr_hire' || op.docType1C === 'ПриемНаРаботу') {
+    return 'Кадровый приказ 1С';
+  }
+  if (profile === 'hr_payroll') {
+    if (op.readinessStatus === 'needs_clarification') {
+      return 'Уточните штатный ФОТ';
+    }
+    return op.category === 'payroll_payout'
+      ? 'Выплата по ведомости 1С'
+      : 'Расчёт ЗП и взносов 1С';
+  }
+  if (profile === 'os_regulatory') {
+    return op.category === 'os_commissioning' || op.docType1C === 'ПринятиеКУчетуОС'
+      ? 'Ввод ОС в эксплуатацию'
+      : 'Регламентная операция 1С';
+  }
+  if (profile === 'warehouse_production') {
+    return op.amount >= 0.01 ? 'Списано по партиям 1С' : 'Авто по себестоимости 1С';
+  }
+  if (op.readinessStatus === 'needs_clarification') {
+    return 'Нужно уточнение';
+  }
+  return 'Готово к экспорту';
 }
 
 export function mapDocTypeToDefaultCategory(
@@ -93,8 +177,13 @@ export function mapDocTypeToDefaultCategory(
       return 'production_output';
     case 'ПеремещениеТоваров':
       return 'warehouse_transfer';
+    case 'ПриемНаРаботу':
+      return 'hr_hire';
     case 'НачислениеЗарплаты':
       return prevCategory === 'insurance_accrual' ? 'insurance_accrual' : 'payroll_accrual';
+    case 'ВедомостьВБанк':
+    case 'ВедомостьВКассу':
+      return 'payroll_payout';
     case 'ЗакрытиеМесяца':
       return prevCategory === 'depreciation_accrual' ? 'depreciation_accrual' : 'closing';
     case 'КорректировкаДолга':
@@ -476,10 +565,52 @@ export function buildOperationMentorGuide1C(
     };
   }
 
+  if (op.category === 'hr_hire' || op.docType1C === 'ПриемНаРаботу') {
+    const sal = op.monthlySalary || op.amount || 0;
+    const pos = op.employeePosition || 'Должность по штатному расписанию';
+    return {
+      accountingMeaning: `Кадровый приказ о приёме сотрудника «${emp}» на должность «${pos}»${sal >= 0.01 ? ` с должностным окладом ${formatMoneyRu(sal)} в месяц` : ''}. Кадровый документ сам по себе бухгалтерских проводок не формирует, но регистрирует плановый оклад и способ отражения зарплаты (счёт ${costAcc}) в регистрах сведений 1С — благодаря этому документ «Начисление зарплаты» в конце месяца заполнится автоматически по кнопке «Заполнить»!`,
+      whyAmountOrVatRule:
+        'Кадровый приказ не отражает движение имущества или обязательств на дату приёма — проводки по счёту 70, НДФЛ (68.01) и взносам (69) формируются в конце месяца документом «Начисление зарплаты».',
+      navigationPath1C:
+        'Раздел «Зарплата и кадры» → «Кадровые документы» → кнопка «Создать: Приём на работу»',
+      documentOperationKind1C: 'Приём на работу (Кадровый учёт)',
+      headerFieldsSteps: [
+        { field: 'Дата приёма', value: dateRu },
+        { field: 'Организация', value: orgName },
+        { field: 'Сотрудник', value: emp, hint: 'Создайте/выберите в справочнике «Сотрудники» (укажите ИНН, СНИЛС, дату рождения и вычеты НДФЛ)' },
+        { field: 'Подразделение и Должность', value: `Основное подразделение / ${pos}` },
+        { field: 'Оклад (Начисление)', value: sal >= 0.01 ? formatMoneyRu(sal) : 'По трудовому договору', hint: `Способ отражения зарплаты в бухучёте: Счёт ${costAcc}` },
+      ],
+      tabularAndTabsSteps: [
+        {
+          tabName: 'Блок «Начисления» в документе Приём на работу',
+          instruction: `Проверьте вид начисления «Оклад по дням», размер оклада${sal >= 0.01 ? ` (${formatMoneyRu(sal)})` : ''} и нажмите «Провести и закрыть».`,
+        },
+      ],
+      referencePostings: [
+        {
+          debit: '— (Регистр кадрового учёта)',
+          credit: '— (Плановые начисления)',
+          amountRule: sal >= 0.01 ? `Оклад ${formatMoneyRu(sal)} / мес.` : 'По штатному расписанию',
+          purpose: `Регистрация приёма «${emp}» для последующего автоматического расчёта зарплаты`,
+        },
+      ],
+      selfCheckOsv: [
+        'В самом документе «Приём на работу» бухгалтерских проводок Дт/Кт нет (это норма 1С:БП 3.0).',
+        'В конце месяца создайте «Зарплата и кадры → Все начисления → Начисление зарплаты» и нажмите «Заполнить» — сотрудник и его оклад подтянутся автоматически!',
+      ],
+      commonStudentMistakes: [
+        'Попытка вручную ввести проводку Дт 20/26 Кт 70 в день приёма сотрудника на работу (зарплата начисляется последним днём месяца за фактически отработанное время).',
+        'Пропуск кадрового документа «Приём на работу» — из-за этого кнопка «Заполнить» в «Начислении зарплаты» оставляет таблицу пустой.',
+      ],
+    };
+  }
+
   if (op.category === 'payroll_accrual' || op.category === 'insurance_accrual') {
     return {
-      accountingMeaning: `Начисление заработной платы работникам организации за месяц (Дт ${costAcc} Кт 70), удержание НДФЛ 13% из дохода сотрудников (Дт 70 Кт 68.01) и начисление страховых взносов работодателя по единому тарифу 30% + взносов от НС и ПЗ 0,2% (Дт ${costAcc} Кт 69.09, 69.11).`,
-      whyAmountOrVatRule: `Оплата труда и страховые взносы НДС не облагаются. НДФЛ удерживается ИЗ начисленной зарплаты (уменьшает сумму «на руки» на счёте 70), а страховые взносы начисляются СВЕРХ зарплаты за счёт расходов работодателя.`,
+      accountingMeaning: `Начисление заработной платы работникам организации за месяц (Дт ${costAcc} Кт 70), удержание НДФЛ 13% из дохода сотрудников (Дт 70 Кт 68.01) и начисление страховых взносов работодателя по единому тарифу 30% + взносов от НС и ПЗ ${op.injuryInsuranceRate ?? 0.2}% (Дт ${costAcc} Кт 69.09, 69.11).`,
+      whyAmountOrVatRule: `Оплата труда и страховые взносы НДС не облагаются. НДФЛ удерживается ИЗ начисленной зарплаты (уменьшает сумму «на руки» на счёте 70), а страховые взносы начисляются СВЕРХ зарплаты за счёт расходов работодателя.${op.calculationProvenance ? ` (${op.calculationProvenance})` : ''}`,
       navigationPath1C: 'Раздел «Зарплата и кадры» → «Все начисления» → кнопка «Создать: Начисление зарплаты»',
       documentOperationKind1C: 'Начисление зарплаты и взносов',
       headerFieldsSteps: [

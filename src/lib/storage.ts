@@ -53,6 +53,9 @@ export function loadWorkbenchState(): PersistedWorkbenchStateV2 | null {
       db1C,
       balanceAnchorOverride: parsed.balanceAnchorOverride ?? 'auto',
       includeQueuedInOsv: parsed.includeQueuedInOsv ?? true,
+      osvSourceMode:
+        parsed.osvSourceMode ??
+        (parsed.includeQueuedInOsv === false ? 'db_only' : 'combined'),
       periodFilter: parsed.periodFilter ?? {
         dateFrom: `${reportingYear}-01-01`,
         dateTo: `${reportingYear}-12-31`,

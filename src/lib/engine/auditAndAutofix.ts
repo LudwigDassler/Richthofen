@@ -30,6 +30,7 @@ import {
   extractRequisitesFromFreeText,
   normalizeOperationDateToReportingYear,
 } from '@/lib/import1c/batchFileParser';
+import { validateRussianInnChecksum } from '@/lib/egrul/egrulLookup';
 
 function round2(n: number): number {
   const r = Math.round((n + Number.EPSILON) * 100) / 100;
@@ -675,6 +676,8 @@ export function runAuditDiagnostics(params: {
         'cash_bank_internal',
         'depreciation_accrual',
         'insurance_accrual',
+        'hr_hire',
+        'payroll_accrual',
       ].includes(naturalCheck.category) &&
       (op.docType1C !== naturalCheck.docType1C || op.category !== naturalCheck.category);
 
@@ -684,28 +687,32 @@ export function runAuditDiagnostics(params: {
         severity: 'warning',
         category: 'missing_requisite',
         operationId: op.id,
-        title: `Внутренняя операция оформлена как «${op.docType1C}» вместо «${naturalCheck.docType1C}»`,
-        description: `Операция «${op.description.slice(0, 70)}» является внутренней складской/производственной операцией (${DOC_TYPE_LABELS_1C[naturalCheck.docType1C]}), не требует контрагента и НДС.`,
-        accountingReason: `В 1С:Бухгалтерия 8.3 (ред. 3.0) отпуск материалов в производство, передача спецодежды в эксплуатацию и ввод ОС оформляются внутренними документами склада/производства/ОС без счетов расчётов 60/62 и без НДС.`,
-        quickFixLabel: 'Нажмите «Исправить всё автоматически» для переклассификации документа и пересчёта проводок',
+        title: `Операция оформлена как «${op.docType1C}» вместо «${naturalCheck.docType1C}»`,
+        description: `Операция «${op.description.slice(0, 70)}» распознана как «${DOC_TYPE_LABELS_1C[naturalCheck.docType1C]}», не требует внешнего контрагента и НДС.`,
+        accountingReason: `В 1С:Бухгалтерия 8.3 (ред. 3.0) кадровые приказы, расчёт зарплаты, отпуск материалов в производство, выдача спецодежды и ввод ОС оформляются профильными документами без счетов расчётов 60/62 и без НДС.`,
+        quickFixLabel: 'Нажмите «Исправить» для переклассификации документа и пересчёта проводок',
         guide1C: {
-          menuPath: 'Производство / Склад / ОС и НМА',
+          menuPath: 'Зарплата и кадры / Производство / Склад / ОС и НМА',
           documentKind: `${naturalCheck.docType1C} (${DOC_TYPE_LABELS_1C[naturalCheck.docType1C]})`,
           checkPoints: [
             `Замените вид документа на «${DOC_TYPE_LABELS_1C[naturalCheck.docType1C]}»`,
-            'Проверьте отсутствие счёта 60/62 и НДС во внутреннем движении ТМЦ',
+            'Проверьте отсутствие счёта 60/62 и НДС',
           ],
-          repostInstruction: 'Проведите внутренний документ и проверьте движения Дт/Кт',
-          verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 10 / 20.01',
+          repostInstruction: 'Проведите документ и проверьте движения Дт/Кт',
+          verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость',
         },
         canAutoFixBy1C: true,
         autoFixActionLabel: `Переклассифицировать в 1С: ${naturalCheck.docType1C}`,
       });
     }
 
-    // Missing primary amount check ("Требуется сумма") — NEVER flag internal operations where 1C calculates cost automatically!
+    // Missing primary amount check ("Требуется сумма") — NEVER flag HR orders, payroll calculated_by_1c, or internal operations!
     const isCalculatedBy1C =
-      op.amountMode === 'calculated_by_1c' || isReclassifiableInternal;
+      op.amountMode === 'calculated_by_1c' ||
+      op.category === 'hr_hire' ||
+      op.category === 'payroll_accrual' ||
+      op.category === 'insurance_accrual' ||
+      isReclassifiableInternal;
     if (
       !isCalculatedBy1C &&
       (op.amountMode === 'required_missing' ||
@@ -832,6 +839,37 @@ export function runAuditDiagnostics(params: {
           currentValue: op.counterpartyInn,
         },
       });
+    } else if (
+      needsCp &&
+      !isMatchedIn1C &&
+      isValidRussianInnFormat(op.counterpartyInn) &&
+      op.counterpartySource === 'manual'
+    ) {
+      const checkRes = validateRussianInnChecksum(op.counterpartyInn);
+      if (!checkRes.valid) {
+        issues.push({
+          id: `invalid-inn-checksum-${op.id}`,
+          severity: 'warning',
+          category: 'missing_requisite',
+          operationId: op.id,
+          title: `Проверьте контрольную цифру ИНН у «${trimmedCpName}»`,
+          description:
+            checkRes.reason ||
+            'Введённый ИНН не проходит проверку контрольного числа по алгоритму ФНС России — 1С:БП 3.0 выдаст предупреждение в счёте-фактуре.',
+          accountingReason:
+            'В 1С:Бухгалтерия 8.3 встроен контроль ИНН по весовым коэффициентам ФНС (модуль 11). Опечатка в одной цифре приведёт к ошибке ФЛК книги покупок/продаж.',
+          quickFixLabel: 'Исправьте контрольную цифру ИНН или подставьте учебный валидный ИНН/КПП',
+          canAutoFixBy1C: false,
+          inlineTarget: {
+            kind: 'operation_field',
+            operationId: op.id,
+            field: 'counterpartyInn',
+            label: `ИНН контрагента: ${trimmedCpName}`,
+            placeholder: '10 или 12 цифр ИНН с верной контрольной суммой',
+            currentValue: op.counterpartyInn,
+          },
+        });
+      }
     }
 
     if (
@@ -980,6 +1018,8 @@ export function runAuditDiagnostics(params: {
 
     if (
       op.entries.length === 0 &&
+      op.category !== 'hr_hire' &&
+      op.category !== 'closing' &&
       ((!op.needsAmount && op.amount >= 0.01) || op.amountMode === 'calculated_by_1c')
     ) {
       issues.push({
@@ -1335,35 +1375,95 @@ export function generatePeriodClosingOperations(params: {
     }
   }
 
-  // 3. Closing 20.01, 26, 44.01, 90, 91
+  // 3. Linear OS Depreciation (02.01) + Closing 20.01, 26, 44.01, 90, 91
   const closingEntries = [];
   let addedTo9008 = 0;
   let addedTo9002 = 0;
+  let addedDeprTo20 = 0;
+  let addedDeprTo26 = 0;
 
-  const acc20 = osv.leafRows.find((r) => r.code === '20.01');
-  if (acc20 && acc20.endDebit > 0.01) {
-    closingEntries.push({
-      id: `close-20-${Date.now()}`,
-      debit: '90.02.1',
-      credit: '20.01',
-      debitSubconto: nomGroup,
-      creditSubconto: nomGroup,
-      amount: acc20.endDebit,
-      description: 'Закрытие счёта 20.01 в себестоимость продаж (90.02.1)',
-    });
-    addedTo9002 = round2(addedTo9002 + acc20.endDebit);
-    log.push(`Закрыт счёт 20.01 в Дт 90.02.1 на сумму ${acc20.endDebit.toFixed(2)} ₽`);
-    structuredChanges.push({
-      id: `chg-close-20-${Date.now()}`,
-      whatWas: `Незакрытое сальдо Дт 20.01 = ${acc20.endDebit.toFixed(2)} ₽`,
-      whatBecame: `Проводка Дт 90.02.1 Кт 20.01 = ${acc20.endDebit.toFixed(2)} ₽ (сальдо 20.01 = 0,00 ₽)`,
-      basis: 'Регламентная операция «Закрытие счетов 20, 23, 25, 26» 1С БП 3.0',
-      category: 'closing',
-    });
+  // Check commissioned fixed assets (ПринятиеКУчетуОС) commissioned in a month strictly prior to closeDate
+  const closeYm = (closeDate || '').slice(0, 7);
+  const [closeYearStr, closeMonthStr] = closeYm.split('-');
+  const closeTotalMonths =
+    Number(closeYearStr) * 12 + (Number(closeMonthStr) || 0);
+
+  const alreadyHasDeprInCloseMonth = operations.some(
+    (o) =>
+      o.includeInProcessing &&
+      !o.isDuplicateIn1C &&
+      o.date.slice(0, 7) === closeYm &&
+      o.entries.some((e) => e.credit === '02.01')
+  );
+
+  if (!alreadyHasDeprInCloseMonth && closeTotalMonths > 0) {
+    const commissionedOps = operations.filter(
+      (o) =>
+        o.includeInProcessing &&
+        !o.isDuplicateIn1C &&
+        o.category === 'os_commissioning' &&
+        o.amount >= 0.01 &&
+        o.date.slice(0, 7) < closeYm
+    );
+
+    for (const osOp of commissionedOps) {
+      const [osY, osM] = osOp.date.slice(0, 7).split('-');
+      const osTotalMonths = Number(osY) * 12 + (Number(osM) || 0);
+      const elapsedMonths = Math.max(0, closeTotalMonths - osTotalMonths);
+      if (elapsedMonths <= 0) continue;
+
+      // Count how many months already have 02.01 accrued for this asset after commissioning
+      const priorDeprCount = operations.filter(
+        (o) =>
+          o.includeInProcessing &&
+          !o.isDuplicateIn1C &&
+          o.date > osOp.date &&
+          o.date <= closeDate &&
+          o.entries.some((e) => e.credit === '02.01')
+      ).length;
+
+      const monthsDue = Math.max(0, elapsedMonths - priorDeprCount);
+      if (monthsDue <= 0) continue;
+
+      const baseCost = osOp.depreciationBaseAmount ?? osOp.amount;
+      const spi = osOp.usefulLifeMonths && osOp.usefulLifeMonths > 0 ? osOp.usefulLifeMonths : 60;
+      const deprAmount = round2((baseCost / spi) * monthsDue);
+      if (deprAmount < 0.01) continue;
+
+      const deprCostAcc = osOp.costAccount === '26' ? '26' : '20.01';
+      const assetLabel = osOp.nomenclatureName || 'Основное средство';
+      closingEntries.push({
+        id: `close-depr-${osOp.id}-${Date.now()}`,
+        debit: deprCostAcc,
+        credit: '02.01',
+        debitSubconto: 'Амортизация',
+        creditSubconto: assetLabel,
+        amount: deprAmount,
+        description: `Амортизация ОС «${assetLabel}» линейным способом (${baseCost.toFixed(2)} ₽ / ${spi} мес.${monthsDue > 1 ? ` × ${monthsDue} мес.` : ''})`,
+      });
+      if (deprCostAcc === '26') {
+        addedDeprTo26 = round2(addedDeprTo26 + deprAmount);
+      } else {
+        addedDeprTo20 = round2(addedDeprTo20 + deprAmount);
+      }
+      log.push(
+        `Начислена линейная амортизация ОС «${assetLabel}»: Дт ${deprCostAcc} Кт 02.01 на ${deprAmount.toFixed(2)} ₽ (СПИ ${spi} мес.)`
+      );
+      structuredChanges.push({
+        id: `chg-depr-${osOp.id}-${Date.now()}`,
+        whatWas: `Объект ОС «${assetLabel}» введён в эксплуатацию (${osOp.date}), амортизация за период не начислена`,
+        whatBecame: `Проводка Дт ${deprCostAcc} Кт 02.01 = ${deprAmount.toFixed(2)} ₽ (${baseCost.toFixed(2)} / ${spi} мес.)`,
+        basis: 'ФСБУ 6/2020 и ст. 259 НК РФ — начисление амортизации с 1-го числа месяца, следующего за месяцем ввода в эксплуатацию',
+        category: 'closing',
+      });
+    }
   }
 
-  const acc26 = osv.leafRows.find((r) => r.code === '26');
-  if (acc26 && acc26.endDebit > 0.01) {
+  const acc20 = osv.leafRows.find((r) => r.code === '20.01');
+  const total20ToClose = round2((acc20?.endDebit ?? 0) + addedDeprTo20 + (!directCosting ? (osv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0) + addedDeprTo26 : 0));
+  const total26ToClose = round2((osv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0) + addedDeprTo26);
+
+  if (total26ToClose > 0.01) {
     const targetDt = directCosting ? '90.08.1' : '20.01';
     closingEntries.push({
       id: `close-26-${Date.now()}`,
@@ -1371,18 +1471,39 @@ export function generatePeriodClosingOperations(params: {
       credit: '26',
       debitSubconto: nomGroup,
       creditSubconto: 'Общехозяйственные расходы',
-      amount: acc26.endDebit,
+      amount: total26ToClose,
       description: directCosting
         ? 'Закрытие счёта 26 «Директ-костинг» в Дт 90.08.1'
         : 'Закрытие счёта 26 в основное производство (20.01)',
     });
-    if (directCosting) addedTo9008 = acc26.endDebit;
-    log.push(`Закрыт счёт 26 в Дт ${targetDt} на сумму ${acc26.endDebit.toFixed(2)} ₽`);
+    if (directCosting) addedTo9008 = total26ToClose;
+    log.push(`Закрыт счёт 26 в Дт ${targetDt} на сумму ${total26ToClose.toFixed(2)} ₽`);
     structuredChanges.push({
       id: `chg-close-26-${Date.now()}`,
-      whatWas: `Незакрытое сальдо Дт 26 = ${acc26.endDebit.toFixed(2)} ₽`,
-      whatBecame: `Проводка Дт ${targetDt} Кт 26 = ${acc26.endDebit.toFixed(2)} ₽ (сальдо 26 = 0,00 ₽)`,
+      whatWas: `Незакрытое сальдо Дт 26 = ${total26ToClose.toFixed(2)} ₽`,
+      whatBecame: `Проводка Дт ${targetDt} Кт 26 = ${total26ToClose.toFixed(2)} ₽ (сальдо 26 = 0,00 ₽)`,
       basis: 'Ежемесячное списание управленческих расходов (ФСБУ 5/2019, директ-костинг 1С БП 3.0)',
+      category: 'closing',
+    });
+  }
+
+  if (total20ToClose > 0.01) {
+    closingEntries.push({
+      id: `close-20-${Date.now()}`,
+      debit: '90.02.1',
+      credit: '20.01',
+      debitSubconto: nomGroup,
+      creditSubconto: nomGroup,
+      amount: total20ToClose,
+      description: 'Закрытие счёта 20.01 в себестоимость продаж (90.02.1)',
+    });
+    addedTo9002 = round2(addedTo9002 + total20ToClose);
+    log.push(`Закрыт счёт 20.01 в Дт 90.02.1 на сумму ${total20ToClose.toFixed(2)} ₽`);
+    structuredChanges.push({
+      id: `chg-close-20-${Date.now()}`,
+      whatWas: `Незакрытое сальдо Дт 20.01 = ${total20ToClose.toFixed(2)} ₽`,
+      whatBecame: `Проводка Дт 90.02.1 Кт 20.01 = ${total20ToClose.toFixed(2)} ₽ (сальдо 20.01 = 0,00 ₽)`,
+      basis: 'Регламентная операция «Закрытие счетов 20, 23, 25, 26» 1С БП 3.0',
       category: 'closing',
     });
   }
@@ -1503,6 +1624,54 @@ export function generatePeriodClosingOperations(params: {
     }
   }
 
+  // Quarter-end / Year-end 20% Corporate Profit Tax (Дт 99.01.1 Кт 68.04.1) on OSNO
+  const closeMonthNum = Number((closeDate || '').slice(5, 7)) || 0;
+  const isQuarterEnd = [3, 6, 9, 12].includes(closeMonthNum);
+  const alreadyHasProfitTax = operations.some(
+    (o) =>
+      o.includeInProcessing &&
+      o.date.slice(0, 7) === closeDate.slice(0, 7) &&
+      o.entries.some((e) => e.debit.startsWith('99') && e.credit === '68.04.1')
+  );
+  if (isOsno && isQuarterEnd && !alreadyHasProfitTax) {
+    const existing99Row = osv.leafRows.find((r) => r.code === '99.01.1' || r.code === '99');
+    const existingNetCredit99 = existing99Row
+      ? round2(existing99Row.endCredit - existing99Row.endDebit)
+      : 0;
+    const closingDeltaCredit99 = round2(
+      closingEntries.reduce((acc, e) => {
+        if (e.credit === '99.01.1') return acc + e.amount;
+        if (e.debit === '99.01.1') return acc - e.amount;
+        return acc;
+      }, 0)
+    );
+    const totalProfitBeforeTax = round2(existingNetCredit99 + closingDeltaCredit99);
+    if (totalProfitBeforeTax > 0.01) {
+      const profitTax20 = round2(totalProfitBeforeTax * 0.2);
+      if (profitTax20 >= 0.01) {
+        closingEntries.push({
+          id: `close-profit-tax-${Date.now()}`,
+          debit: '99.01.1',
+          credit: '68.04.1',
+          debitSubconto: 'Налог на прибыль и аналогичные платежи',
+          creditSubconto: 'Налог (взносы): начислено / уплачено',
+          amount: profitTax20,
+          description: 'Расчёт налога на прибыль организаций (20%) по итогам отчётного периода',
+        });
+        log.push(
+          `Начислен налог на прибыль 20%: Дт 99.01.1 Кт 68.04.1 на ${profitTax20.toFixed(2)} ₽ (база прибыли ${totalProfitBeforeTax.toFixed(2)} ₽)`
+        );
+        structuredChanges.push({
+          id: `chg-profit-tax-${Date.now()}`,
+          whatWas: `Прибыль до налогообложения на счёте 99.01.1 = ${totalProfitBeforeTax.toFixed(2)} ₽`,
+          whatBecame: `Проводка Дт 99.01.1 Кт 68.04.1 = ${profitTax20.toFixed(2)} ₽ (ставка 20% ОСНО)`,
+          basis: 'Ст. 284 НК РФ — регламентная операция «Расчёт налога на прибыль» 1С:БП 3.0',
+          category: 'closing',
+        });
+      }
+    }
+  }
+
   if (closingEntries.length > 0) {
     const totalCloseAmt = round2(closingEntries.reduce((s, e) => s + e.amount, 0));
     const closeOp: QueuedOperation = {
@@ -1511,14 +1680,15 @@ export function generatePeriodClosingOperations(params: {
       sourceFileName: 'Регламентная операция 1С',
       date: closeDate,
       docNumber: 'РЕГЛ-ЗАКР',
-      description: 'Регламентное закрытие счетов затрат и финансовых результатов (20, 26, 44, 90, 91)',
+      description: 'Регламентное закрытие счетов затрат и финансовых результатов (20, 26, 44, 90, 91, 99)',
       category: 'closing',
       docType1C: 'ЗакрытиеМесяца',
-      documentSubKind1C: 'Закрытие счетов 20, 26, 44, 90, 91',
+      documentSubKind1C: 'Закрытие счетов 20, 26, 44, 90, 91 и расчёт налога на прибыль',
       amount: totalCloseAmt,
       amountMode: 'from_account_balance',
       readinessStatus: 'ready',
       readinessNote: 'Готово (регламентная операция закрытия периода)',
+      calculationProvenance: `Сформировано по фактическим остаткам счетов затрат и продаж на ${closeDate}`,
       vatRate: 0,
       vatRule: 'none',
       vatAmount: 0,
@@ -2398,5 +2568,42 @@ export function autoFixAllBy1CDb(params: {
     fixedCount,
     log,
     structuredChanges,
+  };
+}
+
+/**
+ * Applies targeted 1-click auto-fix to a single operation in the context of all chronological operations.
+ */
+export function autoFixSingleOperation(params: {
+  operationId: string;
+  db1C: Database1CSnapshot | null;
+  operations: QueuedOperation[];
+  calculateCurrentOsv: (ops: QueuedOperation[]) => OsvReport;
+  periodEndDate: string;
+  reportingYear?: number;
+}): {
+  operations: QueuedOperation[];
+  fixedCount: number;
+  structuredChanges: AutoFixChangeRecord[];
+} {
+  const full = autoFixAllBy1CDb({
+    db1C: params.db1C,
+    operations: params.operations,
+    calculateCurrentOsv: params.calculateCurrentOsv,
+    periodEndDate: params.periodEndDate,
+    reportingYear: params.reportingYear,
+  });
+
+  const fixedTarget = full.operations.find((o) => o.id === params.operationId);
+  if (!fixedTarget) {
+    return { operations: params.operations, fixedCount: 0, structuredChanges: [] };
+  }
+
+  const nextOps = params.operations.map((o) => (o.id === params.operationId ? fixedTarget : o));
+  const opChanges = full.structuredChanges.filter((c) => c.operationId === params.operationId);
+  return {
+    operations: nextOps,
+    fixedCount: Math.max(1, opChanges.length),
+    structuredChanges: opChanges,
   };
 }

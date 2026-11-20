@@ -25,6 +25,7 @@ import {
   ExportMode1C,
   InlineFieldTarget,
   OsvReport,
+  OsvSourceMode,
   QueuedOperation,
   WorkspaceTab,
 } from '@/types/accounting';
@@ -34,7 +35,12 @@ import {
   saveWorkbenchState,
 } from '@/lib/storage';
 import {
+  generateEducationalInnKpp,
+  validateRussianInnChecksum,
+} from '@/lib/egrul/egrulLookup';
+import {
   autoFixAllBy1CDb,
+  autoFixSingleOperation,
   BatchSequentialContext,
   bindAndGenerateOperation,
   buildAccompanyingActions1C,
@@ -51,6 +57,7 @@ import {
   normalizeEntityKey,
   PendingNewCounterpartyInfo,
   rebindOperationsAgainst1CDb,
+  recalculateOperationsChronologically,
   runAuditDiagnostics,
   sanitizeHydratedOperations,
 } from '@/lib/engine';
@@ -113,6 +120,11 @@ interface AccountantContextValue {
   setBalanceAnchorOverride: (val: BalanceAnchorOverride) => void;
   includeQueuedInOsv: boolean;
   setIncludeQueuedInOsv: (val: boolean) => void;
+  osvSourceMode: OsvSourceMode;
+  setOsvSourceMode: (mode: OsvSourceMode) => void;
+  focusedOperationId: string | null;
+  setFocusedOperationId: (id: string | null) => void;
+  jumpToOperation: (operationId: string) => void;
   periodFilter: { dateFrom: string; dateTo: string };
   setPeriodFilter: (filter: { dateFrom: string; dateTo: string }) => void;
   operations: QueuedOperation[];
@@ -139,11 +151,33 @@ interface AccountantContextValue {
   updateOperation: (id: string, updater: (prev: QueuedOperation) => QueuedOperation) => void;
   changeOperationDocType1C: (id: string, docType1C: DocType1CBP30) => void;
   rebuildSingleOperationPostings: (id: string) => void;
+  runSingleOperationAutoFix: (operationId: string) => number;
+  updateOperationPayrollParams: (
+    operationId: string,
+    params: {
+      monthlySalary?: number;
+      costAccount?: string;
+      injuryInsuranceRate?: number;
+      employeeName?: string;
+      employeePosition?: string;
+    }
+  ) => void;
+  updateOperationOsParams: (
+    operationId: string,
+    params: {
+      usefulLifeMonths?: number;
+      costAccount?: string;
+      nomenclatureName?: string;
+      depreciationBaseAmount?: number;
+    }
+  ) => void;
   removeOperation: (id: string) => void;
   clearAllOperations: () => void;
   runSmartAutoFixAll: () => { fixedCount: number; log: string[] };
   runClosingAndOffsetsOnly: () => { addedCount: number; log: string[] };
   lookupCounterpartiesInEgrul: (targetGroupKey?: string) => Promise<number>;
+  fillAllCounterpartiesAutomatically: () => Promise<number>;
+  fillEducationalRequisitesForUnverified: (targetGroupKey?: string) => number;
   selectEgrulCandidateForCounterparty: (
     groupKey: string,
     candidate: EgrulCandidate
@@ -172,7 +206,9 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
   const [syncError, setSyncError] = useState<string | null>(null);
   const [balanceAnchorOverride, setBalanceAnchorOverride] =
     useState<BalanceAnchorOverride>('auto');
-  const [includeQueuedInOsv, setIncludeQueuedInOsv] = useState<boolean>(true);
+  const [includeQueuedInOsv, setIncludeQueuedInOsvState] = useState<boolean>(true);
+  const [osvSourceMode, setOsvSourceModeState] = useState<OsvSourceMode>('combined');
+  const [focusedOperationId, setFocusedOperationId] = useState<string | null>(null);
   const [periodFilter, setPeriodFilter] = useState<{ dateFrom: string; dateTo: string }>({
     dateFrom: `${DEFAULT_REPORTING_YEAR}-01-01`,
     dateTo: `${DEFAULT_REPORTING_YEAR}-12-31`,
@@ -185,6 +221,24 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
   const [isLookingUpEgrul, setIsLookingUpEgrul] = useState<boolean>(false);
   const [exportMode, setExportMode] = useState<ExportMode1C>('incremental');
   const [notice, setNotice] = useState<NoticeBanner | null>(null);
+
+  const setIncludeQueuedInOsv = useCallback((val: boolean) => {
+    setIncludeQueuedInOsvState(val);
+    setOsvSourceModeState((prev) => {
+      if (!val) return 'db_only';
+      return prev === 'db_only' ? 'combined' : prev;
+    });
+  }, []);
+
+  const setOsvSourceMode = useCallback((mode: OsvSourceMode) => {
+    setOsvSourceModeState(mode);
+    setIncludeQueuedInOsvState(mode !== 'db_only');
+  }, []);
+
+  const jumpToOperation = useCallback((operationId: string) => {
+    setFocusedOperationId(operationId);
+    setActiveTab('import_postings');
+  }, []);
 
   const pushNotice = useCallback((tone: NoticeBanner['tone'], message: string) => {
     setNotice({
@@ -269,7 +323,10 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       setReportingYearState(initialYear);
       setDb1C(saved.db1C);
       setBalanceAnchorOverride(saved.balanceAnchorOverride);
-      setIncludeQueuedInOsv(saved.includeQueuedInOsv);
+      setIncludeQueuedInOsvState(saved.includeQueuedInOsv);
+      setOsvSourceModeState(
+        saved.osvSourceMode ?? (saved.includeQueuedInOsv === false ? 'db_only' : 'combined')
+      );
       const savedFrom = saved.periodFilter?.dateFrom || '';
       const savedTo = saved.periodFilter?.dateTo || '';
       if (savedFrom && savedFrom >= `${initialYear}-01-01`) {
@@ -327,6 +384,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       db1C,
       balanceAnchorOverride,
       includeQueuedInOsv,
+      osvSourceMode,
       periodFilter,
       operations,
       resolvedInlineNotes: {},
@@ -341,6 +399,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     db1C,
     balanceAnchorOverride,
     includeQueuedInOsv,
+    osvSourceMode,
     periodFilter,
     operations,
     exportMode,
@@ -1006,18 +1065,212 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
             assumeInvoiceOnVatPurchase: op.hasInvoiceSF,
           }
         );
-        return prev.map((item, i) =>
+        const updatedList = prev.map((item, i) =>
           i === idx ? { ...rebuilt, includeInProcessing: op.includeInProcessing } : item
         );
+        return recalculateOperationsChronologically(updatedList, db1C, {
+          reportingYear,
+          defaultBik,
+        });
       });
-      pushNotice('info', 'Проводки, аналитика и пошаговая инструкция 1С пересчитаны.');
+      pushNotice('info', 'Проводки, аналитика и хронологическая цепочка счетов пересчитаны.');
     },
     [db1C, reportingYear, lastImportStats, pushNotice]
   );
 
-  const removeOperation = useCallback((id: string) => {
-    setOperations((prev) => prev.filter((op) => op.id !== id));
-  }, []);
+  const updateOperationPayrollParams = useCallback(
+    (
+      operationId: string,
+      params: {
+        monthlySalary?: number;
+        costAccount?: string;
+        injuryInsuranceRate?: number;
+        employeeName?: string;
+        employeePosition?: string;
+      }
+    ) => {
+      const defaultBik =
+        lastImportStats?.sheetDefaults.defaultBik ||
+        db1C?.organization.bik ||
+        DEFAULT_SBERBANK_BIK;
+      const defaultBankName =
+        lastImportStats?.sheetDefaults.defaultBankName ||
+        db1C?.organization.bankName ||
+        DEFAULT_SBERBANK_NAME;
+
+      setOperations((prev) => {
+        const idx = prev.findIndex((o) => o.id === operationId);
+        if (idx === -1) return prev;
+        const op = prev[idx];
+        const nextSalary =
+          params.monthlySalary !== undefined ? params.monthlySalary : op.monthlySalary;
+        const nextCostAcc =
+          params.costAccount !== undefined ? params.costAccount : op.costAccount;
+        const nextInjuryRate =
+          params.injuryInsuranceRate !== undefined
+            ? params.injuryInsuranceRate
+            : op.injuryInsuranceRate;
+        const nextEmpName =
+          params.employeeName !== undefined ? params.employeeName : op.employeeName;
+        const nextEmpPos =
+          params.employeePosition !== undefined
+            ? params.employeePosition
+            : op.employeePosition;
+
+        const isHireOrder = op.category === 'hr_hire' || op.docType1C === 'ПриемНаРаботу';
+        const priorOps = prev.filter(
+          (o, i) =>
+            o.id !== operationId &&
+            o.includeInProcessing &&
+            (i < idx || (Boolean(op.date && o.date) && o.date <= op.date))
+        );
+
+        const rebuilt = bindAndGenerateOperation(
+          {
+            rowKey: op.rowKey,
+            sourceFileName: op.sourceFileName,
+            date: op.date,
+            docNumber: op.docNumber,
+            description: op.description,
+            amount: isHireOrder ? 0 : nextSalary ?? op.amount,
+            monthlySalary: nextSalary,
+            employeePosition: nextEmpPos,
+            injuryInsuranceRate: nextInjuryRate,
+            employeeName: nextEmpName,
+            costAccountHint: nextCostAcc,
+            docTypeHint: op.docType1C,
+            categoryHint: op.category,
+          },
+          db1C,
+          op.id,
+          {
+            priorOperations: priorOps,
+            reportingYear,
+            defaultBik,
+            defaultBankName,
+          }
+        );
+
+        const explicitPayroll =
+          !isHireOrder && nextSalary !== undefined && nextSalary >= 0.01
+            ? {
+                ...rebuilt,
+                amountMode: 'explicit' as const,
+                monthlySalary: nextSalary,
+                includeInProcessing: op.includeInProcessing,
+              }
+            : { ...rebuilt, includeInProcessing: op.includeInProcessing };
+
+        const updatedList = prev.map((item, i) => (i === idx ? explicitPayroll : item));
+        return recalculateOperationsChronologically(updatedList, db1C, {
+          reportingYear,
+          defaultBik,
+        });
+      });
+    },
+    [db1C, reportingYear, lastImportStats]
+  );
+
+  const updateOperationOsParams = useCallback(
+    (
+      operationId: string,
+      params: {
+        usefulLifeMonths?: number;
+        costAccount?: string;
+        nomenclatureName?: string;
+        depreciationBaseAmount?: number;
+      }
+    ) => {
+      const defaultBik =
+        lastImportStats?.sheetDefaults.defaultBik ||
+        db1C?.organization.bik ||
+        DEFAULT_SBERBANK_BIK;
+      const defaultBankName =
+        lastImportStats?.sheetDefaults.defaultBankName ||
+        db1C?.organization.bankName ||
+        DEFAULT_SBERBANK_NAME;
+
+      setOperations((prev) => {
+        const idx = prev.findIndex((o) => o.id === operationId);
+        if (idx === -1) return prev;
+        const op = prev[idx];
+        const nextSpi =
+          params.usefulLifeMonths !== undefined
+            ? Math.max(1, Math.round(params.usefulLifeMonths))
+            : op.usefulLifeMonths;
+        const nextCost =
+          params.costAccount !== undefined ? params.costAccount : op.costAccount;
+        const nextNom =
+          params.nomenclatureName !== undefined
+            ? params.nomenclatureName
+            : op.nomenclatureName;
+        const nextBase =
+          params.depreciationBaseAmount !== undefined
+            ? params.depreciationBaseAmount
+            : op.depreciationBaseAmount;
+
+        const priorOps = prev.filter(
+          (o, i) =>
+            o.id !== operationId &&
+            o.includeInProcessing &&
+            (i < idx || (Boolean(op.date && o.date) && o.date <= op.date))
+        );
+
+        const rebuilt = bindAndGenerateOperation(
+          {
+            rowKey: op.rowKey,
+            sourceFileName: op.sourceFileName,
+            date: op.date,
+            docNumber: op.docNumber,
+            description: op.description,
+            amount:
+              op.category === 'depreciation_accrual' && nextBase && nextSpi
+                ? Math.round((nextBase / nextSpi) * 100) / 100
+                : op.amountMode === 'explicit'
+                  ? op.amount
+                  : 0,
+            usefulLifeMonths: nextSpi,
+            depreciationBaseAmount: nextBase,
+            nomenclatureName: nextNom,
+            costAccountHint: nextCost,
+            materialAccountHint: op.materialAccount,
+            docTypeHint: op.docType1C,
+            categoryHint: op.category,
+          },
+          db1C,
+          op.id,
+          {
+            priorOperations: priorOps,
+            reportingYear,
+            defaultBik,
+            defaultBankName,
+          }
+        );
+
+        const updatedList = prev.map((item, i) =>
+          i === idx ? { ...rebuilt, includeInProcessing: op.includeInProcessing } : item
+        );
+        return recalculateOperationsChronologically(updatedList, db1C, {
+          reportingYear,
+          defaultBik,
+        });
+      });
+    },
+    [db1C, reportingYear, lastImportStats]
+  );
+
+  const removeOperation = useCallback(
+    (id: string) => {
+      setOperations((prev) =>
+        recalculateOperationsChronologically(
+          prev.filter((op) => op.id !== id),
+          db1C,
+          { reportingYear }
+        )
+      );
+    },
+    [db1C, reportingYear]
+  );
 
   const clearAllOperations = useCallback(() => {
     setOperations([]);
@@ -1037,6 +1290,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
         reportingYear,
         balanceAnchorOverride,
         includeQueuedOperations: includeQueuedInOsv,
+        sourceMode: osvSourceMode,
       }),
     [
       db1C,
@@ -1046,6 +1300,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       reportingYear,
       balanceAnchorOverride,
       includeQueuedInOsv,
+      osvSourceMode,
     ]
   );
 
@@ -1125,7 +1380,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     });
 
     setOperations(res.operations);
-    setIncludeQueuedInOsv(true);
+    setOsvSourceMode('combined');
     setAutoFixLogs(res.log);
     setAutoFixChanges(res.structuredChanges);
 
@@ -1153,8 +1408,182 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     balanceAnchorOverride,
     lastImportStats,
     pushNotice,
+    setOsvSourceMode,
     executeEgrulLookupInternal,
   ]);
+
+  const runSingleOperationAutoFix = useCallback(
+    (operationId: string): number => {
+      const endDate = periodFilter.dateTo || `${reportingYear}-12-31`;
+      const res = autoFixSingleOperation({
+        operationId,
+        db1C,
+        operations,
+        calculateCurrentOsv: (ops) =>
+          calculateOsvReport({
+            db1C,
+            operations: ops,
+            dateFrom: periodFilter.dateFrom,
+            dateTo: periodFilter.dateTo,
+            reportingYear,
+            balanceAnchorOverride,
+            includeQueuedOperations: true,
+          }),
+        periodEndDate: endDate,
+        reportingYear,
+      });
+
+      const recalc = recalculateOperationsChronologically(res.operations, db1C, {
+        reportingYear,
+      });
+      setOperations(recalc);
+      if (res.structuredChanges.length > 0) {
+        setAutoFixChanges((prev) => [...prev, ...res.structuredChanges]);
+      }
+      pushNotice('success', 'Операция исправлена и синхронизирована с хронологией учёта.');
+      return res.fixedCount;
+    },
+    [
+      db1C,
+      operations,
+      periodFilter.dateFrom,
+      periodFilter.dateTo,
+      reportingYear,
+      balanceAnchorOverride,
+      pushNotice,
+    ]
+  );
+
+  const fillAllCounterpartiesAutomatically = useCallback(async (): Promise<number> => {
+    let matchedIn1C = 0;
+    const after1C = operations.map((op) => {
+      if (!op.includeInProcessing || op.autoGeneratedKind) return op;
+      const trimmed = op.counterpartyName.trim();
+      if (trimmed.length < 2) return op;
+      if (op.bindings.counterparty.status === 'matched_1c') return op;
+      const found1C = matchPersonOrCounterpartyIn1C(trimmed, op.counterpartyInn, db1C);
+      if (!found1C) return op;
+      matchedIn1C++;
+      return {
+        ...op,
+        counterpartyName: found1C.name,
+        counterpartyInn: found1C.inn || op.counterpartyInn,
+        counterpartyKpp: found1C.kpp || op.counterpartyKpp,
+        counterpartyKind: found1C.kind,
+        counterpartySource: 'db_1c' as const,
+        bindings: {
+          ...op.bindings,
+          counterparty: {
+            status: 'matched_1c' as const,
+            matchedName: found1C.name,
+            matchedCode1C: found1C.code1C,
+            matchedInn: found1C.inn,
+          },
+        },
+      };
+    });
+    if (matchedIn1C > 0) {
+      setOperations(after1C);
+    }
+    const egrulCount = await executeEgrulLookupInternal(after1C, undefined, true);
+    const total = matchedIn1C + egrulCount;
+    if (total > 0) {
+      pushNotice(
+        'success',
+        `Реквизиты контрагентов заполнены по БД 1С и ЕГРЮЛ ФНС: ${total}`
+      );
+    } else {
+      pushNotice(
+        'info',
+        'Реальные контрагенты проверены. Для учебных контрагентов (не из ЕГРЮЛ) используйте кнопку «Подставить учебные валидные ИНН/КПП».'
+      );
+    }
+    return total;
+  }, [operations, db1C, executeEgrulLookupInternal, pushNotice]);
+
+  const fillEducationalRequisitesForUnverified = useCallback(
+    (targetGroupKey?: string): number => {
+      const generatedByGroup = new Map<
+        string,
+        { name: string; inn: string; kpp: string; ogrn: string }
+      >();
+
+      setOperations((prev) =>
+        prev.map((op) => {
+          if (!op.includeInProcessing || op.autoGeneratedKind) return op;
+          const needsCp =
+            doesOperationRequireCounterparty(op.category) || op.category === 'tax_payment';
+          if (!needsCp) return op;
+
+          const trimmed = op.counterpartyName.trim();
+          if (trimmed.length < 2) return op;
+          if (op.bindings.counterparty.status === 'matched_1c') return op;
+
+          const groupKey = getCounterpartyGroupKey(trimmed);
+          if (targetGroupKey && groupKey !== targetGroupKey) return op;
+
+          const innCheck = validateRussianInnChecksum(op.counterpartyInn);
+          const hasValidKpp =
+            op.counterpartyKind !== 'ЮридическоеЛицо' ||
+            op.counterpartyKpp.replace(/\D/g, '').length === 9;
+          if (!targetGroupKey && innCheck.valid && hasValidKpp) {
+            return op;
+          }
+
+          let edu = generatedByGroup.get(groupKey);
+          if (!edu) {
+            const gen = generateEducationalInnKpp(trimmed, op.counterpartyKind, '78');
+            edu = { name: trimmed, ...gen };
+            generatedByGroup.set(groupKey, edu);
+          }
+
+          return {
+            ...op,
+            counterpartyInn: edu.inn,
+            counterpartyKpp: edu.kpp,
+            counterpartyOgrn: edu.ogrn,
+            counterpartySource: 'educational_generated',
+            bindings: {
+              ...op.bindings,
+              counterparty: {
+                ...op.bindings.counterparty,
+                status: 'new_for_1c',
+                note: `Учебные реквизиты (ФНС checksum OK: ИНН ${edu.inn}${
+                  edu.kpp ? ` / КПП ${edu.kpp}` : ''
+                })`,
+              },
+            },
+          };
+        })
+      );
+
+      const count = generatedByGroup.size;
+      if (count > 0) {
+        const changes: AutoFixChangeRecord[] = Array.from(generatedByGroup.entries()).map(
+          ([key, info]) => ({
+            id: `edu-inn-${key}-${Date.now()}`,
+            whatWas: `Учебный контрагент «${info.name}»: ИНН/КПП не указаны`,
+            whatBecame: `ИНН ${info.inn}${info.kpp ? `, КПП ${info.kpp}` : ''} (Учебные реквизиты, ФНС checksum OK)`,
+            basis:
+              'Детерминированная генерация валидного учебного ИНН/КПП региона 78 по алгоритму контрольных чисел ФНС РФ',
+            category: 'counterparty_requisites',
+          })
+        );
+        setAutoFixChanges((prev) => [...prev, ...changes]);
+        pushNotice(
+          'success',
+          `Подставлены валидные учебные ИНН/КПП (с проверкой контрольной суммы ФНС) для контрагентов: ${count}`
+        );
+      } else {
+        pushNotice(
+          'info',
+          'У всех новых контрагентов уже заполнены валидные ИНН/КПП.'
+        );
+      }
+      return count;
+    },
+    [pushNotice]
+  );
 
   const runClosingAndOffsetsOnly = useCallback(() => {
     const baseOps = operations.filter((op) => !op.autoGeneratedKind);
@@ -1472,7 +1901,11 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
               assumeInvoiceOnVatPurchase: op.hasInvoiceSF,
             }
           );
-          return prev.map((item, i) => (i === idx ? rebuilt : item));
+          const updatedList = prev.map((item, i) => (i === idx ? rebuilt : item));
+          return recalculateOperationsChronologically(updatedList, db1C, {
+            reportingYear,
+            defaultBik,
+          });
         });
         return { ok: true };
       }
@@ -1696,6 +2129,11 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       setBalanceAnchorOverride,
       includeQueuedInOsv,
       setIncludeQueuedInOsv,
+      osvSourceMode,
+      setOsvSourceMode,
+      focusedOperationId,
+      setFocusedOperationId,
+      jumpToOperation,
       periodFilter,
       setPeriodFilter,
       operations,
@@ -1720,11 +2158,16 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       updateOperation,
       changeOperationDocType1C,
       rebuildSingleOperationPostings,
+      runSingleOperationAutoFix,
+      updateOperationPayrollParams,
+      updateOperationOsParams,
       removeOperation,
       clearAllOperations,
       runSmartAutoFixAll,
       runClosingAndOffsetsOnly,
       lookupCounterpartiesInEgrul,
+      fillAllCounterpartiesAutomatically,
+      fillEducationalRequisitesForUnverified,
       selectEgrulCandidateForCounterparty,
       applyInlineAuditValue,
       bindOperationTo1CDirectoryItem,
@@ -1743,6 +2186,11 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       syncError,
       balanceAnchorOverride,
       includeQueuedInOsv,
+      setIncludeQueuedInOsv,
+      osvSourceMode,
+      setOsvSourceMode,
+      focusedOperationId,
+      jumpToOperation,
       periodFilter,
       operations,
       osvReport,
@@ -1766,11 +2214,16 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       updateOperation,
       changeOperationDocType1C,
       rebuildSingleOperationPostings,
+      runSingleOperationAutoFix,
+      updateOperationPayrollParams,
+      updateOperationOsParams,
       removeOperation,
       clearAllOperations,
       runSmartAutoFixAll,
       runClosingAndOffsetsOnly,
       lookupCounterpartiesInEgrul,
+      fillAllCounterpartiesAutomatically,
+      fillEducationalRequisitesForUnverified,
       selectEgrulCandidateForCounterparty,
       applyInlineAuditValue,
       bindOperationTo1CDirectoryItem,

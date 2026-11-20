@@ -8,14 +8,31 @@ import {
   BalanceAnchorOverride,
   BalanceInterpretationMode,
   Database1CSnapshot,
+  OsvAccountMovement,
   OsvAccountRow,
+  OsvAuditorHint,
   OsvReport,
+  OsvSourceMode,
+  OsvSubcontoRow,
   QueuedOperation,
 } from '@/types/accounting';
 
 function round2(n: number): number {
   const r = Math.round((n + Number.EPSILON) * 100) / 100;
   return Object.is(r, -0) ? 0 : r;
+}
+
+function formatRuDateShort(iso: string): string {
+  const m = (iso ?? '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return iso || 'период';
+  return `${m[3]}.${m[2]}.${m[1]}`;
+}
+
+function formatMoneyRu(n: number): string {
+  return `${round2(n).toLocaleString('ru-RU', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })} ₽`;
 }
 
 function splitNetToSides(
@@ -53,12 +70,22 @@ function splitNetToSides(
 
 export function resolveEffectiveBalanceMode(
   db1C: Database1CSnapshot | null,
-  override: BalanceAnchorOverride
+  override: BalanceAnchorOverride,
+  sourceMode: OsvSourceMode = 'combined'
 ): { mode: BalanceInterpretationMode; description: string } {
+  if (sourceMode === 'queued_only') {
+    return {
+      mode: 'postings_only',
+      description:
+        'Режим «Только новые операции»: обороты и остатки рассчитаны изолированно по загруженным файлам (начальное сальдо = 0)',
+    };
+  }
+
   if (!db1C) {
     return {
       mode: 'postings_only',
-      description: 'База 1С не подключена — расчёт только по загруженным операциям (начальное сальдо = 0)',
+      description:
+        'База 1С не подключена — расчёт только по загруженным операциям (начальное сальдо = 0)',
     };
   }
 
@@ -85,11 +112,22 @@ export function resolveEffectiveBalanceMode(
 }
 
 interface MovementRecord {
+  id: string;
   date: string;
   debit: string;
   credit: string;
+  debitSubconto: string;
+  creditSubconto: string;
   amount: number;
   source: 'db' | 'queued';
+  operationId?: string;
+  docLabel: string;
+  description: string;
+}
+
+function normalizeSubcontoLabel(raw?: string): string {
+  const clean = (raw ?? '').trim();
+  return clean || 'Без аналитики (субконто)';
 }
 
 export function calculateOsvReport(params: {
@@ -100,6 +138,7 @@ export function calculateOsvReport(params: {
   reportingYear?: number;
   balanceAnchorOverride?: BalanceAnchorOverride;
   includeQueuedOperations?: boolean;
+  sourceMode?: OsvSourceMode;
 }): OsvReport {
   const {
     db1C,
@@ -109,7 +148,14 @@ export function calculateOsvReport(params: {
     reportingYear,
     balanceAnchorOverride = 'auto',
     includeQueuedOperations = true,
+    sourceMode: explicitSourceMode,
   } = params;
+
+  const effectiveSourceMode: OsvSourceMode =
+    explicitSourceMode ?? (includeQueuedOperations ? 'combined' : 'db_only');
+
+  const useDbData = effectiveSourceMode !== 'queued_only' && Boolean(db1C);
+  const useQueuedData = effectiveSourceMode !== 'db_only';
 
   const reportingYearStart =
     reportingYear && reportingYear >= 1990 && reportingYear <= 2100
@@ -117,39 +163,52 @@ export function calculateOsvReport(params: {
       : '';
 
   const { mode: effectiveMode, description: balanceModeDescription } =
-    resolveEffectiveBalanceMode(db1C, balanceAnchorOverride);
+    resolveEffectiveBalanceMode(useDbData ? db1C : null, balanceAnchorOverride, effectiveSourceMode);
 
   // Collect all movements from 1C DB
-  const dbMovements: MovementRecord[] = (db1C?.postings ?? [])
-    .filter((p) => Math.abs(p.amount) >= 0.005)
-    .map((p) => ({
-      date: p.date || '',
-      debit: p.debit,
-      credit: p.credit,
-      amount: round2(p.amount),
-      source: 'db' as const,
-    }));
+  const dbMovements: MovementRecord[] = useDbData
+    ? (db1C?.postings ?? [])
+        .filter((p) => Math.abs(p.amount) >= 0.005)
+        .map((p) => ({
+          id: p.id,
+          date: p.date || '',
+          debit: p.debit,
+          credit: p.credit,
+          debitSubconto: p.debitSubconto?.filter(Boolean).join(' / ') || p.counterpartyName || '',
+          creditSubconto: p.creditSubconto?.filter(Boolean).join(' / ') || p.counterpartyName || '',
+          amount: round2(p.amount),
+          source: 'db' as const,
+          docLabel: p.documentLabel || `${p.documentType} №${p.documentNumber || 'б/н'}`,
+          description: p.description || p.documentLabel || 'Проводка базы 1С',
+        }))
+    : [];
 
   // Collect movements from user-queued operations (excluding duplicates disabled by user)
-  const queuedMovements: MovementRecord[] = includeQueuedOperations
+  const queuedMovements: MovementRecord[] = useQueuedData
     ? operations
         .filter((op) => op.includeInProcessing && !op.isDuplicateIn1C)
         .flatMap((op) =>
           op.entries
             .filter((e) => Math.abs(e.amount) >= 0.005 && (e.debit || e.credit))
             .map((e) => ({
+              id: `${op.id}-${e.id}`,
               date: op.date || '',
               debit: e.debit,
               credit: e.credit,
+              debitSubconto: e.debitSubconto || op.counterpartyName || op.nomenclatureName || op.employeeName || '',
+              creditSubconto: e.creditSubconto || op.counterpartyName || op.nomenclatureName || op.employeeName || '',
               amount: round2(e.amount),
               source: 'queued' as const,
+              operationId: op.id,
+              docLabel: `${op.docType1C}${op.docNumber ? ` №${op.docNumber}` : ''}`,
+              description: e.description || op.description,
             }))
         )
     : [];
 
   // Step 1: Compute baseStartNet per leaf account (before ANY dbMovements)
-  // Note: debit - credit = net
   const baseStartNetMap = new Map<string, number>();
+  const baseSubcontoStartNetMap = new Map<string, Map<string, number>>();
   const explicitNoPostingsTurnoverMap = new Map<string, { dt: number; kt: number }>();
 
   const addNet = (map: Map<string, number>, acc: string, delta: number) => {
@@ -157,21 +216,31 @@ export function calculateOsvReport(params: {
     map.set(acc, round2((map.get(acc) ?? 0) + delta));
   };
 
+  const addSubcontoStartNet = (acc: string, subcontoRaw: string | undefined, delta: number) => {
+    if (!acc || acc === '000' || Math.abs(delta) < 0.005) return;
+    const subLabel = normalizeSubcontoLabel(subcontoRaw);
+    const subMap = baseSubcontoStartNetMap.get(acc) ?? new Map<string, number>();
+    subMap.set(subLabel, round2((subMap.get(subLabel) ?? 0) + delta));
+    baseSubcontoStartNetMap.set(acc, subMap);
+  };
+
   const dbPeriodEndsBeforeReportingYear = Boolean(
     reportingYearStart && db1C?.periodEnd && db1C.periodEnd < reportingYearStart
   );
 
-  if (db1C && db1C.rawBalances.length > 0) {
+  if (useDbData && db1C && db1C.rawBalances.length > 0) {
     if (effectiveMode === 'explicit_start_end') {
       for (const b of db1C.rawBalances) {
         if (dbMovements.length === 0 && dbPeriodEndsBeforeReportingYear) {
-          // Historical 1C period ended before 01.01.<reportingYear>: its ending balance is our opening balance!
           const endNet = b.hasExplicitEnd
             ? b.endDebit - b.endCredit
             : b.startDebit - b.startCredit + b.turnoverDebit - b.turnoverCredit;
           addNet(baseStartNetMap, b.account, endNet);
+          addSubcontoStartNet(b.account, b.subconto, endNet);
         } else {
-          addNet(baseStartNetMap, b.account, b.startDebit - b.startCredit);
+          const sNet = b.startDebit - b.startCredit;
+          addNet(baseStartNetMap, b.account, sNet);
+          addSubcontoStartNet(b.account, b.subconto, sNet);
           if (dbMovements.length === 0 && (b.turnoverDebit !== 0 || b.turnoverCredit !== 0)) {
             const prev = explicitNoPostingsTurnoverMap.get(b.account) ?? { dt: 0, kt: 0 };
             explicitNoPostingsTurnoverMap.set(b.account, {
@@ -182,33 +251,35 @@ export function calculateOsvReport(params: {
         }
       }
     } else if (effectiveMode === 'end_balances_reconstructed_start') {
-      // rawBalances represent ending balances AFTER all dbMovements
       for (const b of db1C.rawBalances) {
         const endNet = b.hasExplicitEnd
           ? b.endDebit - b.endCredit
           : b.rawDebit - b.rawCredit;
         addNet(baseStartNetMap, b.account, endNet);
+        addSubcontoStartNet(b.account, b.subconto, endNet);
       }
-      // Subtract all dbMovements to reconstruct exact opening balance at start of DB period:
-      // NetStart = NetEnd - DbTurnoverDebit + DbTurnoverCredit
       for (const m of dbMovements) {
         if (m.debit && m.debit !== '000') {
           addNet(baseStartNetMap, m.debit, -m.amount);
+          addSubcontoStartNet(m.debit, m.debitSubconto, -m.amount);
         }
         if (m.credit && m.credit !== '000') {
           addNet(baseStartNetMap, m.credit, +m.amount);
+          addSubcontoStartNet(m.credit, m.creditSubconto, +m.amount);
         }
       }
     } else {
-      // 'start_balances_forward_end' or 'balances_only'
       for (const b of db1C.rawBalances) {
         if (dbMovements.length === 0 && dbPeriodEndsBeforeReportingYear && b.hasExplicitEnd) {
-          addNet(baseStartNetMap, b.account, b.endDebit - b.endCredit);
+          const eNet = b.endDebit - b.endCredit;
+          addNet(baseStartNetMap, b.account, eNet);
+          addSubcontoStartNet(b.account, b.subconto, eNet);
         } else {
           const startNet = b.hasExplicitStart
             ? b.startDebit - b.startCredit
             : b.rawDebit - b.rawCredit;
           addNet(baseStartNetMap, b.account, startNet);
+          addSubcontoStartNet(b.account, b.subconto, startNet);
           if (
             dbMovements.length === 0 &&
             !dbPeriodEndsBeforeReportingYear &&
@@ -226,17 +297,46 @@ export function calculateOsvReport(params: {
   }
 
   // Step 2: Partition movements relative to [dateFrom, dateTo] and reportingYearStart
-  // - Historical 1C DB movements prior to 01.01.<reportingYear> ALWAYS roll into opening balance
-  // - date < dateFrom -> rolls into periodStartNet
-  // - dateFrom <= date <= dateTo -> period turnovers
-  // - date > dateTo -> excluded from selected period view
   const periodStartNetMap = new Map<string, number>(baseStartNetMap);
+  const subcontoStartMap = new Map<string, Map<string, number>>();
+  for (const [acc, sm] of baseSubcontoStartNetMap.entries()) {
+    subcontoStartMap.set(acc, new Map(sm));
+  }
+  const subcontoTurnMap = new Map<string, Map<string, { dt: number; kt: number }>>();
+
+  const addSubcontoPeriodStart = (acc: string, subRaw: string, delta: number) => {
+    if (!acc || acc === '000') return;
+    const label = normalizeSubcontoLabel(subRaw);
+    const sm = subcontoStartMap.get(acc) ?? new Map<string, number>();
+    sm.set(label, round2((sm.get(label) ?? 0) + delta));
+    subcontoStartMap.set(acc, sm);
+  };
+
+  const addSubcontoTurn = (acc: string, subRaw: string, side: 'dt' | 'kt', amt: number) => {
+    if (!acc || acc === '000') return;
+    const label = normalizeSubcontoLabel(subRaw);
+    const sm = subcontoTurnMap.get(acc) ?? new Map<string, { dt: number; kt: number }>();
+    const cur = sm.get(label) ?? { dt: 0, kt: 0 };
+    if (side === 'dt') cur.dt = round2(cur.dt + amt);
+    else cur.kt = round2(cur.kt + amt);
+    sm.set(label, cur);
+    subcontoTurnMap.set(acc, sm);
+  };
+
   const dbTurnMap = new Map<string, { dt: number; kt: number }>();
   const queuedTurnMap = new Map<string, { dt: number; kt: number }>();
 
   for (const [acc, t] of explicitNoPostingsTurnoverMap.entries()) {
     dbTurnMap.set(acc, { dt: t.dt, kt: t.kt });
   }
+
+  const rawMovementsInPeriodByAcc = new Map<string, MovementRecord[]>();
+  const pushMovementForAcc = (acc: string, m: MovementRecord) => {
+    if (!acc || acc === '000') return;
+    const arr = rawMovementsInPeriodByAcc.get(acc) ?? [];
+    arr.push(m);
+    rawMovementsInPeriodByAcc.set(acc, arr);
+  };
 
   const allMovements = [...dbMovements, ...queuedMovements];
   for (const m of allMovements) {
@@ -249,8 +349,14 @@ export function calculateOsvReport(params: {
     const isAfterEnd = Boolean(dateTo && d && d > dateTo);
 
     if (isBeforeStart) {
-      if (m.debit && m.debit !== '000') addNet(periodStartNetMap, m.debit, +m.amount);
-      if (m.credit && m.credit !== '000') addNet(periodStartNetMap, m.credit, -m.amount);
+      if (m.debit && m.debit !== '000') {
+        addNet(periodStartNetMap, m.debit, +m.amount);
+        addSubcontoPeriodStart(m.debit, m.debitSubconto, +m.amount);
+      }
+      if (m.credit && m.credit !== '000') {
+        addNet(periodStartNetMap, m.credit, -m.amount);
+        addSubcontoPeriodStart(m.credit, m.creditSubconto, -m.amount);
+      }
       continue;
     }
 
@@ -263,11 +369,15 @@ export function calculateOsvReport(params: {
       const cur = targetMap.get(m.debit) ?? { dt: 0, kt: 0 };
       cur.dt = round2(cur.dt + m.amount);
       targetMap.set(m.debit, cur);
+      addSubcontoTurn(m.debit, m.debitSubconto, 'dt', m.amount);
+      pushMovementForAcc(m.debit, m);
     }
     if (m.credit && m.credit !== '000') {
       const cur = targetMap.get(m.credit) ?? { dt: 0, kt: 0 };
       cur.kt = round2(cur.kt + m.amount);
       targetMap.set(m.credit, cur);
+      addSubcontoTurn(m.credit, m.creditSubconto, 'kt', m.amount);
+      pushMovementForAcc(m.credit, m);
     }
   }
 
@@ -279,10 +389,9 @@ export function calculateOsvReport(params: {
   ]);
   leafAccountSet.delete('000');
 
-  // Ensure if both parent '60' and child '60.01' somehow exist in postings, keep '60' as leaf ONLY if it has direct values;
-  // To avoid ambiguity if '60' has direct postings AND '60.01' exists, keep both as leaf accounts if '60' has direct non-zero data,
-  // otherwise synthetic group rows are generated purely from child accounts.
   const leafRows: OsvAccountRow[] = [];
+  const subcontoRowsByAccount: Record<string, OsvSubcontoRow[]> = {};
+  const movementsByAccount: Record<string, OsvAccountMovement[]> = {};
 
   const sortedLeafCodes = Array.from(leafAccountSet).sort((a, b) =>
     a.localeCompare(b, 'ru', { numeric: true })
@@ -290,8 +399,6 @@ export function calculateOsvReport(params: {
 
   for (const code of sortedLeafCodes) {
     const info = getAccountInfo(code);
-    // Treat leaf account with its own type; if charting marks '60' as group because of '60.01',
-    // check whether '60' actually had direct postings/balances:
     const startNet = periodStartNetMap.get(code) ?? 0;
     const dbT = dbTurnMap.get(code) ?? { dt: 0, kt: 0 };
     const qT = queuedTurnMap.get(code) ?? { dt: 0, kt: 0 };
@@ -330,9 +437,82 @@ export function calculateOsvReport(params: {
       queuedTurnoverDebit: qT.dt,
       queuedTurnoverCredit: qT.kt,
     });
+
+    // Subconto breakdown for this leaf account
+    const subStarts = subcontoStartMap.get(code);
+    const subTurns = subcontoTurnMap.get(code);
+    const allSubLabels = new Set<string>([
+      ...(subStarts ? subStarts.keys() : []),
+      ...(subTurns ? subTurns.keys() : []),
+    ]);
+    if (allSubLabels.size > 0) {
+      const subRows: OsvSubcontoRow[] = [];
+      for (const label of Array.from(allSubLabels).sort((a, b) => a.localeCompare(b, 'ru'))) {
+        const sNet = subStarts?.get(label) ?? 0;
+        const t = subTurns?.get(label) ?? { dt: 0, kt: 0 };
+        const eNet = round2(sNet + t.dt - t.kt);
+        if (
+          Math.abs(sNet) < 0.005 &&
+          Math.abs(t.dt) < 0.005 &&
+          Math.abs(t.kt) < 0.005 &&
+          Math.abs(eNet) < 0.005
+        ) {
+          continue;
+        }
+        const sSides = splitNetToSides(sNet, info.type);
+        const eSides = splitNetToSides(eNet, info.type);
+        subRows.push({
+          subcontoKey: `${code}::${label}`,
+          subcontoLabel: label,
+          startDebit: sSides.debit,
+          startCredit: sSides.credit,
+          turnoverDebit: t.dt,
+          turnoverCredit: t.kt,
+          endDebit: eSides.debit,
+          endCredit: eSides.credit,
+          hasRedEnd: eSides.isRed,
+        });
+      }
+      if (subRows.length > 0) {
+        subcontoRowsByAccount[code] = subRows;
+      }
+    }
+
+    // Account Card (Карточка счёта) chronological movements
+    const accMovs = (rawMovementsInPeriodByAcc.get(code) ?? []).slice().sort((a, b) => {
+      if (a.date !== b.date) return (a.date || '').localeCompare(b.date || '');
+      return a.id.localeCompare(b.id);
+    });
+    let runningNet = startNet;
+    const cardRows: OsvAccountMovement[] = [];
+    for (const m of accMovs) {
+      const isDt = m.debit === code;
+      const isKt = m.credit === code;
+      const dtAmt = isDt ? m.amount : 0;
+      const ktAmt = isKt ? m.amount : 0;
+      runningNet = round2(runningNet + dtAmt - ktAmt);
+      const runSides = splitNetToSides(runningNet, info.type);
+      cardRows.push({
+        id: `${code}-${m.id}`,
+        date: m.date,
+        source: m.source,
+        operationId: m.operationId,
+        docLabel: m.docLabel,
+        description: m.description,
+        corrAccount: isDt ? m.credit || '—' : m.debit || '—',
+        subconto: isDt ? m.debitSubconto : m.creditSubconto,
+        debitAmount: dtAmt,
+        creditAmount: ktAmt,
+        runningNet,
+        runningDebit: runSides.debit,
+        runningCredit: runSides.credit,
+        isRedRunning: runSides.isRed,
+      });
+    }
+    movementsByAccount[code] = cardRows;
   }
 
-  // Build synthetic group rows for roots that have subaccounts (e.g. 10, 19, 20, 41, 60, 62, 68, 69, 76, 90, 91, 99)
+  // Build synthetic group rows for roots that have subaccounts
   const childrenByRoot = new Map<string, OsvAccountRow[]>();
   const directRootLeafSet = new Set(
     leafRows.filter((r) => !r.code.includes('.')).map((r) => r.code)
@@ -367,7 +547,6 @@ export function calculateOsvReport(params: {
       const sumQTurnDt = round2(children.reduce((s, c) => s + c.queuedTurnoverDebit, 0));
       const sumQTurnKt = round2(children.reduce((s, c) => s + c.queuedTurnoverCredit, 0));
 
-      // In 1C 8.3 BP 3.0, synthetic accounts 90, 91, 99 display collapsed (свёрнутое) balance at root level
       const isCollapsedFinancialRoot = root === '90' || root === '91' || root === '99';
 
       let gStartDt = 0;
@@ -412,11 +591,19 @@ export function calculateOsvReport(params: {
         queuedTurnoverDebit: sumQTurnDt,
         queuedTurnoverCredit: sumQTurnKt,
       });
+
+      // Aggregate root movements for clicking synthetic group rows in OSV
+      const mergedMovs = children
+        .flatMap((c) => movementsByAccount[c.code] ?? [])
+        .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+      if (mergedMovs.length > 0) {
+        movementsByAccount[root] = mergedMovs;
+      }
     }
     rows.push(leaf);
   }
 
-  // Grand totals strictly over balance-sheet leafRows (excluding off-balance single-entry accounts like МЦ.02 / МЦ.04 / 001–011)
+  // Grand totals strictly over balance-sheet leafRows (excluding off-balance accounts)
   const balanceLeafRows = leafRows.filter((r) => !isOffBalanceAccountCode(r.code));
   const totalStartDebit = round2(balanceLeafRows.reduce((s, r) => s + r.startDebit, 0));
   const totalStartCredit = round2(balanceLeafRows.reduce((s, r) => s + r.startCredit, 0));
@@ -429,14 +616,172 @@ export function calculateOsvReport(params: {
   const turnoverDiff = round2(totalTurnoverDebit - totalTurnoverCredit);
   const endDiff = round2(totalEndDebit - totalEndCredit);
 
+  const isStartBalanced = Math.abs(startDiff) < 0.01;
+  const isTurnoverBalanced = Math.abs(turnoverDiff) < 0.01;
+  const isEndBalanced = Math.abs(endDiff) < 0.01;
+
+  // Build the 5 Smart Auditor Hints
+  const auditorHints: OsvAuditorHint[] = [];
+
+  // 1. Double-entry balance check
+  if (balanceLeafRows.length > 0) {
+    if (isStartBalanced && isTurnoverBalanced && isEndBalanced) {
+      auditorHints.push({
+        id: 'hint-double-entry-ok',
+        checkType: 'double_entry_balance',
+        severity: 'ok',
+        title: 'Контроль двойной записи пройден (Σ Дт = Σ Кт)',
+        explanation: `Входящее сальдо (${formatMoneyRu(totalStartDebit)}), обороты за период (${formatMoneyRu(totalTurnoverDebit)}) и исходящее сальдо (${formatMoneyRu(totalEndDebit)}) полностью сбалансированы.`,
+      });
+    } else {
+      auditorHints.push({
+        id: 'hint-double-entry-err',
+        checkType: 'double_entry_balance',
+        severity: 'error',
+        title: 'Нарушено равенство Дебета и Кредита в ОСВ',
+        explanation: `Расхождение: на начало ${formatMoneyRu(startDiff)}, по оборотам ${formatMoneyRu(turnoverDiff)}, на конец ${formatMoneyRu(endDiff)}. Проверьте полноту начальных остатков (счёт 000) или односторонние ручные проводки.`,
+        howToFix1C:
+          'В 1С:БП 3.0 откройте «Главное → Помощник ввода остатков» и убедитесь, что вспомогательный счёт 000 закрылся в ноль.',
+      });
+    }
+  }
+
+  // 2. Red (negative) balances on active/passive accounts
+  for (const r of balanceLeafRows) {
+    if (!r.hasRedEnd) continue;
+    const movs = movementsByAccount[r.code] ?? [];
+    const firstRedMov = movs.find((m) => m.isRedRunning);
+    const val = r.type === 'active' ? r.endDebit : r.endCredit;
+    auditorHints.push({
+      id: `hint-red-${r.code}`,
+      checkType: 'red_balance',
+      severity: 'error',
+      accountCode: r.code,
+      operationId: firstRedMov?.operationId,
+      title: `Красный (отрицательный) остаток на счёте ${r.code} «${r.name}»: ${formatMoneyRu(val)}`,
+      explanation: firstRedMov
+        ? `Счёт ушёл в минус ${formatRuDateShort(firstRedMov.date)} на документе «${firstRedMov.docLabel}» (${firstRedMov.description}). Вероятно, пропущено поступление/входящий остаток или перепутано время проведения документов за один день.`
+        : `Отрицательное конечное сальдо на ${r.type === 'active' ? 'активном' : 'пассивном'} счёте ${r.code}. Не хватает входящего остатка или приходной операции.`,
+      howToFix1C:
+        r.code.startsWith('50') || r.code.startsWith('51')
+          ? 'Проверьте входящий остаток денежных средств и очерёдность выписок/кассовых ордеров по времени.'
+          : 'Проверьте документ поступления, склад и субсчёт учёта (например, 10.01 vs 10.08), затем перепроведите документы в хронологическом порядке.',
+      quickAction: firstRedMov?.operationId ? 'jump_operation' : undefined,
+      quickActionLabel: firstRedMov?.operationId ? 'Перейти к операции' : undefined,
+    });
+  }
+
+  // 3. Unclosed cost & financial result accounts (20.01, 25, 26, 44.01, 90, 91)
+  const unclosedCostRows = balanceLeafRows.filter(
+    (r) =>
+      (r.code === '20.01' ||
+        r.code.startsWith('25') ||
+        r.code === '26' ||
+        r.code.startsWith('44')) &&
+      (Math.abs(r.endDebit) >= 0.01 || Math.abs(r.endCredit) >= 0.01)
+  );
+  const unclosedFinRoots = rows.filter(
+    (r) =>
+      r.isGroup &&
+      (r.code === '90' || r.code === '91') &&
+      (Math.abs(r.endDebit) >= 0.01 || Math.abs(r.endCredit) >= 0.01)
+  );
+  if (unclosedCostRows.length > 0 || unclosedFinRoots.length > 0) {
+    const codes = [
+      ...unclosedCostRows.map((r) => `${r.code} (${formatMoneyRu(r.endDebit || r.endCredit)})`),
+      ...unclosedFinRoots.map((r) => `${r.code} свёрнуто (${formatMoneyRu(r.endDebit || r.endCredit)})`),
+    ].join(', ');
+    auditorHints.push({
+      id: 'hint-unclosed-period',
+      checkType: 'unclosed_accounts',
+      severity: 'warning',
+      accountCode: unclosedCostRows[0]?.code ?? unclosedFinRoots[0]?.code,
+      title: `Не закрыты счета затрат и финансового результата на конец периода`,
+      explanation: `Остаток числится на счетах: ${codes}. В законченной учебной работе на конец месяца счета 25, 26, 44 и свёрнутое сальдо счетов 90 и 91 должны равняться 0,00 ₽ (счёт 20.01 имеет остаток только при наличии незавершённого производства).`,
+      howToFix1C:
+        'В 1С:БП 3.0 откройте «Операции → Закрытие месяца» и нажмите «Выполнить закрытие месяца» (или нажмите кнопку автоформирования закрытия ниже).',
+      quickAction: effectiveSourceMode !== 'db_only' ? 'run_autofix' : undefined,
+      quickActionLabel:
+        effectiveSourceMode !== 'db_only' ? 'Сформировать закрытие периода' : undefined,
+    });
+  }
+
+  // 4. Unoffset advances (60.01 + 60.02 or 62.01 + 62.02 simultaneously)
+  const checkAdvancePair = (debtCode: string, advCode: string, titleLabel: string) => {
+    const debtSubs = subcontoRowsByAccount[debtCode] ?? [];
+    const advSubs = subcontoRowsByAccount[advCode] ?? [];
+    const advBySub = new Map(advSubs.map((s) => [s.subcontoLabel, s]));
+    for (const dSub of debtSubs) {
+      if (dSub.subcontoLabel === 'Без аналитики (субконто)') continue;
+      const aSub = advBySub.get(dSub.subcontoLabel);
+      if (!aSub) continue;
+      const debtBal = debtCode === '60.01' ? dSub.endCredit : dSub.endDebit;
+      const advBal = advCode === '60.02' ? aSub.endDebit : aSub.endCredit;
+      if (debtBal >= 0.01 && advBal >= 0.01) {
+        const offsetAmt = Math.min(debtBal, advBal);
+        auditorHints.push({
+          id: `hint-adv-${debtCode}-${dSub.subcontoLabel}`,
+          checkType: 'unoffset_advances',
+          severity: 'warning',
+          accountCode: debtCode,
+          title: `Незачтённый аванс по ${titleLabel} «${dSub.subcontoLabel}» на ${formatMoneyRu(offsetAmt)}`,
+          explanation: `Одновременно висит остаток на ${debtCode} (${formatMoneyRu(debtBal)}) и аванс на ${advCode} (${formatMoneyRu(advBal)}). В 1С это чаще всего происходит из-за разных договоров в выписке и накладной или нарушения хронологии документов.`,
+          howToFix1C:
+            'Проверьте совпадение договора в оплате и накладной и перепроведите накладную (Зачёт авансов: Автоматически), либо оформите «Корректировка долга → Зачёт авансов».',
+          quickAction: effectiveSourceMode !== 'db_only' ? 'run_autofix' : undefined,
+          quickActionLabel: effectiveSourceMode !== 'db_only' ? 'Зачесть аванс автоматически' : undefined,
+        });
+      }
+    }
+  };
+  checkAdvancePair('60.01', '60.02', 'поставщику');
+  checkAdvancePair('62.01', '62.02', 'покупателю');
+
+  // 5. Stuck input VAT on 19.* or uncommissioned equipment on 08.*
+  const stuck19 = balanceLeafRows.filter((r) => r.code.startsWith('19') && r.endDebit >= 0.01);
+  if (stuck19.length > 0) {
+    const summary19 = stuck19.map((r) => `${r.code}: ${formatMoneyRu(r.endDebit)}`).join(', ');
+    auditorHints.push({
+      id: 'hint-stuck-19',
+      checkType: 'stuck_vat_or_capex',
+      severity: 'warning',
+      accountCode: stuck19[0].code,
+      title: `Не принят к вычету входной НДС на счёте 19 (${summary19})`,
+      explanation:
+        'Дебетовое сальдо на счёте 19 означает, что оприходованы товары/услуги/ОС с НДС, но не зарегистрирован счёт-фактура поставщика (или УПД со статусом 1) либо не сформированы записи книги покупок.',
+      howToFix1C:
+        'Проверьте регистрацию счёта-фактуры в подвале документа поступления или выполните «Операции → Регламентные операции НДС → Формирование записей книги покупок».',
+    });
+  }
+
+  const stuck08 = balanceLeafRows.filter((r) => r.code.startsWith('08') && r.endDebit >= 0.01);
+  if (stuck08.length > 0) {
+    const summary08 = stuck08.map((r) => `${r.code}: ${formatMoneyRu(r.endDebit)}`).join(', ');
+    auditorHints.push({
+      id: 'hint-stuck-08',
+      checkType: 'stuck_vat_or_capex',
+      severity: 'warning',
+      accountCode: stuck08[0].code,
+      title: `Не введены в эксплуатацию внеоборотные активы на счёте 08 (${summary08})`,
+      explanation:
+        'Оборудование или капвложения числятся на счёте 08 и ещё не перенесены на счёт 01.01. Пока объект на счёте 08, амортизация по нему не начисляется.',
+      howToFix1C:
+        'Если по условию задачи объект должен быть введён в работу, оформите документ «ОС и НМА → Принятие к учёту ОС» (Дт 01.01 Кт 08.04.1).',
+    });
+  }
+
   return {
     dateFrom,
     dateTo,
-    includeQueuedOperations,
+    includeQueuedOperations: useQueuedData,
+    sourceMode: effectiveSourceMode,
     balanceMode: effectiveMode,
     balanceModeDescription,
     rows,
     leafRows,
+    subcontoRowsByAccount,
+    movementsByAccount,
+    auditorHints,
     totals: {
       startDebit: totalStartDebit,
       startCredit: totalStartCredit,
@@ -447,9 +792,9 @@ export function calculateOsvReport(params: {
       startDiff,
       turnoverDiff,
       endDiff,
-      isStartBalanced: Math.abs(startDiff) < 0.01,
-      isTurnoverBalanced: Math.abs(turnoverDiff) < 0.01,
-      isEndBalanced: Math.abs(endDiff) < 0.01,
+      isStartBalanced,
+      isTurnoverBalanced,
+      isEndBalanced,
     },
   };
 }

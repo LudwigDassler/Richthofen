@@ -477,6 +477,11 @@ export interface RawDraftOperationInput {
   expenseItemName?: string;
   cashFlowItemName?: string;
   employeeName?: string;
+  employeePosition?: string;
+  monthlySalary?: number;
+  injuryInsuranceRate?: number;
+  usefulLifeMonths?: number;
+  depreciationBaseAmount?: number;
   costAccountHint?: string;
   materialAccountHint?: string;
   directionHint?: 'in' | 'out';
@@ -556,6 +561,28 @@ export function stemRuItemKey(raw: string): string {
     'для',
     'при',
     'или',
+    'со',
+    'сроком',
+    'срок',
+    'полезного',
+    'полезный',
+    'полезной',
+    'использования',
+    'использование',
+    'спи',
+    'месяцев',
+    'месяца',
+    'месяц',
+    'мес',
+    'лет',
+    'года',
+    'год',
+    'линейным',
+    'линейный',
+    'способом',
+    'способ',
+    'амортизации',
+    'амортизация',
   ]);
 
   const tokens = raw
@@ -786,6 +813,19 @@ export function detectOperationClassification(
     };
   }
 
+  // 9b. HR Hiring / Employment Order (Приём на работу — кадровый учёт окладов без проводок)
+  if (
+    /принят[аы]?\s+на\s+работу|прием\s+на\s+работу|оформлен[аы]?\s+в\s+штат|трудовой\s+договор.*оклад/iu.test(
+      itemAndDescText
+    )
+  ) {
+    return {
+      category: 'hr_hire',
+      docType1C: 'ПриемНаРаботу',
+      documentSubKind1C: 'Приём на работу (регистрация штатного оклада)',
+    };
+  }
+
   // 10. Insurance & Payroll Accruals
   if (
     /начислен\p{L}*\s+страхов\p{L}*\s+взнос/iu.test(itemAndDescText) &&
@@ -799,7 +839,7 @@ export function detectOperationClassification(
     };
   }
   if (
-    /начислен[аоы]?\s+(заработн|зарплат|оплата труда)|расчетная ведомость|начисление зарплаты/i.test(
+    /начислен[аоы]?\s+(?:заработн|зарплат|оплат\p{L}*\s+труд|з\/п|зп(?=$|[^\p{L}]))|расчетная\s+ведомость|начисление\s+зарплат/iu.test(
       itemAndDescText
     ) &&
     draft.directionHint !== 'out'
@@ -808,6 +848,20 @@ export function detectOperationClassification(
       category: 'payroll_accrual',
       docType1C: 'НачислениеЗарплаты',
       documentSubKind1C: 'Начисление зарплаты и взносов',
+    };
+  }
+
+  // 10b. Payroll Payout (both bank 51 and cash 50.01)
+  if (
+    /(?:выплачен|выплат|перечислен|выдан)\p{L}*(?:\s+(?:с\s+р\/с(?:ч)?|с\s+расчетн\p{L}*\s+счет\p{L}*|из\s+касс\p{L}*|по\s+рко|наличн\p{L}*|на\s+банковск\p{L}*\s+карт\p{L}*|на\s+карт\p{L}*|по\s+ведомост\p{L}*|по\s+реестр\p{L}*|сотрудник\p{L}*|работник\p{L}*|персонал\p{L}*))*\s+(?:заработн\p{L}*\s+плат|зарплат|з\/п|оплат\p{L}*\s+труд)|зарплат\p{L}*\s+по\s+ведомост|(?:выплачен|выплат|перечислен)\p{L}*.*аванс\p{L}*\s+за\s+перв\p{L}*\s+половин/iu.test(
+      itemAndDescText
+    )
+  ) {
+    const isCashPayout = /из\s+касс|(?:^|[^\p{L}])рко(?=$|[^\p{L}])|наличн/iu.test(itemAndDescText);
+    return {
+      category: 'payroll_payout',
+      docType1C: isCashPayout ? 'ВыдачаНаличных' : 'СписаниеСРасчетногоСчета',
+      documentSubKind1C: isCashPayout ? 'Выплата заработной платы по ведомости' : 'Перечисление заработной платы',
     };
   }
 
@@ -859,19 +913,6 @@ export function detectOperationClassification(
         draft.directionHint === 'out' || /оплат|списан|перечислен/i.test(itemAndDescText)
           ? 'СписаниеСРасчетногоСчета'
           : 'ОперацияБух',
-    };
-  }
-
-  // 15. Payroll Payout
-  if (
-    /выплат\p{L}*\s+(?:заработн|зарплат)|перечислен\p{L}*\s+(?:заработн|зарплат)|зарплата по ведомости|аванс за первую половину/iu.test(
-      itemAndDescText
-    )
-  ) {
-    return {
-      category: 'payroll_payout',
-      docType1C: 'СписаниеСРасчетногоСчета',
-      documentSubKind1C: 'Перечисление заработной платы',
     };
   }
 
@@ -1297,12 +1338,13 @@ export function bindAndGenerateOperation(
     'depreciation_accrual',
     'insurance_accrual',
     'payroll_accrual',
+    'hr_hire',
     'closing',
   ].includes(preClassification.category);
 
   // For strictly internal operations, never pollute counterparty with employee or stray text
   if (isStrictlyInternalNoCpOp) {
-    if (!employeeName && cpName && ['workwear_issue', 'os_commissioning', 'payroll_accrual'].includes(preClassification.category)) {
+    if (!employeeName && cpName && ['workwear_issue', 'os_commissioning', 'payroll_accrual', 'hr_hire'].includes(preClassification.category)) {
       employeeName = cpName;
     }
     cpName = '';
@@ -1316,7 +1358,7 @@ export function bindAndGenerateOperation(
 
   // Match employee against db1C.individuals if applicable
   if (
-    ['workwear_issue', 'os_commissioning', 'payroll_accrual', 'payroll_payout'].includes(
+    ['workwear_issue', 'os_commissioning', 'payroll_accrual', 'payroll_payout', 'hr_hire'].includes(
       preClassification.category
     ) &&
     db1C
@@ -1749,8 +1791,31 @@ export function bindAndGenerateOperation(
   // --- 6. Automatic Calculation of Amount + VAT + Stock Batch Tracking ---
   const descLower = draft.description.toLowerCase();
   const priorOps = batchContext?.priorOperations ?? [];
-  const hadExplicitInputAmount = Math.abs(draft.amount) >= 0.01;
-  let effectiveDraftAmount = round2(Math.abs(draft.amount));
+  const hadExplicitInputAmount =
+    category === 'hr_hire' ? false : Math.abs(draft.amount) >= 0.01;
+  let effectiveDraftAmount =
+    category === 'hr_hire' ? 0 : round2(Math.abs(draft.amount));
+  let resolvedMonthlySalary =
+    category === 'hr_hire'
+      ? round2(Math.abs(draft.monthlySalary ?? draft.amount ?? 0))
+      : draft.monthlySalary && draft.monthlySalary > 0
+        ? round2(draft.monthlySalary)
+        : undefined;
+  const resolvedEmployeePosition = draft.employeePosition?.trim() || undefined;
+  const resolvedInjuryRate =
+    draft.injuryInsuranceRate !== undefined && draft.injuryInsuranceRate >= 0
+      ? draft.injuryInsuranceRate
+      : 0.2;
+  let resolvedUsefulLifeMonths =
+    draft.usefulLifeMonths && draft.usefulLifeMonths > 0
+      ? Math.round(draft.usefulLifeMonths)
+      : category === 'os_commissioning' || category === 'depreciation_accrual'
+        ? 60
+        : undefined;
+  let resolvedDeprBaseAmount = draft.depreciationBaseAmount;
+  let payrollStaffSummary: QueuedOperation['payrollStaffSummary'] = undefined;
+  let calculationProvenance: string | undefined;
+
   let amountMode: OperationAmountMode = hadExplicitInputAmount ? 'explicit' : 'required_missing';
   let amountCalculationNote = draft.amountCalculationNote;
   let stockSourceNote: string | undefined;
@@ -1771,13 +1836,148 @@ export function bindAndGenerateOperation(
     category === 'workwear_issue' ? inferredMat.offBalanceAccount || 'МЦ.02' : undefined;
   const resolvedCostAccount =
     draft.costAccountHint ||
-    (/администрац|офис|бухгалтер|директор|общехозяйствен/iu.test(descLower)
+    (/администрац|офис|бухгалтер|директор|общехозяйствен|управленч/iu.test(
+      `${descLower} ${resolvedEmployeePosition ?? ''}`
+    )
       ? '26'
       : /общепроизводствен|цехов/iu.test(descLower)
         ? '25'
         : /торгов|магазин|продаж/iu.test(descLower)
           ? '44.01'
-          : '20.01');
+          : category === 'payroll_accrual' || category === 'insurance_accrual'
+            ? db1C?.postings.find((p) => p.credit === '70' && ['20.01', '26', '44.01'].includes(p.debit))
+                ?.debit ??
+              (priorOps.find((p) => p.category === 'hr_hire' && p.costAccount)?.costAccount ||
+                (/рабоч|прораб|каменщик|сварщик|монтажник|мастер|производств|объект/iu.test(descLower)
+                  ? '20.01'
+                  : '26'))
+            : '20.01');
+
+  // 6a-0. HR Hiring ('hr_hire'): record employee & monthly salary into chronological staff roster (0 balance postings)
+  if (category === 'hr_hire') {
+    amountMode = 'calculated_by_1c';
+    const salLabel =
+      resolvedMonthlySalary && resolvedMonthlySalary >= 0.01
+        ? `${resolvedMonthlySalary.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽/мес.`
+        : 'по штатному расписанию';
+    calculationProvenance = `Кадровый приказ: ${employeeName || 'Сотрудник'}${resolvedEmployeePosition ? ` (${resolvedEmployeePosition})` : ''}, оклад ${salLabel} — используется для автозаполнения «Начисление зарплаты»`;
+    amountCalculationNote = calculationProvenance;
+  }
+
+  // 6a-1. Payroll & Insurance Accrual: pull active staff roster salaries from 1C DB + prior ПриемНаРаботу / prior НачислениеЗарплаты
+  if (category === 'payroll_accrual' || category === 'insurance_accrual') {
+    const rosterMap = new Map<
+      string,
+      { name: string; position?: string; salary: number; source: string }
+    >();
+
+    // 1. Check 1C DB employees / individuals for salary metadata
+    for (const emp of [...(db1C?.employees ?? []), ...(db1C?.individuals ?? [])]) {
+      const rawSal =
+        emp.extra?.salary ??
+        emp.extra?.оклад ??
+        emp.extra?.Оклад ??
+        emp.extra?.fot ??
+        emp.extra?.ФОТ ??
+        '';
+      const parsedSal = Number(String(rawSal).replace(/[^\d.,-]/g, '').replace(',', '.'));
+      if (Number.isFinite(parsedSal) && parsedSal > 0) {
+        const key = normalizeEntityKey(emp.name) || emp.id;
+        rosterMap.set(key, {
+          name: emp.name,
+          position: emp.extra?.position || emp.extra?.должность || emp.kind,
+          salary: round2(parsedSal),
+          source: 'Штатное расписание базы 1С',
+        });
+      }
+    }
+
+    // 2. Check chronological prior ПриемНаРаботу operations up to draft.date
+    for (const pOp of priorOps) {
+      if (!pOp.includeInProcessing || pOp.isDuplicateIn1C) continue;
+      if (draft.date && pOp.date && pOp.date > draft.date) continue;
+      if (pOp.category === 'hr_hire') {
+        const sal = round2(pOp.monthlySalary ?? pOp.amount ?? 0);
+        if (sal > 0) {
+          const empLabel = pOp.employeeName || `Сотрудник (${pOp.date})`;
+          const key = normalizeEntityKey(empLabel) || pOp.id;
+          rosterMap.set(key, {
+            name: empLabel,
+            position: pOp.employeePosition,
+            salary: sal,
+            source: `Приём на работу от ${pOp.date}`,
+          });
+        }
+      }
+    }
+
+    const rosterArr = Array.from(rosterMap.values());
+    if (rosterArr.length > 0) {
+      payrollStaffSummary = rosterArr;
+    } else if (db1C && (db1C.employees.length > 0 || db1C.individuals.length > 0)) {
+      const namesSource = db1C.employees.length > 0 ? db1C.employees : db1C.individuals;
+      payrollStaffSummary = namesSource.slice(0, 8).map((e) => ({
+        name: e.name,
+        position: e.kind,
+        salary: 0,
+        source: 'Справочник сотрудников 1С (оклад не выгружен)',
+      }));
+    }
+
+    const rosterFot = round2(rosterArr.reduce((s, r) => s + r.salary, 0));
+
+    if (resolvedMonthlySalary && resolvedMonthlySalary >= 0.01 && effectiveDraftAmount < 0.01) {
+      effectiveDraftAmount =
+        category === 'insurance_accrual'
+          ? round2(resolvedMonthlySalary * (0.3 + resolvedInjuryRate / 100))
+          : resolvedMonthlySalary;
+      amountMode = 'explicit';
+      calculationProvenance = `Рассчитано из указанного штатного ФОТ за месяц: ${resolvedMonthlySalary.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽`;
+      amountCalculationNote = calculationProvenance;
+    } else if (effectiveDraftAmount < 0.01 && rosterFot >= 0.01) {
+      resolvedMonthlySalary = rosterFot;
+      effectiveDraftAmount =
+        category === 'insurance_accrual'
+          ? round2(rosterFot * (0.3 + resolvedInjuryRate / 100))
+          : rosterFot;
+      amountMode = 'from_related_doc';
+      const breakdown = rosterArr
+        .map((r) => `${r.name}: ${r.salary.toLocaleString('ru-RU')} ₽`)
+        .join(' + ');
+      calculationProvenance = `Авторасчёт из кадровых приказов / штата (${breakdown}) → ФОТ ${rosterFot.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽`;
+      amountCalculationNote = calculationProvenance;
+    } else if (effectiveDraftAmount < 0.01) {
+      // Inherit monthly ФОТ from earlier payroll_accrual in the same reporting year if already filled
+      const prevPayroll = [...priorOps]
+        .reverse()
+        .find(
+          (p) =>
+            p.includeInProcessing &&
+            p.category === 'payroll_accrual' &&
+            (p.monthlySalary ?? p.amount) >= 0.01 &&
+            (!draft.date || !p.date || p.date <= draft.date)
+        );
+      if (prevPayroll) {
+        const inheritedFot = round2(prevPayroll.monthlySalary ?? prevPayroll.amount);
+        resolvedMonthlySalary = inheritedFot;
+        effectiveDraftAmount =
+          category === 'insurance_accrual'
+            ? round2(inheritedFot * (0.3 + resolvedInjuryRate / 100))
+            : inheritedFot;
+        amountMode = 'from_related_doc';
+        calculationProvenance = `Штатный ФОТ унаследован из предыдущего начисления ЗП от ${prevPayroll.date}: ${inheritedFot.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽`;
+        amountCalculationNote = calculationProvenance;
+      } else {
+        amountMode = 'calculated_by_1c';
+        calculationProvenance =
+          'Оклады сотрудников ещё не заданы в базе 1С или кадровых приказах — укажите месячный ФОТ в карточке операции для расчёта НДФЛ 13% и взносов 30,2%';
+        amountCalculationNote = calculationProvenance;
+      }
+    } else {
+      resolvedMonthlySalary = effectiveDraftAmount;
+      calculationProvenance = `ФОТ задан в условии операции: ${effectiveDraftAmount.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽`;
+    }
+  }
 
   // 6a. Compute from quantity × unitPrice if present in row/text
   if (
@@ -1789,9 +1989,10 @@ export function bindAndGenerateOperation(
   ) {
     effectiveDraftAmount = round2(effectiveQty * effectiveUnitPrice);
     amountCalculationNote = `Рассчитано автоматически: ${effectiveQty} × ${effectiveUnitPrice.toFixed(2)} ₽ = ${effectiveDraftAmount.toFixed(2)} ₽`;
+    calculationProvenance = amountCalculationNote;
   }
 
-  // 6b. Compute tax/social contribution debt payoff from current credit balances on 68.* / 69.*
+  // 6b. Compute tax/social contribution debt payoff from current credit balances on 68.* / 69.* as of draft.date
   const isCombinedTaxAndContrib =
     category === 'tax_payment' &&
     (/налог\p{L}*\s+и\s+(?:страхов\p{L}*\s+)?взнос|задолженност\p{L}*\s+по\s+налог|в\s+бюджет\s+задолженност/iu.test(
@@ -1803,6 +2004,7 @@ export function bindAndGenerateOperation(
     const runningOsv = calculateOsvReport({
       db1C,
       operations: priorOps,
+      dateTo: draft.date || undefined,
       reportingYear: batchContext?.reportingYear,
       includeQueuedOperations: true,
     });
@@ -1828,9 +2030,10 @@ export function bindAndGenerateOperation(
           amount: r.endCredit,
           name: r.name,
         }));
-        amountCalculationNote = `Рассчитано из кредитового сальдо счетов 68/69: ${candidateTaxRows
+        amountCalculationNote = `Рассчитано из кредитового сальдо счетов 68/69 на ${draft.date || 'дату платежа'}: ${candidateTaxRows
           .map((r) => `${r.code} (${r.endCredit.toFixed(2)} ₽)`)
           .join(' + ')} = ${sumCreditBalances.toFixed(2)} ₽`;
+        calculationProvenance = amountCalculationNote;
       } else if (Math.abs(effectiveDraftAmount - sumCreditBalances) < 0.05 && candidateTaxRows.length > 1) {
         taxBreakdownFromBalances = candidateTaxRows.map((r) => ({
           account: r.code,
@@ -1842,13 +2045,14 @@ export function bindAndGenerateOperation(
   }
 
   // 6c. Compute empty amount from linked earlier operation (e.g., 100% advance in Row 2 -> goods receipt in Row 3)
-  if (effectiveDraftAmount < 0.01 && priorOps.length > 0) {
+  if (effectiveDraftAmount < 0.01 && priorOps.length > 0 && doesOperationRequireCounterparty(category)) {
     const normCp = normalizeEntityKey(cpName);
     const normNom = normalizeEntityKey(nomName);
 
     for (let i = priorOps.length - 1; i >= 0; i--) {
       const prev = priorOps[i];
       if (!prev.includeInProcessing || prev.amount <= 0) continue;
+      if (draft.date && prev.date && prev.date > draft.date) continue;
       const prevCpNorm = normalizeEntityKey(prev.counterpartyName);
       const sameCp =
         (cpInn && prev.counterpartyInn && cpInn === prev.counterpartyInn) ||
@@ -1862,6 +2066,7 @@ export function bindAndGenerateOperation(
         if (inheritedVatRule === undefined) inheritedVatRule = prev.vatRule;
         if (inheritedVatRate === undefined && prev.vatRate > 0) inheritedVatRate = prev.vatRate;
         amountCalculationNote = `Рассчитано по связанной операции от ${prev.date} (${effectiveQty} × ${prev.unitPrice.toFixed(2)} ₽ = ${effectiveDraftAmount.toFixed(2)} ₽)`;
+        calculationProvenance = amountCalculationNote;
         break;
       }
 
@@ -1873,12 +2078,12 @@ export function bindAndGenerateOperation(
         if (inheritedVatRule === undefined) inheritedVatRule = prev.vatRule;
         if (inheritedVatRate === undefined && prev.vatRate > 0) inheritedVatRate = prev.vatRate;
         amountCalculationNote = `Рассчитано по связанному авансу/документу «${prev.counterpartyName}» (${effectiveQty} шт. = ${effectiveDraftAmount.toFixed(2)} ₽)`;
+        calculationProvenance = amountCalculationNote;
         break;
       }
 
-      // Check available advance on 60.02 / 62.02 for this counterparty
       if (
-        ['purchase_goods', 'purchase_materials', 'purchase_services'].includes(category) &&
+        ['purchase_goods', 'purchase_materials', 'purchase_services', 'purchase_equipment'].includes(category) &&
         prev.entries.some((e) => e.debit === '60.02')
       ) {
         const availAdv = computeCounterpartyAdvanceBalance('60.02', cpName, cpInn, db1C, priorOps);
@@ -1891,7 +2096,8 @@ export function bindAndGenerateOperation(
         }
         if (inheritedVatRule === undefined) inheritedVatRule = prev.vatRule;
         if (inheritedVatRate === undefined && prev.vatRate > 0) inheritedVatRate = prev.vatRate;
-        amountCalculationNote = `Сумма определена по связанному авансу поставщику «${cpName}» (счёт 60.02): ${effectiveDraftAmount.toFixed(2)} ₽`;
+        amountCalculationNote = `Сумма определена по связанному авансу поставщику «${cpName}» от ${prev.date} (счёт 60.02): ${effectiveDraftAmount.toFixed(2)} ₽`;
+        calculationProvenance = amountCalculationNote;
         break;
       }
 
@@ -1903,16 +2109,18 @@ export function bindAndGenerateOperation(
         effectiveDraftAmount = availAdv > 0.01 ? availAdv : prev.amount;
         if (inheritedVatRule === undefined) inheritedVatRule = prev.vatRule;
         if (inheritedVatRate === undefined && prev.vatRate > 0) inheritedVatRate = prev.vatRate;
-        amountCalculationNote = `Сумма определена по связанному авансу покупателя «${cpName}» (счёт 62.02): ${effectiveDraftAmount.toFixed(2)} ₽`;
+        amountCalculationNote = `Сумма определена по связанному авансу покупателя «${cpName}» от ${prev.date} (счёт 62.02): ${effectiveDraftAmount.toFixed(2)} ₽`;
+        calculationProvenance = amountCalculationNote;
         break;
       }
 
       if (
         category === 'bank_out' &&
-        ['purchase_goods', 'purchase_materials', 'purchase_services'].includes(prev.category)
+        ['purchase_goods', 'purchase_materials', 'purchase_services', 'purchase_equipment'].includes(prev.category)
       ) {
         effectiveDraftAmount = prev.amount;
-        amountCalculationNote = `Сумма оплаты определена по связанному поступлению от «${cpName}»: ${effectiveDraftAmount.toFixed(2)} ₽`;
+        amountCalculationNote = `Сумма оплаты определена по связанному поступлению от «${cpName}» (${prev.date}): ${effectiveDraftAmount.toFixed(2)} ₽`;
+        calculationProvenance = amountCalculationNote;
         break;
       }
 
@@ -1921,29 +2129,36 @@ export function bindAndGenerateOperation(
         ['sale_goods', 'sale_services'].includes(prev.category)
       ) {
         effectiveDraftAmount = prev.amount;
-        amountCalculationNote = `Сумма поступления определена по связанной реализации «${cpName}»: ${effectiveDraftAmount.toFixed(2)} ₽`;
+        amountCalculationNote = `Сумма поступления определена по связанной реализации «${cpName}» (${prev.date}): ${effectiveDraftAmount.toFixed(2)} ₽`;
+        calculationProvenance = amountCalculationNote;
         break;
       }
     }
   }
 
-  // 6d. Compute payroll payout from credit balance of account 70 if empty
+  // 6d. Compute payroll payout from credit balance of account 70 as of draft.date if empty
   if (effectiveDraftAmount < 0.01 && category === 'payroll_payout') {
     const runningOsv = calculateOsvReport({
       db1C,
       operations: priorOps,
+      dateTo: draft.date || undefined,
       reportingYear: batchContext?.reportingYear,
       includeQueuedOperations: true,
     });
     const row70 = runningOsv.leafRows.find((r) => r.code === '70');
     if (row70 && row70.endCredit > 0.01) {
       effectiveDraftAmount = row70.endCredit;
-      amountCalculationNote = `Сумма выплаты определена по кредитовому сальдо счёта 70: ${effectiveDraftAmount.toFixed(2)} ₽`;
+      amountCalculationNote = `Сумма «на руки» (за вычетом НДФЛ 13%) определена по кредитовому сальдо счёта 70 на ${draft.date || 'дату выплаты'}: ${effectiveDraftAmount.toFixed(2)} ₽`;
+      calculationProvenance = amountCalculationNote;
     }
   }
 
   // Track explicit / balance / related-doc modes for steps 6a..6d
-  if (!hadExplicitInputAmount && effectiveDraftAmount >= 0.01) {
+  if (
+    !hadExplicitInputAmount &&
+    effectiveDraftAmount >= 0.01 &&
+    amountMode === 'required_missing'
+  ) {
     if (taxBreakdownFromBalances.length > 0 || category === 'tax_payment' || category === 'payroll_payout') {
       amountMode = 'from_account_balance';
     } else if (effectiveUnitPrice && effectiveQty && amountCalculationNote?.startsWith('Рассчитано автоматически')) {
@@ -1953,7 +2168,7 @@ export function bindAndGenerateOperation(
     }
   }
 
-  // 6e. Internal Stock & Capital-Investment Resolution (10.* / 41.01 / 08.04.1 / 20.01)
+  // 6e. Internal Stock, Fixed Assets Commissioning & Depreciation Resolution
   if (
     effectiveDraftAmount < 0.01 &&
     ['materials_writeoff', 'workwear_issue', 'warehouse_transfer'].includes(category)
@@ -1976,48 +2191,135 @@ export function bindAndGenerateOperation(
       amountMode = 'from_stock_balance';
       stockSourceNote = stockRes.sourceNote;
       amountCalculationNote = stockRes.sourceNote;
+      calculationProvenance = stockRes.sourceNote;
     } else {
       amountMode = 'calculated_by_1c';
       amountCalculationNote = `Сумма определяется 1С автоматически при проведении по себестоимости остатка счёта ${resolvedMaterialAccount} (вводить сумму вручную не требуется)`;
+      calculationProvenance = amountCalculationNote;
     }
-  } else if (effectiveDraftAmount < 0.01 && category === 'os_commissioning') {
-    const capRes = resolveStockBatchCost({
-      itemText: nomName || draft.description,
-      preferredAccount: '08.04.1',
-      accountPrefixFilter: ['08'],
-      requestedQty: effectiveQty || 1,
-      opDate: draft.date,
-      db1C,
-      priorOperations: priorOps,
-    });
-    if (capRes && capRes.amount >= 0.01) {
-      effectiveDraftAmount = capRes.amount;
-      resolvedMaterialAccount = capRes.account;
-      amountMode = 'from_stock_balance';
-      stockSourceNote = `Первоначальная стоимость собрана со счёта ${capRes.account} (без НДС): ${capRes.amount.toFixed(2)} ₽`;
-      amountCalculationNote = stockSourceNote;
+  } else if (category === 'os_commissioning') {
+    if (effectiveDraftAmount < 0.01) {
+      const capRes = resolveStockBatchCost({
+        itemText: nomName || draft.description,
+        preferredAccount: '08.04.1',
+        accountPrefixFilter: ['08'],
+        requestedQty: effectiveQty || 1,
+        opDate: draft.date,
+        db1C,
+        priorOperations: priorOps,
+      });
+      if (capRes && capRes.amount >= 0.01) {
+        effectiveDraftAmount = capRes.amount;
+        resolvedMaterialAccount = capRes.account;
+        resolvedDeprBaseAmount = capRes.amount;
+        amountMode = 'from_stock_balance';
+        stockSourceNote = `Первоначальная стоимость собрана со счёта ${capRes.account} (без НДС): ${capRes.amount.toFixed(2)} ₽ · СПИ ${resolvedUsefulLifeMonths ?? 60} мес.`;
+        amountCalculationNote = stockSourceNote;
+        calculationProvenance = stockSourceNote;
+      } else {
+        // Fallback: check open debit balance on 08.04.1 / 08.04 as of draft.date
+        const osv08 = calculateOsvReport({
+          db1C,
+          operations: priorOps,
+          dateTo: draft.date || undefined,
+          reportingYear: batchContext?.reportingYear,
+          includeQueuedOperations: true,
+        });
+        const row08 =
+          osv08.leafRows.find((r) => r.code === '08.04.1' && r.endDebit >= 0.01) ||
+          osv08.leafRows.find((r) => r.code.startsWith('08.') && r.endDebit >= 0.01);
+        if (row08) {
+          effectiveDraftAmount = row08.endDebit;
+          resolvedMaterialAccount = row08.code;
+          resolvedDeprBaseAmount = row08.endDebit;
+          amountMode = 'from_account_balance';
+          stockSourceNote = `Первоначальная стоимость определена по остатку счёта ${row08.code} (без НДС): ${row08.endDebit.toFixed(2)} ₽ · СПИ ${resolvedUsefulLifeMonths ?? 60} мес.`;
+          amountCalculationNote = stockSourceNote;
+          calculationProvenance = stockSourceNote;
+        } else {
+          amountMode = 'calculated_by_1c';
+          amountCalculationNote =
+            'Первоначальная стоимость определяется 1С автоматически по накопленному дебетовому сальдо счёта 08.04.1';
+          calculationProvenance = amountCalculationNote;
+        }
+      }
     } else {
-      amountMode = 'calculated_by_1c';
-      amountCalculationNote =
-        'Первоначальная стоимость определяется 1С автоматически по накопленному дебетовому сальдо счёта 08.04.1';
+      resolvedDeprBaseAmount = effectiveDraftAmount;
+    }
+  } else if (effectiveDraftAmount < 0.01 && category === 'depreciation_accrual') {
+    // Calculate monthly linear depreciation from commissioned fixed assets in priorOps or 1C DB 01.01
+    const commissionedOps = priorOps.filter(
+      (p) =>
+        p.includeInProcessing &&
+        !p.isDuplicateIn1C &&
+        p.category === 'os_commissioning' &&
+        p.amount >= 0.01 &&
+        (!draft.date || !p.date || p.date <= draft.date)
+    );
+    if (commissionedOps.length > 0) {
+      let monthlyDeprSum = 0;
+      const deprParts: string[] = [];
+      for (const osOp of commissionedOps) {
+        const base = osOp.depreciationBaseAmount ?? osOp.amount;
+        const spi = osOp.usefulLifeMonths ?? resolvedUsefulLifeMonths ?? 60;
+        const mDepr = round2(base / spi);
+        if (mDepr > 0) {
+          monthlyDeprSum = round2(monthlyDeprSum + mDepr);
+          deprParts.push(
+            `${osOp.nomenclatureName || 'ОС'}: ${base.toFixed(2)} / ${spi} мес. = ${mDepr.toFixed(2)} ₽`
+          );
+          if (!nomName && osOp.nomenclatureName) nomName = osOp.nomenclatureName;
+          resolvedDeprBaseAmount = base;
+          resolvedUsefulLifeMonths = spi;
+        }
+      }
+      if (monthlyDeprSum >= 0.01) {
+        effectiveDraftAmount = monthlyDeprSum;
+        amountMode = 'from_related_doc';
+        calculationProvenance = `Линейная амортизация по принятым к учёту ОС (${deprParts.join('; ')})`;
+        amountCalculationNote = calculationProvenance;
+      }
+    }
+    if (effectiveDraftAmount < 0.01) {
+      const runningOsv = calculateOsvReport({
+        db1C,
+        operations: priorOps,
+        dateTo: draft.date || undefined,
+        reportingYear: batchContext?.reportingYear,
+        includeQueuedOperations: true,
+      });
+      const row01 = runningOsv.leafRows.find((r) => r.code === '01.01' || r.code === '01');
+      if (row01 && row01.endDebit >= 0.01) {
+        const spi = resolvedUsefulLifeMonths ?? 60;
+        effectiveDraftAmount = round2(row01.endDebit / spi);
+        resolvedDeprBaseAmount = row01.endDebit;
+        amountMode = 'from_account_balance';
+        calculationProvenance = `Амортизация от сальдо счёта ${row01.code} (${row01.endDebit.toFixed(2)} ₽ / СПИ ${spi} мес. = ${effectiveDraftAmount.toFixed(2)} ₽)`;
+        amountCalculationNote = calculationProvenance;
+      } else {
+        amountMode = 'calculated_by_1c';
+        amountCalculationNote =
+          'Сумма амортизации рассчитывается 1С регламентной операцией по первоначальной стоимости и СПИ';
+        calculationProvenance = amountCalculationNote;
+      }
     }
   } else if (
     effectiveDraftAmount < 0.01 &&
-    ['production_output', 'depreciation_accrual', 'closing'].includes(category)
+    ['production_output', 'closing'].includes(category)
   ) {
     amountMode = 'calculated_by_1c';
     amountCalculationNote =
       category === 'production_output'
         ? `Фактическая себестоимость выпуска рассчитывается 1С автоматически при закрытии счёта ${resolvedCostAccount}`
-        : category === 'depreciation_accrual'
-          ? 'Сумма амортизации рассчитывается 1С регламентной операцией по первоначальной стоимости и СПИ'
-          : 'Рассчитывается регламентной операцией «Закрытие месяца»';
+        : 'Рассчитывается регламентной операцией «Закрытие месяца» по оборотам периода';
+    calculationProvenance = amountCalculationNote;
   }
 
   const nonVatCategories: OperationCategory[] = [
     'tax_payment',
     'bank_fee',
     'founder_contribution',
+    'hr_hire',
     'payroll_accrual',
     'insurance_accrual',
     'payroll_payout',
@@ -2608,8 +2910,17 @@ export function bindAndGenerateOperation(
           totalWithVat,
           expenseItemName || 'Страховые взносы',
           'Страховые взносы по единому тарифу',
-          draft.description || 'Начислены страховые взносы'
+          draft.description || 'Начислены страховые взносы',
+          {
+            allowZeroCalculated: isCalculatedBy1C,
+            amountRuleNote: '30% от штатного ФОТ за месяц',
+          }
         );
+        break;
+      }
+
+      case 'hr_hire': {
+        // HR employment order (ПриемНаРаботу) registers staff salary for payroll_accrual without balance-sheet entries
         break;
       }
 
@@ -2823,41 +3134,283 @@ export function bindAndGenerateOperation(
       }
 
       case 'payroll_accrual': {
-        const wageCostAcc =
-          db1C?.postings.find((p) => p.credit === '70' && ['20.01', '26', '44.01'].includes(p.debit))
-            ?.debit ?? '26';
+        const wageCostAcc = resolvedCostAccount || '26';
+        const empLabel =
+          employeeName ||
+          (payrollStaffSummary && payrollStaffSummary.length > 0
+            ? payrollStaffSummary.map((s) => s.name).join(', ')
+            : 'Сотрудники организации');
+        const injRate = resolvedInjuryRate;
         pushEntry(
           wageCostAcc,
           '70',
           totalWithVat,
-          expenseItemName || 'Оплата труда',
-          employeeName || 'Сотрудники организации',
-          'Начислена заработная плата за месяц'
+          wageCostAcc === '20.01'
+            ? [nomGroup, expenseItemName || 'Оплата труда'].filter(Boolean).join(' / ')
+            : expenseItemName || 'Оплата труда',
+          empLabel,
+          'Начислена заработная плата за месяц',
+          {
+            allowZeroCalculated: isCalculatedBy1C,
+            amountRuleNote: 'По штатному ФОТ за месяц (кнопка «Заполнить» в 1С)',
+          }
         );
         pushEntry(
           '70',
           '68.01',
           round2(totalWithVat * 0.13),
-          employeeName || 'Сотрудники организации',
+          empLabel,
           'НДФЛ исчисленный',
-          'Удержан НДФЛ 13%'
+          'Удержан НДФЛ 13%',
+          {
+            allowZeroCalculated: isCalculatedBy1C,
+            amountRuleNote: '13% от начисленного ФОТ',
+          }
         );
         pushEntry(
           wageCostAcc,
           '69.09',
           round2(totalWithVat * 0.3),
-          'Страховые взносы',
+          wageCostAcc === '20.01'
+            ? [nomGroup, 'Страховые взносы'].filter(Boolean).join(' / ')
+            : 'Страховые взносы',
           'Страховые взносы по единому тарифу',
-          'Начислены страховые взносы по единому тарифу (30%)'
+          'Начислены страховые взносы по единому тарифу (30%)',
+          {
+            allowZeroCalculated: isCalculatedBy1C,
+            amountRuleNote: '30% от начисленного ФОТ',
+          }
         );
         pushEntry(
           wageCostAcc,
           '69.11',
-          round2(totalWithVat * 0.002),
-          'Страховые взносы',
+          round2(totalWithVat * (injRate / 100)),
+          wageCostAcc === '20.01'
+            ? [nomGroup, 'Страховые взносы'].filter(Boolean).join(' / ')
+            : 'Страховые взносы',
           'Взносы от НС и ПЗ',
-          'Начислены взносы на травматизм (0,2%)'
+          `Начислены взносы на травматизм (${injRate}%)`,
+          {
+            allowZeroCalculated: isCalculatedBy1C,
+            amountRuleNote: `${injRate}% от начисленного ФОТ`,
+          }
         );
+        break;
+      }
+
+      case 'closing': {
+        // Chronological Month-End Closing (ЗакрытиеМесяца):
+        // 1) Accrue monthly depreciation on commissioned OS if not already accrued in this month
+        // 2) Close 20.01, 25, 26, 44.01 -> 90.02.1 / 90.08.1
+        // 3) Close 90 & 91 -> 99.01.1
+        // 4) At quarter-end (03, 06, 09, 12) on OSNO, accrue 20% corporate income tax (Дт 99.01.1 Кт 68.04.1)
+        const closeMonthPrefix = (draft.date ?? '').slice(0, 7);
+        const alreadyHasDeprInMonth = priorOps.some(
+          (p) =>
+            p.includeInProcessing &&
+            !p.isDuplicateIn1C &&
+            closeMonthPrefix &&
+            (p.date ?? '').startsWith(closeMonthPrefix) &&
+            p.entries.some((e) => e.credit === '02.01')
+        );
+
+        let extraDepr20 = 0;
+        let extraDepr26 = 0;
+        if (!alreadyHasDeprInMonth && closeMonthPrefix) {
+          const priorCommissioned = priorOps.filter(
+            (p) =>
+              p.includeInProcessing &&
+              !p.isDuplicateIn1C &&
+              p.category === 'os_commissioning' &&
+              p.amount >= 0.01 &&
+              Boolean(p.date) &&
+              p.date.slice(0, 7) < closeMonthPrefix
+          );
+          for (const osOp of priorCommissioned) {
+            const base = osOp.depreciationBaseAmount ?? osOp.amount;
+            const spi = osOp.usefulLifeMonths ?? 60;
+            const mDepr = round2(base / spi);
+            if (mDepr >= 0.01) {
+              const targetAcc = osOp.costAccount || '20.01';
+              pushEntry(
+                targetAcc,
+                '02.01',
+                mDepr,
+                'Амортизация',
+                osOp.nomenclatureName || 'Основные средства',
+                `Регламентное начисление амортизации ОС (${osOp.nomenclatureName || 'ОС'})`
+              );
+              if (targetAcc === '26') extraDepr26 = round2(extraDepr26 + mDepr);
+              else extraDepr20 = round2(extraDepr20 + mDepr);
+            }
+          }
+        }
+
+        const runningOsv = calculateOsvReport({
+          db1C,
+          operations: priorOps,
+          dateTo: draft.date || undefined,
+          reportingYear: batchContext?.reportingYear,
+          includeQueuedOperations: true,
+        });
+        const directCosting = db1C?.accountingPolicy.directCosting26To9008 ?? true;
+        let added9002 = 0;
+        let added9008 = 0;
+
+        const bal25 = runningOsv.leafRows.find((r) => r.code.startsWith('25'))?.endDebit ?? 0;
+        if (bal25 > 0.01) {
+          pushEntry(
+            '20.01',
+            '25',
+            bal25,
+            nomGroup,
+            'Общепроизводственные расходы',
+            'Распределение счёта 25 на счёт 20.01'
+          );
+          extraDepr20 = round2(extraDepr20 + bal25);
+        }
+
+        const bal20 = round2(
+          (runningOsv.leafRows.find((r) => r.code === '20.01')?.endDebit ?? 0) + extraDepr20
+        );
+        if (bal20 > 0.01) {
+          pushEntry(
+            '90.02.1',
+            '20.01',
+            bal20,
+            nomGroup,
+            nomGroup,
+            'Закрытие счёта 20.01 в себестоимость продаж'
+          );
+          added9002 = round2(added9002 + bal20);
+        }
+
+        const bal26 = round2(
+          (runningOsv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0) + extraDepr26
+        );
+        if (bal26 > 0.01) {
+          const target26 = directCosting ? '90.08.1' : '90.02.1';
+          pushEntry(
+            target26,
+            '26',
+            bal26,
+            nomGroup,
+            'Общехозяйственные расходы',
+            'Закрытие счёта 26 («Директ-костинг»)'
+          );
+          if (directCosting) added9008 = round2(added9008 + bal26);
+          else added9002 = round2(added9002 + bal26);
+        }
+
+        const bal44 = runningOsv.leafRows.find((r) => r.code === '44.01')?.endDebit ?? 0;
+        if (bal44 > 0.01) {
+          pushEntry(
+            '90.02.1',
+            '44.01',
+            bal44,
+            nomGroup,
+            'Издержки обращения',
+            'Закрытие счёта 44.01'
+          );
+          added9002 = round2(added9002 + bal44);
+        }
+
+        const children90 = runningOsv.leafRows.filter((r) => r.code.startsWith('90.'));
+        const net90 = round2(
+          children90.reduce((s, r) => s + (r.endDebit - r.endCredit), 0) + added9002 + added9008
+        );
+        let profitDeltaTo99 = 0;
+        if (Math.abs(net90) > 0.01) {
+          if (net90 < 0) {
+            const p90 = round2(-net90);
+            pushEntry(
+              '90.09',
+              '99.01.1',
+              p90,
+              nomGroup,
+              'Прибыль (убыток) от продаж',
+              'Финансовый результат (прибыль от продаж)'
+            );
+            profitDeltaTo99 = round2(profitDeltaTo99 + p90);
+          } else {
+            pushEntry(
+              '99.01.1',
+              '90.09',
+              net90,
+              'Прибыль (убыток) от продаж',
+              nomGroup,
+              'Финансовый результат (убыток от продаж)'
+            );
+            profitDeltaTo99 = round2(profitDeltaTo99 - net90);
+          }
+        }
+
+        const children91 = runningOsv.leafRows.filter((r) => r.code.startsWith('91.'));
+        const net91 = round2(children91.reduce((s, r) => s + (r.endDebit - r.endCredit), 0));
+        if (Math.abs(net91) > 0.01) {
+          if (net91 < 0) {
+            const p91 = round2(-net91);
+            pushEntry(
+              '91.09',
+              '99.01.1',
+              p91,
+              '',
+              'Прочие доходы и расходы',
+              'Закрытие счёта 91 (прибыль по прочим операциям)'
+            );
+            profitDeltaTo99 = round2(profitDeltaTo99 + p91);
+          } else {
+            pushEntry(
+              '99.01.1',
+              '91.09',
+              net91,
+              'Прочие доходы и расходы',
+              '',
+              'Закрытие счёта 91 (сальдо прочих расходов)'
+            );
+            profitDeltaTo99 = round2(profitDeltaTo99 - net91);
+          }
+        }
+
+        // Quarter-end (03, 06, 09, 12) corporate income tax 20% on OSNO
+        const closeMonth = (draft.date ?? '').slice(5, 7);
+        if (isOsno && ['03', '06', '09', '12'].includes(closeMonth)) {
+          const row99 = runningOsv.leafRows.find((r) => r.code === '99.01.1');
+          const alreadyAccruedTax = priorOps
+            .filter(
+              (p) =>
+                p.includeInProcessing &&
+                !p.isDuplicateIn1C &&
+                (!draft.date || !p.date || p.date <= draft.date)
+            )
+            .flatMap((p) => p.entries)
+            .filter((e) => e.debit === '99.01.1' && e.credit.startsWith('68.04'))
+            .reduce((s, e) => s + e.amount, 0);
+
+          const currentNetProfitAfterPrevTax = round2(
+            ((row99?.endCredit ?? 0) - (row99?.endDebit ?? 0)) + profitDeltaTo99
+          );
+          const preTaxCumulativeProfit = round2(currentNetProfitAfterPrevTax + alreadyAccruedTax);
+          if (preTaxCumulativeProfit > 0.01) {
+            const targetTaxTotal = round2(preTaxCumulativeProfit * 0.2);
+            const taxDelta = round2(targetTaxTotal - alreadyAccruedTax);
+            if (taxDelta > 0.01) {
+              pushEntry(
+                '99.01.1',
+                '68.04.1',
+                taxDelta,
+                'Налог на прибыль и аналогичные платежи',
+                'Налог на прибыль организаций (20%)',
+                'Регламентный расчёт налога на прибыль организаций (20%) за отчётный период'
+              );
+            }
+          }
+        }
+
+        if (entries.length > 0) {
+          calculationProvenance = `Автозакрытие периода на ${draft.date || 'конец месяца'}: сформировано ${entries.length} регламентных проводок по накопленным оборотам`;
+          amountCalculationNote = calculationProvenance;
+        }
         break;
       }
 
@@ -2868,11 +3421,16 @@ export function bindAndGenerateOperation(
     }
   }
 
+  const finalOpAmount =
+    category === 'closing' && entries.length > 0
+      ? round2(entries.reduce((s, e) => s + e.amount, 0))
+      : totalWithVat;
+
   // --- 8. Deduplication check against 1C DB (never deduplicates between imported Excel rows!) ---
   const dupCheck = checkDuplicateIn1CDb(
     {
       date: draft.date,
-      amount: totalWithVat,
+      amount: finalOpAmount,
       docNumber: draft.docNumber ?? '',
       counterpartyName: cpName,
       counterpartyInn: cpInn,
@@ -2889,7 +3447,20 @@ export function bindAndGenerateOperation(
     cpBinding.status !== 'matched_1c' &&
     !(cpInn.length === 10 || cpInn.length === 12);
 
-  if (needsAmount || amountMode === 'required_missing') {
+  if (category === 'hr_hire') {
+    readinessStatus = 'ready';
+    readinessNote =
+      resolvedMonthlySalary && resolvedMonthlySalary >= 0.01
+        ? `Кадровый приказ учтён (оклад ${resolvedMonthlySalary.toLocaleString('ru-RU')} ₽/мес.)`
+        : 'Кадровый приказ о приёме на работу (без бухгалтерских проводок)';
+  } else if (
+    (category === 'payroll_accrual' || category === 'insurance_accrual') &&
+    finalOpAmount < 0.01
+  ) {
+    readinessStatus = 'needs_clarification';
+    readinessNote =
+      'Укажите штатный ФОТ за месяц в карточке для расчёта зарплаты, НДФЛ (13%) и страховых взносов';
+  } else if (needsAmount || amountMode === 'required_missing') {
     readinessStatus = 'critical_error';
     readinessNote = 'Требуется указать сумму первичного документа';
   } else if (needsCounterparty && cpBinding.status === 'missing') {
@@ -2928,13 +3499,26 @@ export function bindAndGenerateOperation(
     category,
     docType1C,
     documentSubKind1C,
-    amount: totalWithVat,
-    amountMode,
-    readinessStatus,
-    readinessNote,
+    amount: finalOpAmount,
+    amountMode: category === 'closing' && finalOpAmount >= 0.01 ? 'from_account_balance' : amountMode,
+    readinessStatus: category === 'closing' && finalOpAmount >= 0.01 ? 'ready' : readinessStatus,
+    readinessNote:
+      category === 'closing' && finalOpAmount >= 0.01
+        ? `Готово (${entries.length} регламентных проводок закрытия периода)`
+        : readinessNote,
     stockSourceNote,
+    calculationProvenance: calculationProvenance || amountCalculationNote,
     needsAmount: needsAmount || undefined,
     amountCalculationNote,
+    monthlySalary: resolvedMonthlySalary,
+    employeePosition: resolvedEmployeePosition,
+    injuryInsuranceRate:
+      category === 'payroll_accrual' || category === 'insurance_accrual'
+        ? resolvedInjuryRate
+        : undefined,
+    payrollStaffSummary,
+    usefulLifeMonths: resolvedUsefulLifeMonths,
+    depreciationBaseAmount: resolvedDeprBaseAmount,
     vatRate,
     vatRule,
     vatAmount,
@@ -2973,7 +3557,9 @@ export function bindAndGenerateOperation(
       'materials_writeoff',
       'workwear_issue',
       'production_output',
+      'os_commissioning',
       'depreciation_accrual',
+      'hr_hire',
       'payroll_accrual',
       'insurance_accrual',
     ].includes(category)
@@ -3008,6 +3594,127 @@ export function bindAndGenerateOperation(
   return builtOp;
 }
 
+/**
+ * Chronologically recalculates dependent operations in the ledger whenever an upstream
+ * operation (e.g. ПриемНаРаботу salary, НачислениеЗарплаты ФОТ, OS commissioning СПИ,
+ * advance, or receipt) is updated by the user.
+ */
+export function recalculateOperationsChronologically(
+  operations: QueuedOperation[],
+  db1C: Database1CSnapshot | null,
+  options?: { reportingYear?: number; defaultBik?: string }
+): QueuedOperation[] {
+  const manualAndImported = operations.filter((o) => !o.autoGeneratedKind);
+  const autoGenerated = operations.filter((o) => Boolean(o.autoGeneratedKind));
+
+  // Process in chronological order while preserving original array positions if desired,
+  // or keep stable chronological order by date -> original index:
+  const indexed = manualAndImported.map((op, idx) => ({ op, idx }));
+  indexed.sort((a, b) => {
+    const dA = a.op.date || '9999-12-31';
+    const dB = b.op.date || '9999-12-31';
+    if (dA !== dB) return dA.localeCompare(dB);
+    return a.idx - b.idx;
+  });
+
+  const recomputedChrono: QueuedOperation[] = [];
+  for (const { op } of indexed) {
+    const isDynamicDependent =
+      op.amountMode === 'calculated_by_1c' ||
+      op.amountMode === 'from_account_balance' ||
+      op.amountMode === 'from_related_doc' ||
+      op.amountMode === 'from_stock_balance' ||
+      op.category === 'closing' ||
+      op.category === 'payroll_accrual' ||
+      op.category === 'insurance_accrual' ||
+      op.category === 'payroll_payout' ||
+      op.category === 'tax_payment' ||
+      op.category === 'depreciation_accrual' ||
+      op.category === 'os_commissioning' ||
+      op.category === 'materials_writeoff' ||
+      op.category === 'workwear_issue';
+
+    if (!isDynamicDependent && op.entries.length > 0 && !op.needsAmount) {
+      recomputedChrono.push(op);
+      continue;
+    }
+
+    const keepExplicitAmount = op.amountMode === 'explicit' ? op.amount : 0;
+    const rebuilt = bindAndGenerateOperation(
+      {
+        rowKey: op.rowKey,
+        sourceFileName: op.sourceFileName,
+        date: op.date,
+        docNumber: op.docNumber,
+        incomingDocNumber: op.incomingDocNumber,
+        incomingDocDate: op.incomingDocDate,
+        description: op.description,
+        amount: keepExplicitAmount,
+        monthlySalary:
+          op.category === 'hr_hire'
+            ? op.monthlySalary
+            : op.amountMode === 'explicit'
+              ? op.monthlySalary
+              : undefined,
+        employeePosition: op.employeePosition,
+        injuryInsuranceRate: op.injuryInsuranceRate,
+        usefulLifeMonths: op.usefulLifeMonths,
+        depreciationBaseAmount:
+          op.amountMode === 'explicit' ? op.depreciationBaseAmount : undefined,
+        vatRate: op.vatRate,
+        vatRule: op.vatRule,
+        vatAmount: op.amountMode === 'explicit' ? op.vatAmount : undefined,
+        quantity: op.quantity,
+        unitPrice: op.unitPrice,
+        hasInvoiceSF: op.hasInvoiceSF,
+        counterpartyName: op.counterpartyName,
+        counterpartyInn: op.counterpartyInn,
+        counterpartyKpp: op.counterpartyKpp,
+        counterpartyOgrn: op.counterpartyOgrn,
+        counterpartyBankAccount: op.counterpartyBankAccount,
+        counterpartyBik: op.counterpartyBik,
+        counterpartyBankName: op.counterpartyBankName,
+        counterpartyCorrAccount: op.counterpartyCorrAccount,
+        counterpartySource: op.counterpartySource,
+        egrulCandidates: op.egrulCandidates,
+        organizationBik: op.organizationBik,
+        organizationBankName: op.organizationBankName,
+        organizationBankAccount: op.organizationBankAccount,
+        contractName: op.contractName,
+        contractNumber: op.contractNumber,
+        contractDate: op.contractDate,
+        nomenclatureName: op.nomenclatureName,
+        nomenclatureGroupHint: op.nomenclatureGroupName,
+        warehouseName: op.warehouseName,
+        warehouseToHint: op.warehouseToName,
+        expenseItemName: op.expenseItemName,
+        cashFlowItemName: op.cashFlowItemName,
+        employeeName: op.employeeName,
+        costAccountHint: op.costAccount,
+        materialAccountHint: op.materialAccount,
+        docTypeHint: op.docType1C,
+        categoryHint: op.category,
+      },
+      db1C,
+      op.id,
+      {
+        priorOperations: recomputedChrono,
+        reportingYear: options?.reportingYear,
+        defaultBik: options?.defaultBik ?? DEFAULT_SBERBANK_BIK,
+        defaultBankName: DEFAULT_SBERBANK_NAME,
+        assumeInvoiceOnVatPurchase: true,
+      }
+    );
+
+    recomputedChrono.push({
+      ...rebuilt,
+      includeInProcessing: op.includeInProcessing,
+    });
+  }
+
+  return [...recomputedChrono, ...autoGenerated];
+}
+
 function isMisclassifiedLegacyOperation(op: QueuedOperation): boolean {
   const natural = detectOperationClassification({
     description: op.description,
@@ -3024,6 +3731,8 @@ function isMisclassifiedLegacyOperation(op: QueuedOperation): boolean {
       'cash_bank_internal',
       'depreciation_accrual',
       'insurance_accrual',
+      'hr_hire',
+      'payroll_accrual',
       'purchase_equipment',
       'founder_contribution',
     ].includes(natural.category) &&
@@ -3063,6 +3772,11 @@ export function rebindOperationsAgainst1CDb(
         incomingDocDate: op.incomingDocDate,
         description: op.description,
         amount: op.amount,
+        monthlySalary: op.monthlySalary,
+        employeePosition: op.employeePosition,
+        injuryInsuranceRate: op.injuryInsuranceRate,
+        usefulLifeMonths: op.usefulLifeMonths,
+        depreciationBaseAmount: op.depreciationBaseAmount,
         vatRate: shouldReclassify ? undefined : op.vatRate,
         vatRule: shouldReclassify ? undefined : op.vatRule,
         vatAmount: shouldReclassify ? undefined : op.vatAmount,
@@ -3072,6 +3786,7 @@ export function rebindOperationsAgainst1CDb(
         counterpartyName: cleanCpName,
         counterpartyInn: cleanCpName ? op.counterpartyInn : '',
         counterpartyKpp: cleanCpName ? op.counterpartyKpp : '',
+        counterpartySource: cleanCpName ? op.counterpartySource : undefined,
         contractName: op.contractName,
         contractNumber: op.contractNumber,
         contractDate: op.contractDate,
@@ -3096,7 +3811,11 @@ export function rebindOperationsAgainst1CDb(
       ...rebound,
       includeInProcessing: op.includeInProcessing,
       entries:
-        !shouldReclassify && op.entries.length > 0 && rebound.amountMode !== 'from_stock_balance'
+        !shouldReclassify &&
+        op.entries.length > 0 &&
+        rebound.amountMode !== 'from_stock_balance' &&
+        rebound.category !== 'payroll_accrual' &&
+        rebound.category !== 'closing'
           ? op.entries
           : rebound.entries,
     };
@@ -3128,9 +3847,13 @@ export function sanitizeHydratedOperations(
     const rawTrimmed = (op.counterpartyName ?? '').trim();
     const hadCorruptedShortName = rawTrimmed.length > 0 && rawTrimmed.length < 2;
     const isFounderOp = isFounderContributionText(op.description);
+    const legacyBrokenPayroll =
+      op.docType1C === 'НачислениеЗарплаты' &&
+      (op.readinessStatus === 'critical_error' || op.entries.length === 0);
     const shouldRebuild =
       hadCorruptedShortName ||
       isMisclassifiedLegacyOperation(op) ||
+      legacyBrokenPayroll ||
       !op.readinessStatus ||
       !op.mentorGuide1C ||
       (isFounderOp && (op.category !== 'founder_contribution' || !rawTrimmed));
@@ -3147,6 +3870,11 @@ export function sanitizeHydratedOperations(
           incomingDocDate: op.incomingDocDate,
           description: op.description,
           amount: op.amount,
+          monthlySalary: op.monthlySalary,
+          employeePosition: op.employeePosition,
+          injuryInsuranceRate: op.injuryInsuranceRate,
+          usefulLifeMonths: op.usefulLifeMonths,
+          depreciationBaseAmount: op.depreciationBaseAmount,
           vatRate: resetClass ? undefined : op.vatRate,
           vatRule: resetClass ? undefined : op.vatRule,
           vatAmount: resetClass ? undefined : op.vatAmount,
@@ -3156,6 +3884,7 @@ export function sanitizeHydratedOperations(
           counterpartyName: hadCorruptedShortName ? '' : rawTrimmed,
           counterpartyInn: hadCorruptedShortName ? '' : op.counterpartyInn,
           counterpartyKpp: hadCorruptedShortName ? '' : op.counterpartyKpp,
+          counterpartySource: hadCorruptedShortName ? undefined : op.counterpartySource,
           contractName: resetClass ? '' : op.contractName,
           contractNumber: resetClass ? '' : op.contractNumber,
           contractDate: resetClass ? '' : op.contractDate,

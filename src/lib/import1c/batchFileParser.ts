@@ -236,6 +236,9 @@ export interface ExtractedFreeTextRequisites {
   unitPrice?: number;
   nomenclatureHint?: string;
   employeeHint?: string;
+  employeePositionHint?: string;
+  monthlySalaryHint?: number;
+  usefulLifeMonthsHint?: number;
   productionObjectHint?: string;
 }
 
@@ -533,6 +536,59 @@ export function extractRequisitesFromFreeText(
     }
   }
 
+  // F. HR hiring / employment order: e.g. "Принят на работу Иванов И.И. на должность прораба с окладом 80 000 руб."
+  let employeePositionHint: string | undefined;
+  let monthlySalaryHint: number | undefined;
+  let usefulLifeMonthsHint: number | undefined;
+
+  const hireMatch = text.match(
+    /(?:[Пп]ринят[аы]?\s+на\s+работу|[Пп]ри[её]м\s+на\s+работу|[Оо]формлен[аы]?\s+в\s+штат|[Зз]аключ[её]н\s+трудовой\s+договор\s+с)\s+(?:(?:сотрудник[аом]?|работник[аом]?)\s+)?(?:([а-яё-]{3,25}(?:\s+[а-яё-]{3,25})?)\s+)?([А-ЯЁ][а-яё]+(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.?|[А-ЯЁ][а-яё.]+)){0,2})/u
+  );
+  if (hireMatch && hireMatch[2]) {
+    const preRole = (hireMatch[1] ?? '').trim();
+    if (
+      preRole &&
+      !/^(?:на\s+должность|в\s+должности|в\s+штат|по\s+совместительству)$/iu.test(preRole)
+    ) {
+      employeePositionHint = preRole;
+    }
+    const candEmp = hireMatch[2]
+      .replace(/\s+(?:на\s+должност|в\s+должност|с\s+оклад|по\s+оклад|в\s+основн|в\s+отдел).*$/iu, '')
+      .trim();
+    if (candEmp.length >= 2) {
+      employeeHint = candEmp;
+    }
+  }
+
+  const posMatch = text.match(
+    /(?:на\s+должность|в\s+должности|должность)[\s:«"']*([А-Яа-яЁё0-9\s-]{3,40}?)(?=\s*(?:[,.;()«»"']|$|\s+с\s+окладом|\s+оклад|\s+по\s+трудов|\s+в\s+подразделен|\s+в\s+цех|\s+в\s+отдел))/iu
+  );
+  if (posMatch && posMatch[1]) {
+    employeePositionHint = posMatch[1].trim();
+  }
+
+  const salaryMatch = text.match(
+    /(?:с\s+окладом|должностн\p{L}*\s+оклад\p{L}*|оклад(?:\s+составляет)?|тарифн\p{L}*\s+ставк\p{L}*|фот(?:\s+за\s+месяц|\s+составляет)?)[\s:=—-]*(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\d{4,}(?:[.,]\d{1,2})?)/iu
+  );
+  if (salaryMatch && salaryMatch[1]) {
+    const sal = parseRussianNumber(salaryMatch[1]);
+    if (sal > 0) {
+      monthlySalaryHint = sal;
+    }
+  }
+
+  // G. Useful life (СПИ) for Fixed Assets commissioning / depreciation: e.g. "СПИ 60 мес", "срок полезного использования 5 лет"
+  const spiMatch = text.match(
+    /(?:(?:^|[^\p{L}])спи(?=$|[^\p{L}])|срок\p{L}*\s+полезн\p{L}*\s+использован\p{L}*|срок\p{L}*\s+служб\p{L}*)[\s:=—()-]*(\d{1,3})\s*(мес\p{L}*|лет|год\p{L}*)/iu
+  );
+  if (spiMatch && spiMatch[1]) {
+    const rawVal = Number(spiMatch[1]);
+    const unit = spiMatch[2].toLowerCase();
+    if (rawVal > 0) {
+      usefulLifeMonthsHint = /^(?:лет|год)/.test(unit) ? rawVal * 12 : rawVal;
+    }
+  }
+
   const cleanBik = bikMatch ? bikMatch[1] : '';
   const bankInfo = cleanBik ? resolveBankInfoByBik(cleanBik) : undefined;
 
@@ -551,6 +607,9 @@ export function extractRequisitesFromFreeText(
     unitPrice,
     nomenclatureHint,
     employeeHint,
+    employeePositionHint,
+    monthlySalaryHint,
+    usefulLifeMonthsHint,
     productionObjectHint,
   };
 }
@@ -986,6 +1045,24 @@ function mapTabularRowToDraft(params: {
   if (effectiveAmount < 0.01 && qtyParsed > 0 && unitPriceParsed > 0) {
     effectiveAmount = Math.round((qtyParsed * unitPriceParsed + Number.EPSILON) * 100) / 100;
     amountCalculationNote = `Рассчитано из текста операции: ${qtyParsed} × ${unitPriceParsed.toFixed(2)} ₽ = ${effectiveAmount.toFixed(2)} ₽`;
+  } else if (
+    effectiveAmount < 0.01 &&
+    description &&
+    !/принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу|оформлен\p{L}*\s+в\s+штат/iu.test(description)
+  ) {
+    const inlineSumMatch =
+      description.match(
+        /(?:на\s+сумму|в\s+сумме|в\s+размере|стоимостью)[\s:=—-]*(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)/iu
+      ) ||
+      description.match(
+        /(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\d{3,}(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р(?=$|[^\p{L}]))/iu
+      );
+    if (inlineSumMatch && inlineSumMatch[1]) {
+      const parsedInline = parseRussianNumber(inlineSumMatch[1]);
+      if (parsedInline > 0) {
+        effectiveAmount = parsedInline;
+      }
+    }
   }
 
   const finalInn = innCell.replace(/\D/g, '') || extracted.inn;
@@ -1027,6 +1104,9 @@ function mapTabularRowToDraft(params: {
       expenseItemName: expCell,
       cashFlowItemName: ddsCell,
       employeeName: empCell || extracted.employeeHint || undefined,
+      employeePosition: extracted.employeePositionHint,
+      monthlySalary: extracted.monthlySalaryHint,
+      usefulLifeMonths: extracted.usefulLifeMonthsHint,
       directionHint,
       explicitDebit: debitCell || undefined,
       explicitCredit: creditCell || undefined,
@@ -1241,6 +1321,23 @@ function parseRowsMatrixDetailed(params: {
       if (effectiveAmt < 0.01 && req.quantity && req.unitPrice) {
         effectiveAmt = Math.round((req.quantity * req.unitPrice + Number.EPSILON) * 100) / 100;
         amountNote = `Рассчитано из текста: ${req.quantity} × ${req.unitPrice.toFixed(2)} ₽ = ${effectiveAmt.toFixed(2)} ₽`;
+      } else if (
+        effectiveAmt < 0.01 &&
+        !/принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу|оформлен\p{L}*\s+в\s+штат/iu.test(desc)
+      ) {
+        const inlineSumMatch =
+          desc.match(
+            /(?:на\s+сумму|в\s+сумме|в\s+размере|стоимостью)[\s:=—-]*(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)/iu
+          ) ||
+          desc.match(
+            /(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\d{3,}(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р(?=$|[^\p{L}]))/iu
+          );
+        if (inlineSumMatch && inlineSumMatch[1]) {
+          const parsedInline = parseRussianNumber(inlineSumMatch[1]);
+          if (parsedInline > 0) {
+            effectiveAmt = parsedInline;
+          }
+        }
       }
 
       drafts.push({
@@ -1257,6 +1354,9 @@ function parseRowsMatrixDetailed(params: {
         nomenclatureName: req.nomenclatureHint,
         nomenclatureGroupHint: req.productionObjectHint,
         employeeName: req.employeeHint,
+        employeePosition: req.employeePositionHint,
+        monthlySalary: req.monthlySalaryHint,
+        usefulLifeMonths: req.usefulLifeMonthsHint,
         counterpartyName: req.counterparty,
         counterpartyInn: req.inn,
         counterpartyKpp: req.kpp,
@@ -1455,7 +1555,8 @@ export function parseFreeTextOrDelimitedOperations(
 
     const looksLikeAccountingOp =
       amount > 0 ||
-      /перечислен|поступил|оплачен|реализован|отгружен|начислен|выда[лн]|уплат|списан|принят|оказан|передан|отпущен|израсходован|введ[её]н|выпущен|оприходован|перемещ|снят|внесен|закрыт/iu.test(
+      Boolean(req.monthlySalaryHint) ||
+      /перечислен|поступил|оплачен|реализован|отгружен|начислен|выда[лн]|выплат|уплат|списан|принят|при[её]м\s+на\s+работу|оформлен\p{L}*\s+в\s+штат|оказан|передан|отпущен|израсходован|введ[её]н|выпущен|оприходован|перемещ|снят|внесен|закрыт|амортизац/iu.test(
         line
       );
 
@@ -1474,6 +1575,9 @@ export function parseFreeTextOrDelimitedOperations(
       nomenclatureName: req.nomenclatureHint,
       nomenclatureGroupHint: req.productionObjectHint,
       employeeName: req.employeeHint,
+      employeePosition: req.employeePositionHint,
+      monthlySalary: req.monthlySalaryHint,
+      usefulLifeMonths: req.usefulLifeMonthsHint,
       counterpartyName: req.counterparty,
       counterpartyInn: req.inn,
       counterpartyKpp: req.kpp,
@@ -1803,13 +1907,26 @@ export function processBatchFiles(
     }
   }
 
-  // Third pass: Sequential binding & multi-entry generation across the entire queue
-  // so Row 1 sees 68/69 balances and Row 3 sees Row 2's 100% supplier advance!
+  // Third pass: Stable chronological ordering across all uploaded files (date -> fileIndex -> rowOrder)
+  // so hiring in Q1 feeds payroll in Q1-Q3, advances feed receipts, and OS commissioning feeds depreciation!
+  const indexedDrafts = rawDraftsQueue.map((draft, origIdx) => {
+    const m = (draft.rowKey ?? '').match(/^(\d+)_/);
+    const fIdx = m ? Number(m[1]) : 999;
+    return { draft, fIdx, origIdx };
+  });
+  indexedDrafts.sort((a, b) => {
+    const dA = a.draft.date || '9999-12-31';
+    const dB = b.draft.date || '9999-12-31';
+    if (dA !== dB) return dA.localeCompare(dB);
+    if (a.fIdx !== b.fIdx) return a.fIdx - b.fIdx;
+    return a.origIdx - b.origIdx;
+  });
+
   const priorExistingOps = options?.priorOperations ?? [];
   const generatedOperations: QueuedOperation[] = [];
   const generatedByFileIndex = new Map<number, QueuedOperation[]>();
 
-  rawDraftsQueue.forEach((draft, globalIdx) => {
+  indexedDrafts.forEach(({ draft, fIdx }, globalIdx) => {
     const seqContext: BatchSequentialContext = {
       priorOperations: [...priorExistingOps, ...generatedOperations],
       reportingYear,
@@ -1825,9 +1942,7 @@ export function processBatchFiles(
     generatedOperations.push(op);
 
     // Track per-file summary
-    const m = (draft.rowKey ?? '').match(/^(\d+)_/);
-    const fIdx = m ? Number(m[1]) : -1;
-    if (fIdx > 0) {
+    if (fIdx > 0 && fIdx < 999) {
       const list = generatedByFileIndex.get(fIdx) ?? [];
       list.push(op);
       generatedByFileIndex.set(fIdx, list);
