@@ -14,7 +14,7 @@ export function WorkspaceShell() {
 
   if (!hydrated) {
     return (
-      <div className="min-h-screen flex items-center justify-center text-xs text-zinc-500">
+      <div className="min-h-screen flex items-center justify-center text-sm text-slate-500">
         Загрузка рабочего контура 1С:Бухгалтерия 8.3...
       </div>
     );
@@ -25,39 +25,39 @@ export function WorkspaceShell() {
       <Header />
 
       {notice && (
-        <div className="max-w-[1600px] w-full mx-auto px-4 lg:px-6 pt-3">
+        <div className="max-w-[1600px] w-full mx-auto px-4 lg:px-6 pt-4">
           <div
-            className={`flex items-center justify-between gap-3 px-3.5 py-2.5 rounded border text-xs ${
+            className={`flex items-center justify-between gap-3 px-4 py-3 rounded-2xl border text-xs shadow-[0_1px_2px_rgba(15,23,42,0.04)] ${
               notice.tone === 'error'
-                ? 'border-red-200 bg-red-50 text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200'
+                ? 'border-rose-200/80 bg-rose-50/90 text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-200'
                 : notice.tone === 'success'
-                  ? 'border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-200'
-                  : 'border-zinc-200 bg-white text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200'
+                  ? 'border-emerald-200/80 bg-emerald-50/90 text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-200'
+                  : 'border-slate-200/80 bg-white text-slate-800 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200'
             }`}
           >
-            <div className="flex items-center gap-2 min-w-0">
+            <div className="flex items-center gap-2.5 min-w-0">
               {notice.tone === 'error' ? (
-                <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" strokeWidth={1.6} />
               ) : notice.tone === 'success' ? (
-                <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+                <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" strokeWidth={1.6} />
               ) : (
-                <Info className="w-4 h-4 shrink-0 text-amber-600" />
+                <Info className="w-4 h-4 shrink-0 text-amber-600" strokeWidth={1.6} />
               )}
-              <span className="truncate">{notice.message}</span>
+              <span className="truncate font-medium">{notice.message}</span>
             </div>
             <button
               type="button"
               onClick={dismissNotice}
               aria-label="Закрыть уведомление"
-              className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/10 shrink-0"
+              className="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 shrink-0 transition-colors"
             >
-              <X className="w-3.5 h-3.5" />
+              <X className="w-3.5 h-3.5" strokeWidth={1.6} />
             </button>
           </div>
         </div>
       )}
 
-      <main className="flex-1 max-w-[1600px] w-full mx-auto px-4 lg:px-6 py-5">
+      <main className="flex-1 max-w-[1600px] w-full mx-auto px-4 lg:px-6 py-6">
         {activeTab === 'db_osv' && <Tab1DatabaseOsv />}
         {activeTab === 'import_postings' && <Tab2ImportPostings />}
         {activeTab === 'audit_autofix' && <Tab3AuditAutofix />}

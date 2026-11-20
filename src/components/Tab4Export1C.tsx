@@ -105,29 +105,30 @@ export function Tab4Export1C() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       {/* Mode A vs Mode B Selector */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <button
           type="button"
           onClick={() => setExportMode('incremental')}
-          className={`text-left p-4 rounded border transition-colors ${
+          className={`text-left p-5 rounded-2xl border transition-all shadow-[0_1px_2px_rgba(15,23,42,0.04)] ${
             exportMode === 'incremental'
-              ? 'border-amber-600 bg-amber-50/40 dark:bg-amber-950/20'
-              : 'border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] hover:border-zinc-300 dark:hover:border-zinc-700'
+              ? 'border-amber-500/80 bg-amber-50/40 dark:bg-amber-950/20'
+              : 'border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-slate-300 dark:hover:border-slate-700'
           }`}
         >
           <div className="flex items-center justify-between">
-            <span className="text-sm font-semibold text-zinc-950 dark:text-white">
+            <span className="text-sm font-semibold text-slate-900 dark:text-white">
               Режим А: Дозагрузить в текущую БД 1С ({reportingYear} г.)
             </span>
             <Layers
+              strokeWidth={1.6}
               className={`w-4 h-4 ${
-                exportMode === 'incremental' ? 'text-amber-600' : 'text-zinc-400'
+                exportMode === 'incremental' ? 'text-amber-600' : 'text-slate-400'
               }`}
             />
           </div>
-          <p className="mt-1.5 text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
+          <p className="mt-2 text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
             Создаёт недостающие элементы справочников, договоры и банковские счета (с БИК Сбербанка 044030653 или явными реквизитами из операций) и проводит новые документы {reportingYear} года.
           </p>
         </button>
@@ -135,124 +136,125 @@ export function Tab4Export1C() {
         <button
           type="button"
           onClick={() => setExportMode('clean_db')}
-          className={`text-left p-4 rounded border transition-colors ${
+          className={`text-left p-5 rounded-2xl border transition-all shadow-[0_1px_2px_rgba(15,23,42,0.04)] ${
             exportMode === 'clean_db'
-              ? 'border-amber-600 bg-amber-50/40 dark:bg-amber-950/20'
-              : 'border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] hover:border-zinc-300 dark:hover:border-zinc-700'
+              ? 'border-amber-500/80 bg-amber-50/40 dark:bg-amber-950/20'
+              : 'border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-slate-300 dark:hover:border-slate-700'
           }`}
         >
           <div className="flex items-center justify-between">
-            <span className="text-sm font-semibold text-zinc-950 dark:text-white">
+            <span className="text-sm font-semibold text-slate-900 dark:text-white">
               Режим Б: Развернуть с нуля в чистую БД 1С ({reportingYear} г.)
             </span>
             <DatabaseBackup
+              strokeWidth={1.6}
               className={`w-4 h-4 ${
-                exportMode === 'clean_db' ? 'text-amber-600' : 'text-zinc-400'
+                exportMode === 'clean_db' ? 'text-amber-600' : 'text-slate-400'
               }`}
             />
           </div>
-          <p className="mt-1.5 text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
+          <p className="mt-2 text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
             Создаёт Организацию, банковские счета, полные справочники, формирует начальные остатки через счёт 000 на начало {reportingYear} года и проводит все документы.
           </p>
         </button>
       </div>
 
       {/* Export Package Counters */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5 text-xs">
-        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3">
-          <div className="text-zinc-500">Контрагенты</div>
-          <div className="mt-1 text-base font-mono font-semibold tabular-nums">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 text-xs">
+        <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+          <div className="text-slate-500">Контрагенты</div>
+          <div className="mt-1.5 text-lg font-semibold tabular-nums text-slate-900 dark:text-white">
             {bundle.stats.counterpartiesCount}
           </div>
         </div>
-        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3">
-          <div className="text-zinc-500">Договоры</div>
-          <div className="mt-1 text-base font-mono font-semibold tabular-nums">
+        <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+          <div className="text-slate-500">Договоры</div>
+          <div className="mt-1.5 text-lg font-semibold tabular-nums text-slate-900 dark:text-white">
             {bundle.stats.contractsCount}
           </div>
         </div>
-        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3">
-          <div className="text-zinc-500">Банк. счета (БИК)</div>
-          <div className="mt-1 text-base font-mono font-semibold tabular-nums text-amber-700 dark:text-amber-400">
+        <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+          <div className="text-slate-500">Банк. счета (БИК)</div>
+          <div className="mt-1.5 text-lg font-semibold tabular-nums text-amber-700 dark:text-amber-400">
             {bundle.stats.bankAccountsCount ?? 0}
           </div>
         </div>
-        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3">
-          <div className="text-zinc-500">Номенклатура</div>
-          <div className="mt-1 text-base font-mono font-semibold tabular-nums">
+        <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+          <div className="text-slate-500">Номенклатура</div>
+          <div className="mt-1.5 text-lg font-semibold tabular-nums text-slate-900 dark:text-white">
             {bundle.stats.nomenclatureCount}
           </div>
         </div>
-        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3">
-          <div className="text-zinc-500">Строк нач. остатков</div>
-          <div className="mt-1 text-base font-mono font-semibold tabular-nums">
+        <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+          <div className="text-slate-500">Строк нач. остатков</div>
+          <div className="mt-1.5 text-lg font-semibold tabular-nums text-slate-900 dark:text-white">
             {bundle.stats.openingBalanceLinesCount}
           </div>
         </div>
-        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3">
-          <div className="text-zinc-500">Документов 1С</div>
-          <div className="mt-1 text-base font-mono font-semibold tabular-nums">
+        <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+          <div className="text-slate-500">Документов 1С</div>
+          <div className="mt-1.5 text-lg font-semibold tabular-nums text-slate-900 dark:text-white">
             {bundle.stats.documentsToPostCount}
           </div>
         </div>
-        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3">
-          <div className="text-zinc-500">Проводок Дт/Кт</div>
-          <div className="mt-1 text-base font-mono font-semibold tabular-nums">
+        <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+          <div className="text-slate-500">Проводок Дт/Кт</div>
+          <div className="mt-1.5 text-lg font-semibold tabular-nums text-slate-900 dark:text-white">
             {bundle.stats.entriesCount}
           </div>
         </div>
       </div>
 
       {accompanyingActions.length > 0 && (
-        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/40 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-600 dark:text-zinc-400">
-          <span className="inline-flex items-center gap-1.5">
-            <Landmark className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+        <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 px-5 py-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-400 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+          <span className="inline-flex items-center gap-2">
+            <Landmark className="w-4 h-4 text-amber-600 shrink-0" strokeWidth={1.6} />
             В пакет выгрузки включены сопутствующие объекты 1С БП 3.0 ({accompanyingActions.length}): банковские счета (НайтиИлиСоздатьБанковскийСчет), договоры, счёта-фактуры и зачёты авансов.
           </span>
-          <span className="font-mono text-[11px]">Отчётный год: {reportingYear}</span>
+          <span className="tabular-nums font-medium text-slate-500">Отчётный год: {reportingYear}</span>
         </div>
       )}
 
       {/* Format Tabs + Download Actions + Code Preview */}
-      <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] overflow-hidden">
-        <div className="px-4 py-3 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/40 flex flex-wrap items-center justify-between gap-3">
+      <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+        <div className="px-5 py-3.5 border-b border-slate-200/70 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/60 flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             <button
               type="button"
               onClick={() => setFormat('bsl')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded font-medium ${
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl font-medium transition-colors ${
                 format === 'bsl'
-                  ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
-                  : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200/60 dark:hover:bg-zinc-800'
+                  ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-950 shadow-sm'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800'
               }`}
             >
-              <Code2 className="w-3.5 h-3.5" />
+              <Code2 className="w-3.5 h-3.5" strokeWidth={1.6} />
               1. Модуль 1С 8.3 (.bsl / .txt)
             </button>
 
             <button
               type="button"
               onClick={() => setFormat('xml_edo')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded font-medium ${
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl font-medium transition-colors ${
                 format === 'xml_edo'
-                  ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
-                  : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200/60 dark:hover:bg-zinc-800'
+                  ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-950 shadow-sm'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800'
               }`}
             >
-              <FileCode2 className="w-3.5 h-3.5" />
+              <FileCode2 className="w-3.5 h-3.5" strokeWidth={1.6} />
               2. XML EnterpriseData 1.8 (.xml)
             </button>
 
             <button
               type="button"
               onClick={() => setFormat('json')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded font-medium ${
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl font-medium transition-colors ${
                 format === 'json'
-                  ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
-                  : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200/60 dark:hover:bg-zinc-800'
+                  ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-950 shadow-sm'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800'
               }`}
             >
-              <FileJson className="w-3.5 h-3.5" />
+              <FileJson className="w-3.5 h-3.5" strokeWidth={1.6} />
               3. Полный слепок JSON (.json)
             </button>
           </div>
@@ -261,16 +263,16 @@ export function Tab4Export1C() {
             <button
               type="button"
               onClick={handleCopy}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800 font-medium text-zinc-800 dark:text-zinc-200"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 font-medium text-slate-800 dark:text-slate-200 transition-colors"
             >
               {copied ? (
                 <>
-                  <Check className="w-3.5 h-3.5 text-emerald-600" />
+                  <Check className="w-3.5 h-3.5 text-emerald-600" strokeWidth={1.6} />
                   Скопировано
                 </>
               ) : (
                 <>
-                  <Copy className="w-3.5 h-3.5" />
+                  <Copy className="w-3.5 h-3.5" strokeWidth={1.6} />
                   Копировать код
                 </>
               )}
@@ -283,9 +285,9 @@ export function Tab4Export1C() {
                   onClick={() =>
                     triggerDownload(bundle.bslCode, 'Import_To_1C_BSL.bsl', 'text/plain')
                   }
-                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded bg-amber-600 hover:bg-amber-700 text-white font-semibold"
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-semibold shadow-sm transition-colors"
                 >
-                  <Download className="w-3.5 h-3.5" />
+                  <Download className="w-3.5 h-3.5" strokeWidth={1.6} />
                   Скачать Import_To_1C_BSL.bsl
                 </button>
                 <button
@@ -293,9 +295,9 @@ export function Tab4Export1C() {
                   onClick={() =>
                     triggerDownload(bundle.bslCode, 'Import_To_1C_BSL.txt', 'text/plain')
                   }
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800 font-medium"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 font-medium transition-colors"
                 >
-                  <HardDriveDownload className="w-3.5 h-3.5" />
+                  <HardDriveDownload className="w-3.5 h-3.5" strokeWidth={1.6} />
                   .txt
                 </button>
               </>
@@ -311,9 +313,9 @@ export function Tab4Export1C() {
                     'application/xml'
                   )
                 }
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded bg-amber-600 hover:bg-amber-700 text-white font-semibold"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-semibold shadow-sm transition-colors"
               >
-                <Download className="w-3.5 h-3.5" />
+                <Download className="w-3.5 h-3.5" strokeWidth={1.6} />
                 Скачать EnterpriseData_1C_Export.xml
               </button>
             )}
@@ -328,9 +330,9 @@ export function Tab4Export1C() {
                     'application/json'
                   )
                 }
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded bg-amber-600 hover:bg-amber-700 text-white font-semibold"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-semibold shadow-sm transition-colors"
               >
-                <Download className="w-3.5 h-3.5" />
+                <Download className="w-3.5 h-3.5" strokeWidth={1.6} />
                 Скачать 1c_workbench_snapshot.json
               </button>
             )}
@@ -338,7 +340,7 @@ export function Tab4Export1C() {
         </div>
 
         {/* Format Usage Hint */}
-        <div className="px-4 py-2 border-b border-zinc-100 dark:border-zinc-800 text-xs text-zinc-600 dark:text-zinc-400 bg-white dark:bg-[#121418]">
+        <div className="px-5 py-2.5 border-b border-slate-100 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 bg-white dark:bg-slate-900">
           {format === 'bsl' && (
             <span>
               Готовый серверный код для <strong>1С:Бухгалтерия 8.3 (ред. 3.0)</strong>: включает процедуру{' '}
@@ -357,7 +359,7 @@ export function Tab4Export1C() {
           )}
         </div>
 
-        <pre className="p-4 bg-zinc-950 text-zinc-100 font-mono text-xs leading-relaxed overflow-auto max-h-[540px]">
+        <pre className="p-5 bg-slate-950 text-slate-100 font-mono text-xs leading-relaxed overflow-auto max-h-[540px]">
           {activeContent}
         </pre>
       </div>

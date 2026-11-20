@@ -323,13 +323,96 @@ function normalizeDativeEmployeeHint(rawEmp: string): string {
   const roleEntry = DATIVE_ROLE_TO_NOMINATIVE.find((r) => r.re.test(first));
   if (roleEntry) {
     if (tokens.length === 1) return roleEntry.label;
-    return `${roleEntry.label} ${tokens.slice(1).join(' ')}`.trim();
+    const restNorm = normalizeDativeEmployeeHint(tokens.slice(1).join(' '));
+    return `${roleEntry.label} ${restNorm}`.trim();
   }
-  if (/^(?:[А-ЯЁ][а-яё]+(?:ову|еву|ёву|ину|ыну))(?:\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)?$/u.test(trimmed)) {
-    const surNom = tokens[0].replace(/у$/iu, '');
+  // Masculine dative surname + initials: e.g. "Федорову Ф.Ф.", "Кузнецову А.И.", "Бельскому С.В."
+  if (
+    /^(?:[А-ЯЁ][а-яё]+(?:ову|еву|ёву|ину|ыну|скому|цкому))(?:\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?|\s+[А-ЯЁ]\.)?$/u.test(
+      trimmed
+    )
+  ) {
+    const surNom = /(?:скому|цкому)$/iu.test(tokens[0])
+      ? tokens[0].replace(/(?:скому|цкому)$/iu, (m) => `${m.slice(0, -3)}ий`)
+      : tokens[0].replace(/у$/iu, '');
     return [surNom, ...tokens.slice(1)].join(' ');
   }
+  // Feminine dative surname + initials: e.g. "Федоровой А.В.", "Бельской Е.С."
+  if (
+    /^(?:[А-ЯЁ][а-яё]+(?:овой|евой|ёвой|иной|ыной|ской|цкой))(?:\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?|\s+[А-ЯЁ]\.)$/u.test(
+      trimmed
+    )
+  ) {
+    const surNom = /(?:ской|цкой)$/iu.test(tokens[0])
+      ? tokens[0].replace(/ой$/iu, 'ая')
+      : tokens[0].replace(/ой$/iu, 'а');
+    return [surNom, ...tokens.slice(1)].join(' ');
+  }
+  // Full 3-part dative FIO: e.g. "Федорову Федору Федоровичу" / "Петровой Анне Сергеевне"
+  if (tokens.length === 3) {
+    const [sur, given, patr] = tokens;
+    if (/(?:овичу|евичу|ичу)$/iu.test(patr) && /[уе]$/iu.test(given)) {
+      const surNom = /(?:ову|еву|ёву|ину|ыну)$/iu.test(sur)
+        ? sur.slice(0, -1)
+        : /(?:скому|цкому)$/iu.test(sur)
+          ? `${sur.slice(0, -3)}ий`
+          : /у$/iu.test(sur)
+            ? sur.slice(0, -1)
+            : sur;
+      const givenNom = /ю$/iu.test(given) ? `${given.slice(0, -1)}й` : given.replace(/[уе]$/iu, '');
+      const patrNom = patr.slice(0, -1);
+      return `${surNom} ${givenNom} ${patrNom}`;
+    }
+    if (/(?:овне|евне|ичне)$/iu.test(patr) && /е$/iu.test(given)) {
+      const surNom = /(?:овой|евой|ёвой|иной|ыной)$/iu.test(sur)
+        ? `${sur.slice(0, -2)}а`
+        : sur;
+      const givenNom = `${given.slice(0, -1)}а`;
+      const patrNom = `${patr.slice(0, -1)}а`;
+      return `${surNom} ${givenNom} ${patrNom}`;
+    }
+  }
   return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+}
+
+export function inferVatFromTextAndCell(
+  description: string,
+  vatRateCell = ''
+): {
+  vatRate?: number;
+  vatRule?: 'included' | 'on_top' | 'none';
+} {
+  const combined = `${vatRateCell} ${description}`.trim();
+  if (/ндс\s+не\s+облаг|не\s+облаг\p{L}*\s+ндс|без\s+налога\s*\(?\s*ндс/iu.test(combined)) {
+    return { vatRule: 'none', vatRate: 0 };
+  }
+  if (
+    /(?:по\s+)?цен\p{L}*\s+без\s*(?:уч[её]та\s*)?ндс|стоимост\p{L}*\s+без\s*(?:уч[её]та\s*)?ндс|кроме\s+того\s+ндс|плюс\s*ндс|сверху\s*ндс|\+\s*ндс|ндс\s+сверху|начисл\p{L}*\s+ндс\s+сверху/iu.test(
+      combined
+    )
+  ) {
+    const m = combined.match(/(\d{1,2})\s*%/);
+    return {
+      vatRule: 'on_top',
+      vatRate: m ? Number(m[1]) : 20,
+    };
+  }
+  if (/без\s*ндс/iu.test(combined)) {
+    return { vatRule: 'none', vatRate: 0 };
+  }
+  if (vatRateCell) {
+    const m = vatRateCell.match(/(\d{1,2})/);
+    if (m) {
+      const r = Number(m[1]);
+      return { vatRate: r, vatRule: r === 0 ? 'none' : 'included' };
+    }
+  }
+  const descRate = description.match(/ндс\s*\(?(\d{1,2})\s*%\)?/iu);
+  if (descRate) {
+    const r = Number(descRate[1]);
+    return { vatRate: r, vatRule: r === 0 ? 'none' : 'included' };
+  }
+  return {};
 }
 
 export function extractRequisitesFromFreeText(
@@ -407,31 +490,48 @@ export function extractRequisitesFromFreeText(
     docNumber = docMatch[1].trim();
   }
 
-  // Extract quantity & unitPrice from text: e.g. "133 шт по 9300 руб за шт с НДС" or "133 шт. * 9 300,00 руб."
+  // Extract quantity, nomenclature & unitPrice from text:
+  // Supports both "133 шт по 9300 руб" AND "226 шт Панель из ПВХ и МДФ по цене без НДС 1 500 руб."
   let quantity: number | undefined;
   let unitPrice: number | undefined;
-  const qtyPriceMatch = text.match(
-    /(\d+(?:[.,]\d+)?)\s*(?:шт\.?|ед\.?|компл\.?|упак\.?|рул\.?|п\.?\s*м\.?|кв\.?\s*м\.?|м2|кг|т|тонн\p{L}*|л)\s*(?:по\s*(?:цене\s*)?|[*×xх]\s*)(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.?)/iu
+  let nomenclatureHint: string | undefined;
+  let employeeHint: string | undefined;
+  let productionObjectHint: string | undefined;
+
+  const qtyPriceAdjacentMatch = text.match(
+    /(\d+(?:[.,]\d+)?)\s*(?:шт\.?|ед\.?|компл\.?|упак\.?|рул\.?|п\.?\s*м\.?|кв\.?\s*м\.?|м2|м3|кг|т|тонн\p{L}*|л)\s*(?:по\s*(?:цене\s*)?(?:(?:без\s*(?:уч[её]та\s*)?ндс(?:\s*\d+\s*%)?|с\s*(?:уч[её]том\s*)?ндс(?:\s*\d+\s*%)?|в\s*т\.?\s*ч\.?\s*ндс(?:\s*\d+\s*%)?)\s*)?|[*×xх]\s*)(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.?)/iu
   );
-  if (qtyPriceMatch) {
-    const q = parseRussianNumber(qtyPriceMatch[1]);
-    const p = parseRussianNumber(qtyPriceMatch[2]);
+  const qtyItemPriceMatch = !qtyPriceAdjacentMatch
+    ? text.match(
+        /(\d+(?:[.,]\d+)?)\s*(?:шт\.?|ед\.?|компл\.?|упак\.?|рул\.?|п\.?\s*м\.?|кв\.?\s*м\.?|м2|м3|кг|т|тонн\p{L}*|л)\s+([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{1,70}?)\s+(?:по\s+цене|по\s+стоимости|по)(?:\s+(?:без\s*(?:уч[её]та\s*)?ндс(?:\s*\d+\s*%)?|с\s*(?:уч[её]том\s*)?ндс(?:\s*\d+\s*%)?|в\s*т\.?\s*ч\.?\s*ндс(?:\s*\d+\s*%)?|за\s+(?:шт|ед)\.?))*\s*(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.?)/iu
+      )
+    : null;
+
+  if (qtyPriceAdjacentMatch) {
+    const q = parseRussianNumber(qtyPriceAdjacentMatch[1]);
+    const p = parseRussianNumber(qtyPriceAdjacentMatch[2]);
     if (q > 0) quantity = q;
     if (p > 0) unitPrice = p;
+  } else if (qtyItemPriceMatch) {
+    const q = parseRussianNumber(qtyItemPriceMatch[1]);
+    const rawBetweenItem = qtyItemPriceMatch[2]
+      .replace(/^(?:продукци[яию]|товар[аыов]*|материал[аыов]*|издели[яй])\s+/iu, '')
+      .trim();
+    const p = parseRussianNumber(qtyItemPriceMatch[3]);
+    if (q > 0) quantity = q;
+    if (p > 0) unitPrice = p;
+    if (rawBetweenItem.length >= 2) {
+      nomenclatureHint = normalizeRussianItemPhraseToNominative(rawBetweenItem);
+    }
   } else {
     const qtyOnlyMatch = text.match(
-      /(?:в\s+кол(?:-ве|ичестве)\s*)?(\d+(?:[.,]\d+)?)\s*(?:шт\.?|ед\.?|компл\.?|упак\.?|рул\.?|кв\.?\s*м\.?|м2|кг|тонн\p{L}*)(?=$|[^\p{L}])/iu
+      /(?:в\s+кол(?:-ве|ичестве)\s*)?(\d+(?:[.,]\d+)?)\s*(?:шт\.?|ед\.?|компл\.?|упак\.?|рул\.?|кв\.?\s*м\.?|м2|м3|кг|тонн\p{L}*)(?=$|[^\p{L}])/iu
     );
     if (qtyOnlyMatch) {
       const q = parseRussianNumber(qtyOnlyMatch[1]);
       if (q > 0) quantity = q;
     }
   }
-
-  // Extract nomenclature, employee (MOL), and production object / nomenclature group hints
-  let nomenclatureHint: string | undefined;
-  let employeeHint: string | undefined;
-  let productionObjectHint: string | undefined;
 
   // A. Internal write-off to object / production: e.g. "Передан кирпич на объект для производства трубы"
   const internalWriteoffMatch = text.match(
@@ -505,34 +605,52 @@ export function extractRequisitesFromFreeText(
     }
   }
 
-  // D. Extract nomenclature hint before quantity (e.g. "за оконные блоки 133 шт" / "Поступили от ООО «Конкурент» оконные блоки 133 шт" / "Поступил кирпич 10000 шт")
+  // D. Extract nomenclature hint before quantity (purchases & sales: "за оконные блоки 133 шт", "Поставлена продукция Панель ПВХ 226 шт", "Отгружены товары ...")
   if (!nomenclatureHint) {
     const nomBeforeQty = text.match(
-      /(?:за\s+|поступил[аио]?(?:\s+от\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|приобретен[аыо]?(?:\s+у\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|оприходован[аыо]?\s+)([А-Яа-яЁё][А-Яа-яЁё0-9\s-]{2,45}?)\s+\d+(?:[.,]\d+)?\s*(?:шт|ед|компл|упак|рул|м2|м3|кг|т)/iu
+      /(?:за\s+|поставлен[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|отгружен[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|реализован[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|продан[аыо]?(?:\s+товар\p{L}*|\s+продукци[яию])?\s+|поступил[аио]?(?:\s+от\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|приобретен[аыо]?(?:\s+у\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|оприходован[аыо]?\s+)([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{2,55}?)\s+\d+(?:[.,]\d+)?\s*(?:шт|ед|компл|упак|рул|м2|м3|кг|т)/iu
     );
     if (nomBeforeQty && nomBeforeQty[1]) {
       const cleanedNom = nomBeforeQty[1]
-        .replace(/^(?:товары|материалы|сырье|оборудование)\s+/iu, '')
+        .replace(/^(?:товары|материалы|сырье|оборудование|готовая\s+продукция|продукция)\s+/iu, '')
         .trim();
-      if (cleanedNom.length >= 3) {
+      if (cleanedNom.length >= 2) {
         nomenclatureHint = normalizeRussianItemPhraseToNominative(cleanedNom);
       }
     }
   }
 
-  // E. Purchase of named item without explicit quantity right after item: e.g. "Поступил кирпич от ООО СтройБаза" / "Приобретен станок от ООО МашПром" / "Купили спецодежду у ООО Техноавиа"
+  // E. Purchase or sale of named item without explicit quantity right after item
   if (!nomenclatureHint) {
     const nomPurchaseSimple = text.match(
-      /(?:поступил[аио]?|приобретен[аыо]?|купил[аи]?|закуплен[аыо]?)\s+([А-Яа-яЁё][А-Яа-яЁё0-9\s-]{2,35}?)\s+(?:от|у|по\s+накладн|по\s+упд|на\s+сумму|за\s+\d)/iu
+      /(?:поступил[аио]?|приобретен[аыо]?|купил[аи]?|закуплен[аыо]?|поставлен[аыо]?|отгружен[аыо]?|реализован[аыо]?)\s+(?:продукци[яию]\s+|товар[ыа]?\s+)?([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{2,45}?)\s+(?:от|у|покупател\p{L}*|заказчик\p{L}*|по\s+накладн|по\s+упд|по\s+цене|на\s+сумму|за\s+\d)/iu
     );
     if (
       nomPurchaseSimple &&
       nomPurchaseSimple[1] &&
-      !/^(?:на\s+р\/с|на\s+расч|оплата|аванс|выручка|денежные|доля)/iu.test(
+      !/^(?:на\s+р\/с|на\s+расч|оплата|аванс|выручка|денежные|доля|вклад)/iu.test(
         nomPurchaseSimple[1].trim()
       )
     ) {
       nomenclatureHint = normalizeRussianItemPhraseToNominative(nomPurchaseSimple[1]);
+    }
+  }
+
+  // E2. Accountable person FIO (счёт 71.01): "Выдано Федорову Ф.Ф. подотчет", "Авансовый отчет Петрова И.И.", "Возвращен остаток подотчетных сумм Сидоровым С.С."
+  if (!employeeHint) {
+    const accBeforeMatch = text.match(
+      /(?:[Вв]ыда(?:но|н[аы]?|ли)|[Пп]еречислен[аоы]?|[Вв]ыплачен[аоы]?)\s+(?:из\s+кассы\s+|с\s+р\/с(?:ч)?\s+|с\s+расч[её]тн\p{L}*\s+сч[её]та\s+|на\s+карту\s+)?(?:сотруднику\s+|работнику\s+|подотч[её]тному\s+лицу\s+)?([А-ЯЁ][а-яё]+(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.?|[А-ЯЁ][а-яё.]+)){0,2})\s+(?:[Пп]од\s*отч[её]т|[Пп]одотч[её]т|на\s+хоз(?:яйственн\p{L}*)?\s*нужд|на\s+командиров)/u
+    );
+    const accAfterMatch = !accBeforeMatch
+      ? text.match(
+          /(?:[Пп]од\s*отч[её]т|[Пп]одотч[её]т|[Аа]вансов\p{L}*\s+отч[её]т(?:\s*№\s*\S+)?|[Оо]статок\s+подотч[её]тн\p{L}*\s+сумм|[Оо]т\s+подотч[её]тн\p{L}*\s+лица|[Оо]тчитал(?:ся|ась))\s+(?:сотрудник[ауом]?\s+|работник[ауом]?\s+|подотч[её]тн\p{L}*\s+лиц[ауом]?\s+)?([А-ЯЁ][а-яё]+(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.?|[А-ЯЁ][а-яё.]+)){0,2})/u
+        )
+      : null;
+    const rawAccFio = (accBeforeMatch?.[1] || accAfterMatch?.[1] || '')
+      .replace(/\s+(?:на\s+сумму|в\s+сумме|на\s+хоз|на\s+командиров|за\s+приобретен|по\s+рко|по\s+пко).*$/iu, '')
+      .trim();
+    if (rawAccFio.length >= 2) {
+      employeeHint = normalizeDativeEmployeeHint(rawAccFio);
     }
   }
 
@@ -1022,19 +1140,9 @@ function mapTabularRowToDraft(params: {
     reportingYear
   );
 
-  let vatRate: number | undefined;
-  let vatRule: 'included' | 'on_top' | 'none' | undefined;
-  if (/без\s*ндс|не\s*облаг/i.test(`${vatRateCell} ${description}`)) {
-    vatRule = 'none';
-    vatRate = 0;
-  } else if (/плюс\s*ндс|сверху\s*ндс|\+\s*ндс/i.test(description)) {
-    vatRule = 'on_top';
-    const m = `${vatRateCell} ${description}`.match(/(\d{1,2})\s*%/);
-    if (m) vatRate = Number(m[1]);
-  } else if (vatRateCell) {
-    const m = vatRateCell.match(/(\d{1,2})/);
-    if (m) vatRate = Number(m[1]);
-  }
+  const inferredVat = inferVatFromTextAndCell(description, vatRateCell);
+  const vatRate = inferredVat.vatRate;
+  const vatRule = inferredVat.vatRule;
 
   const vatAmountParsed = parseRussianNumber(vatCell);
   const qtyParsed = parseRussianNumber(qtyCell) || extracted.quantity || 0;
@@ -1340,6 +1448,8 @@ function parseRowsMatrixDetailed(params: {
         }
       }
 
+      const inferredRowVat = inferVatFromTextAndCell(desc);
+
       drafts.push({
         rowKey: `${fileIndex}_${sheetName}_${r + 1}`,
         sourceFileName: fileName,
@@ -1347,6 +1457,8 @@ function parseRowsMatrixDetailed(params: {
         docNumber: req.docNumber || (/^\d{1,3}$/.test((fmtRow[0] ?? '').trim()) ? fmtRow[0].trim() : ''),
         description: desc,
         amount: effectiveAmt,
+        vatRate: inferredRowVat.vatRate,
+        vatRule: inferredRowVat.vatRule,
         needsAmount: effectiveAmt < 0.01 ? true : undefined,
         amountCalculationNote: amountNote,
         quantity: req.quantity,
@@ -1562,6 +1674,8 @@ export function parseFreeTextOrDelimitedOperations(
 
     if (!looksLikeAccountingOp) return;
 
+    const inferredLineVat = inferVatFromTextAndCell(line);
+
     drafts.push({
       rowKey: `txt_${fileName}_${lineIdx + 1}`,
       sourceFileName: fileName,
@@ -1569,6 +1683,8 @@ export function parseFreeTextOrDelimitedOperations(
       docNumber: req.docNumber,
       description: line,
       amount,
+      vatRate: inferredLineVat.vatRate,
+      vatRule: inferredLineVat.vatRule,
       needsAmount: amount <= 0 ? true : undefined,
       quantity: req.quantity,
       unitPrice: req.unitPrice,

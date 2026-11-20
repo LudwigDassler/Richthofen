@@ -39,6 +39,12 @@ const INTERNAL_NO_COUNTERPARTY_CATEGORIES = new Set<OperationCategory>([
   'production_output',
   'warehouse_transfer',
   'cash_bank_internal',
+  'accountable_issue',
+  'expense_report',
+  'accountable_return',
+  'loan_received',
+  'loan_repaid',
+  'founder_contribution',
   'depreciation_accrual',
   'insurance_accrual',
   'hr_hire',
@@ -47,6 +53,7 @@ const INTERNAL_NO_COUNTERPARTY_CATEGORIES = new Set<OperationCategory>([
   'bank_fee',
   'tax_payment',
   'closing',
+  'manual',
 ]);
 
 const WAREHOUSE_PRODUCTION_CATEGORIES = new Set<OperationCategory>([
@@ -89,6 +96,15 @@ export function getOperationCardProfile(
   op: Pick<QueuedOperation, 'category' | 'docType1C'>
 ): OperationCardProfile {
   if (
+    op.category === 'accountable_issue' ||
+    op.category === 'expense_report' ||
+    op.category === 'accountable_return' ||
+    op.docType1C === 'АвансовыйОтчет'
+  ) {
+    return 'accountable_71';
+  }
+
+  if (
     op.category === 'hr_hire' ||
     op.category === 'payroll_accrual' ||
     op.category === 'insurance_accrual' ||
@@ -119,7 +135,9 @@ export function getOperationCardProfile(
     op.category === 'tax_payment' ||
     op.category === 'bank_fee' ||
     op.category === 'founder_contribution' ||
-    op.category === 'cash_bank_internal'
+    op.category === 'cash_bank_internal' ||
+    op.category === 'loan_received' ||
+    op.category === 'loan_repaid'
   ) {
     return 'taxes_bank_founders';
   }
@@ -136,6 +154,14 @@ export function getOperationStatusBadgeText(
   const profile = getOperationCardProfile(op);
   if (op.readinessStatus === 'critical_error' || op.needsAmount) {
     return 'Требует проверки';
+  }
+  if (op.category === 'manual' && op.readinessStatus === 'needs_clarification') {
+    return 'Уточните счёт Дт/Кт';
+  }
+  if (profile === 'accountable_71') {
+    if (op.category === 'expense_report') return 'Авансовый отчёт 71.01';
+    if (op.category === 'accountable_return') return 'Возврат подотчёта 71.01';
+    return 'Выдача подотчёт 71.01';
   }
   if (op.category === 'hr_hire' || op.docType1C === 'ПриемНаРаботу') {
     return 'Кадровый приказ 1С';
@@ -200,16 +226,29 @@ export function mapDocTypeToDefaultCategory(
       }
       return 'purchase_goods';
     case 'СписаниеСРасчетногоСчета':
-      if (['tax_payment', 'bank_fee', 'payroll_payout'].includes(prevCategory)) {
+      if (['tax_payment', 'bank_fee', 'payroll_payout', 'accountable_issue', 'loan_repaid'].includes(prevCategory)) {
         return prevCategory;
       }
       return 'bank_out';
     case 'ПоступлениеНаРасчетныйСчет':
-      return prevCategory === 'founder_contribution' ? 'founder_contribution' : 'bank_in';
+      if (['founder_contribution', 'loan_received'].includes(prevCategory)) {
+        return prevCategory;
+      }
+      return 'bank_in';
     case 'ПоступлениеНаличных':
-      return prevCategory === 'cash_bank_internal' ? 'cash_bank_internal' : 'cash_in';
+      if (['cash_bank_internal', 'accountable_return', 'founder_contribution'].includes(prevCategory)) {
+        return prevCategory;
+      }
+      return 'cash_in';
     case 'ВыдачаНаличных':
-      return prevCategory === 'cash_bank_internal' ? 'cash_bank_internal' : 'cash_out';
+      if (['cash_bank_internal', 'accountable_issue', 'payroll_payout'].includes(prevCategory)) {
+        return prevCategory;
+      }
+      return 'cash_out';
+    case 'АвансовыйОтчет':
+      return 'expense_report';
+    case 'ОперацияБух':
+      return prevCategory === 'penalty_claim' ? 'penalty_claim' : 'manual';
     default:
       return prevCategory;
   }
@@ -534,6 +573,107 @@ export function buildOperationMentorGuide1C(
       ],
       commonStudentMistakes: [
         'Создание и ПКО (Дт 50.01 Кт 51), и Списания с расчётного счёта на ту же сумму — в 1С:БП 3.0 кассовый ордер сам формирует движение по счёту 51!',
+      ],
+    };
+  }
+
+  // 7b. Расчёты с подотчётными лицами (счёт 71.01): Выдача под отчёт / Авансовый отчёт / Возврат остатка
+  if (
+    op.category === 'accountable_issue' ||
+    op.category === 'expense_report' ||
+    op.category === 'accountable_return' ||
+    op.docType1C === 'АвансовыйОтчет'
+  ) {
+    const accPerson = op.employeeName || op.counterpartyName || 'Подотчётное лицо (сотрудник)';
+    if (op.category === 'accountable_issue') {
+      const isBank = op.docType1C === 'СписаниеСРасчетногоСчета';
+      return {
+        accountingMeaning: `Выдача денежных средств под отчёт сотруднику организации («${accPerson}») на хозяйственные или командировочные расходы: ${isBank ? 'перечисление с расчётного счёта на карту сотрудника (Дт 71.01 Кт 51)' : 'выдача наличных из кассы по РКО (Дт 71.01 Кт 50.01)'}.`,
+        whyAmountOrVatRule:
+          'Выдача денег под отчёт сотруднику НЕ является расходом и НЕ облагается НДС (0%). Внешний контрагент и счёт-фактура здесь НЕ указываются — аналитика счёта 71.01 ведётся строго по справочнику «Работники организаций / Физические лица».',
+        navigationPath1C: isBank
+          ? 'Раздел «Банк и касса» → «Банковские выписки» → кнопка «Списание» (Вид операции: Перечисление подотчётному лицу)'
+          : 'Раздел «Банк и касса» → «Кассовые документы» → кнопка «Выдача» (РКО, Вид операции: Выдача подотчётному лицу)',
+        documentOperationKind1C: isBank
+          ? 'Списание с расчётного счёта — Вид операции: «Перечисление подотчётному лицу»'
+          : 'Выдача наличных (РКО) — Вид операции: «Выдача подотчётному лицу»',
+        headerFieldsSteps: [
+          { field: 'Вид операции', value: isBank ? 'Перечисление подотчётному лицу' : 'Выдача подотчётному лицу' },
+          { field: 'От (Дата)', value: dateRu },
+          { field: 'Подотчётное лицо (Получатель)', value: accPerson, hint: 'Выберите сотрудника из справочника Физические лица' },
+          { field: 'Сумма', value: formatMoneyRu(op.amount) },
+          { field: 'Назначение (Основание)', value: op.description },
+        ],
+        tabularAndTabsSteps: [
+          {
+            tabName: 'Проведение документа',
+            instruction: `Проверьте счёт расчётов 71.01 и нажмите «Провести и закрыть». За сотрудником «${accPerson}» образуется дебетовая задолженность на счёте 71.01 до утверждения Авансового отчёта.`,
+          },
+        ],
+        referencePostings: buildRefPostingsFromEntries(formatMoneyRu(op.amount)),
+        selfCheckOsv: [
+          `Откройте «ОСВ по счёту 71.01»: по сотруднику «${accPerson}» отражён дебетовый оборот ${formatMoneyRu(op.amount)}.`,
+        ],
+        commonStudentMistakes: [
+          'Создание документа «Поступление товаров и услуг» с НДС 20% вместо РКО / Списания с р/с с видом операции «Выдача подотчётному лицу».',
+          'Попытка выбрать сотрудника в справочнике «Контрагенты» вместо «Физические лица».',
+        ],
+      };
+    }
+
+    if (op.category === 'accountable_return') {
+      return {
+        accountingMeaning: `Возврат неизрасходованного остатка подотчётных сумм сотрудником «${accPerson}» в кассу организации по приходному кассовому ордеру (Дт 50.01 Кт 71.01).`,
+        whyAmountOrVatRule: 'Возврат подотчётных средств НДС не облагается, внешний контрагент не указывается.',
+        navigationPath1C: 'Раздел «Банк и касса» → «Кассовые документы» → кнопка «Поступление» (ПКО)',
+        documentOperationKind1C: 'Поступление наличных (ПКО) — Вид операции: «Возврат от подотчётного лица»',
+        headerFieldsSteps: [
+          { field: 'Вид операции', value: 'Возврат от подотчётного лица' },
+          { field: 'От (Дата)', value: dateRu },
+          { field: 'Подотчётное лицо', value: accPerson },
+          { field: 'Сумма', value: formatMoneyRu(op.amount) },
+        ],
+        tabularAndTabsSteps: [
+          {
+            tabName: 'Реквизиты ПКО',
+            instruction: 'Заполните основание «Возврат неизрасходованной подотчётной суммы» и проведите документ.',
+          },
+        ],
+        referencePostings: buildRefPostingsFromEntries(formatMoneyRu(op.amount)),
+        selfCheckOsv: [
+          `Проверьте «ОСВ по счёту 71.01»: задолженность подотчётного лица «${accPerson}» должна закрыться в 0,00 ₽.`,
+        ],
+        commonStudentMistakes: [
+          'Выбор вида операции «Оплата от покупателя» (счёт 62) вместо «Возврат от подотчётного лица» (счёт 71.01).',
+        ],
+      };
+    }
+
+    return {
+      accountingMeaning: `Утверждение авансового отчёта сотрудника «${accPerson}» по израсходованным подотчётным суммам (приобретение ТМЦ, хозрасходы или командировочные): списание задолженности с кредита счёта 71.01 в дебет счетов учёта запасов или затрат.`,
+      whyAmountOrVatRule:
+        op.vatAmount > 0
+          ? `К авансовому отчёту приложен счёт-фактура / чек с выделенным НДС (${formatMoneyRu(op.vatAmount)}).`
+          : 'Без счёта-фактуры (по кассовому/товарному чеку) вся сумма относится на стоимость ТМЦ или расходов без выделения НДС на счёт 19.',
+      navigationPath1C: 'Раздел «Банк и касса» → «Касса» → «Авансовые отчёты» → кнопка «Создать»',
+      documentOperationKind1C: 'Авансовый отчёт (счёт 71.01)',
+      headerFieldsSteps: [
+        { field: 'От (Дата)', value: dateRu },
+        { field: 'Подотчётное лицо', value: accPerson },
+        { field: 'Склад', value: wh },
+      ],
+      tabularAndTabsSteps: [
+        {
+          tabName: 'Вкладки «Авансы» и «Товары» / «Прочее»',
+          instruction: `На вкладке «Авансы» подтяните выданный РКО/перечисление. На вкладке «Товары» (для материалов/ТМЦ) или «Прочее» (для услуг/командировочных) укажите подтверждающий чек и сумму ${formatMoneyRu(op.amount)}.`,
+        },
+      ],
+      referencePostings: buildRefPostingsFromEntries(formatMoneyRu(op.amount)),
+      selfCheckOsv: [
+        `Проверьте «ОСВ по счёту 71.01» по сотруднику «${accPerson}» после проведения отчёта.`,
+      ],
+      commonStudentMistakes: [
+        'Выделение НДС на счёт 19.03 по обычному кассовому чеку без счёта-фактуры (в НУ такой НДС нельзя принять к вычету и списывать в расходы).',
       ],
     };
   }

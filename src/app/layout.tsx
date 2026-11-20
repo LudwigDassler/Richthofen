@@ -1,10 +1,11 @@
 import type { Metadata } from 'next';
-import { Manrope, JetBrains_Mono } from 'next/font/google';
+import { Inter, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 import { AccountantProvider } from '@/context/AccountantContext';
 
-const manrope = Manrope({
+const inter = Inter({
   subsets: ['latin', 'cyrillic'],
+  weight: ['400', '500', '600', '700'],
   variable: '--font-sans',
   display: 'swap',
 });
@@ -37,9 +38,9 @@ export default function RootLayout({
     <html
       lang="ru"
       suppressHydrationWarning
-      className={`${manrope.variable} ${jetbrainsMono.variable}`}
+      className={`${inter.variable} ${jetbrainsMono.variable}`}
     >
-      <body className="min-h-screen font-sans bg-[#F8F9FA] text-zinc-950 dark:bg-[#0B0C0E] dark:text-zinc-100 antialiased selection:bg-amber-600 selection:text-white">
+      <body className="min-h-screen font-sans bg-[#F7F8FA] text-slate-900 dark:bg-slate-950 dark:text-slate-100 antialiased selection:bg-slate-900 selection:text-white dark:selection:bg-amber-500 dark:selection:text-slate-950">
         <AccountantProvider>{children}</AccountantProvider>
       </body>
     </html>

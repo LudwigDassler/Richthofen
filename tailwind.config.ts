@@ -13,14 +13,14 @@ const config: Config = {
     extend: {
       colors: {
         surface: {
-          app: '#F8F9FA',
+          app: '#F7F8FA',
           panel: '#FFFFFF',
-          darkApp: '#0B0C0E',
-          darkPanel: '#121418',
+          darkApp: '#020617',
+          darkPanel: '#0F172A',
         },
         hairline: {
-          light: '#E4E4E7',
-          dark: '#27272A',
+          light: '#E2E8F0',
+          dark: '#1E293B',
         },
       },
       fontFamily: {

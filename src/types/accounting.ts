@@ -279,6 +279,11 @@ export type OperationCategory =
   | 'production_output'
   | 'warehouse_transfer'
   | 'cash_bank_internal'
+  | 'accountable_issue'
+  | 'expense_report'
+  | 'accountable_return'
+  | 'loan_received'
+  | 'loan_repaid'
   | 'depreciation_accrual'
   | 'insurance_accrual'
   | 'cash_out'
@@ -299,6 +304,7 @@ export type OperationCardProfile =
   | 'trade_services'
   | 'warehouse_production'
   | 'hr_payroll'
+  | 'accountable_71'
   | 'os_regulatory'
   | 'taxes_bank_founders';
 

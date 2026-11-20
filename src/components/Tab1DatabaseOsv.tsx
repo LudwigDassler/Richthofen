@@ -18,7 +18,6 @@ import {
   Layers,
   RefreshCw,
   Search,
-  Sparkles,
   X,
 } from 'lucide-react';
 import { useAccountant } from '@/context/AccountantContext';
@@ -236,7 +235,6 @@ export function Tab1DatabaseOsv() {
     const direct = osvReport.movementsByAccount?.[selectedAccountDrilldown];
     if (direct && direct.length > 0) return direct;
 
-    // Fallback aggregation if synthetic group row (e.g. '60' or '90') was clicked
     const byChildren: OsvAccountMovement[] = [];
     const map = osvReport.movementsByAccount ?? {};
     for (const [accCode, list] of Object.entries(map)) {
@@ -355,10 +353,10 @@ export function Tab1DatabaseOsv() {
           }}
           onDragLeave={() => setIsDragging(false)}
           onDrop={handleDrop}
-          className={`rounded-lg border-2 border-dashed p-8 sm:p-12 bg-white dark:bg-[#121418] transition-colors ${
+          className={`rounded-2xl border-2 border-dashed p-8 sm:p-12 bg-white dark:bg-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-colors ${
             isDragging
               ? 'border-amber-500 bg-amber-50/40 dark:bg-amber-950/20'
-              : 'border-zinc-300 dark:border-zinc-800'
+              : 'border-slate-300/80 dark:border-slate-800'
           }`}
         >
           <input
@@ -374,50 +372,64 @@ export function Tab1DatabaseOsv() {
           />
 
           <div className="max-w-xl mx-auto text-center space-y-4">
-            <div className="w-12 h-12 mx-auto rounded-lg bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-800 flex items-center justify-center text-amber-600">
-              <FileJson className="w-6 h-6" />
+            <div className="w-12 h-12 mx-auto rounded-2xl bg-amber-50 dark:bg-amber-950/50 border border-amber-200/80 dark:border-amber-800 flex items-center justify-center text-amber-600">
+              <FileJson className="w-6 h-6" strokeWidth={1.6} />
             </div>
 
-            <h1 className="text-xl font-semibold text-zinc-950 dark:text-white tracking-tight">
+            <h1 className="text-xl font-semibold text-slate-900 dark:text-white tracking-tight">
               Оборотно-сальдовая ведомость и база 1С:Бухгалтерия 8.3
             </h1>
 
-            <p className="text-sm text-zinc-600 dark:text-zinc-400 leading-relaxed">
-              Перетащите сюда JSON-выгрузку базы 1С (<code className="font-mono text-xs px-1 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800">Организация</code>,{' '}
-              <code className="font-mono text-xs px-1 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800">Остатки</code>,{' '}
-              <code className="font-mono text-xs px-1 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800">Проводки</code>,{' '}
-              <code className="font-mono text-xs px-1 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800">ВсеСправочники</code>) либо сразу загрузите Excel-файлы учебного задания во вкладке «Загрузка и автопроводки» — сводная ОСВ построится автоматически.
+            <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+              Перетащите сюда JSON-выгрузку базы 1С (
+              <code className="font-mono text-xs px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800">
+                Организация
+              </code>
+              ,{' '}
+              <code className="font-mono text-xs px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800">
+                Остатки
+              </code>
+              ,{' '}
+              <code className="font-mono text-xs px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800">
+                Проводки
+              </code>
+              ,{' '}
+              <code className="font-mono text-xs px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800">
+                ВсеСправочники
+              </code>
+              ) либо сразу загрузите Excel-файлы учебного задания во вкладке «Загрузка и автопроводки» — сводная ОСВ построится автоматически.
             </p>
 
             <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="inline-flex items-center gap-2 px-4 py-2.5 rounded bg-amber-600 hover:bg-amber-700 text-white text-sm font-medium transition-colors"
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-sm font-medium transition-colors"
               >
-                <FolderOpen className="w-4 h-4" />
+                <FolderOpen className="w-4 h-4" strokeWidth={1.6} />
                 Выбрать выгрузку базы 1С (.json)
               </button>
 
               <button
                 type="button"
                 onClick={() => setActiveTab('import_postings')}
-                className="inline-flex items-center gap-2 px-4 py-2.5 rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800 text-sm font-medium text-zinc-900 dark:text-zinc-100 transition-colors"
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-sm font-medium text-slate-900 dark:text-slate-100 transition-colors"
               >
                 Загрузить Excel-файлы с операциями
-                <ArrowRight className="w-4 h-4 text-amber-600" />
+                <ArrowRight className="w-4 h-4 text-amber-600" strokeWidth={1.6} />
               </button>
             </div>
 
-            <div className="pt-4 border-t border-zinc-200 dark:border-zinc-800 flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
+            <div className="pt-4 border-t border-slate-200/80 dark:border-slate-800 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
               <span>Подключена внешняя публикация 1С?</span>
               <button
                 type="button"
                 onClick={() => syncWith1CEndpoint(false)}
                 disabled={syncStatus === 'syncing'}
-                className="inline-flex items-center gap-1.5 font-medium text-zinc-700 dark:text-zinc-300 hover:text-zinc-950 dark:hover:text-white"
+                className="inline-flex items-center gap-1.5 font-medium text-slate-700 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white"
               >
                 <RefreshCw
+                  strokeWidth={1.6}
                   className={`w-3.5 h-3.5 ${syncStatus === 'syncing' ? 'animate-spin text-amber-600' : ''}`}
                 />
                 Проверить /api/1c-sync
@@ -439,85 +451,85 @@ export function Tab1DatabaseOsv() {
   return (
     <div className="space-y-4">
       {/* Summary KPI Strip */}
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3.5">
-          <div className="text-xs text-zinc-500 dark:text-zinc-400">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3.5">
+        <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.04)] p-4">
+          <div className="text-xs text-slate-500 dark:text-slate-400">
             Сальдо на начало (Дт)
           </div>
-          <div className="mt-1 text-lg font-mono font-semibold tabular-nums text-zinc-950 dark:text-white">
+          <div className="mt-1 text-lg font-semibold tabular-nums text-slate-900 dark:text-white">
             {formatMoneyWithCurrency(osvReport.totals.startDebit)}
           </div>
-          <div className="mt-0.5 text-[11px] font-mono tabular-nums text-zinc-500">
+          <div className="mt-0.5 text-[11px] tabular-nums text-slate-500">
             Кт: {formatMoneyWithCurrency(osvReport.totals.startCredit)}
           </div>
         </div>
 
-        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3.5">
-          <div className="text-xs text-zinc-500 dark:text-zinc-400">
+        <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.04)] p-4">
+          <div className="text-xs text-slate-500 dark:text-slate-400">
             Обороты за период
           </div>
-          <div className="mt-1 text-lg font-mono font-semibold tabular-nums text-zinc-950 dark:text-white">
+          <div className="mt-1 text-lg font-semibold tabular-nums text-slate-900 dark:text-white">
             {formatMoneyWithCurrency(osvReport.totals.turnoverDebit)}
           </div>
-          <div className="mt-0.5 text-[11px] font-mono tabular-nums text-zinc-500">
+          <div className="mt-0.5 text-[11px] tabular-nums text-slate-500">
             БД: {db1C?.postings.length ?? 0} · Новых оп.: {activeOpsCount}
           </div>
         </div>
 
-        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3.5">
-          <div className="text-xs text-zinc-500 dark:text-zinc-400">
+        <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.04)] p-4">
+          <div className="text-xs text-slate-500 dark:text-slate-400">
             Сальдо на конец (Дт)
           </div>
-          <div className="mt-1 text-lg font-mono font-semibold tabular-nums text-zinc-950 dark:text-white">
+          <div className="mt-1 text-lg font-semibold tabular-nums text-slate-900 dark:text-white">
             {formatMoneyWithCurrency(osvReport.totals.endDebit)}
           </div>
-          <div className="mt-0.5 text-[11px] font-mono tabular-nums text-zinc-500">
+          <div className="mt-0.5 text-[11px] tabular-nums text-slate-500">
             Кт: {formatMoneyWithCurrency(osvReport.totals.endCredit)}
           </div>
         </div>
 
-        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3.5">
-          <div className="text-xs text-zinc-500 dark:text-zinc-400">
+        <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.04)] p-4">
+          <div className="text-xs text-slate-500 dark:text-slate-400">
             Контроль двойной записи
           </div>
           <div className="mt-1 flex items-center gap-1.5">
             {allBalanced ? (
               <>
-                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" strokeWidth={1.6} />
                 <span className="text-sm font-semibold text-emerald-700 dark:text-emerald-400">
                   Σ Дт = Σ Кт сходится
                 </span>
               </>
             ) : (
               <>
-                <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
-                <span className="text-sm font-semibold font-mono tabular-nums text-red-600 dark:text-red-400">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" strokeWidth={1.6} />
+                <span className="text-sm font-semibold tabular-nums text-rose-600 dark:text-rose-400">
                   Δ {formatMoneyWithCurrency(osvReport.totals.endDiff)}
                 </span>
               </>
             )}
           </div>
-          <div className="mt-0.5 text-[11px] text-zinc-500 truncate">
+          <div className="mt-0.5 text-[11px] tabular-nums text-slate-500 truncate">
             Счетов с движением: {osvReport.leafRows.length}
           </div>
         </div>
 
-        <div className="col-span-2 lg:col-span-1 rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3.5 flex flex-col justify-between">
-          <div className="text-xs text-zinc-500 dark:text-zinc-400">
+        <div className="col-span-2 lg:col-span-1 rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.04)] p-4 flex flex-col justify-between">
+          <div className="text-xs text-slate-500 dark:text-slate-400">
             Быстрые переходы
           </div>
           <div className="mt-1 flex items-center justify-between gap-2 text-xs">
             <button
               type="button"
               onClick={() => setActiveTab('import_postings')}
-              className="font-medium text-amber-700 dark:text-amber-400 hover:underline whitespace-nowrap"
+              className="font-medium tabular-nums text-amber-700 dark:text-amber-400 hover:underline whitespace-nowrap"
             >
               Операции ({operations.length}) →
             </button>
             <button
               type="button"
               onClick={() => setActiveTab('audit_autofix')}
-              className="font-medium text-zinc-700 dark:text-zinc-300 hover:underline whitespace-nowrap"
+              className="font-medium text-slate-700 dark:text-slate-300 hover:underline whitespace-nowrap"
             >
               Аудит →
             </button>
@@ -526,19 +538,19 @@ export function Tab1DatabaseOsv() {
       </div>
 
       {/* Sub-navigation + Source Segmented Control */}
-      <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] p-3 space-y-3">
+      <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.04)] p-4 space-y-3.5">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-1 p-1 rounded-md bg-zinc-100 dark:bg-zinc-900 max-w-full">
+          <div className="flex flex-wrap items-center gap-1 p-1 rounded-xl bg-slate-100/90 dark:bg-slate-800/80 max-w-full">
             <button
               type="button"
               onClick={() => setSubView('osv')}
-              className={`inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded text-xs font-medium whitespace-nowrap transition-colors ${
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
                 subView === 'osv'
-                  ? 'bg-white text-zinc-950 shadow-sm dark:bg-zinc-800 dark:text-white'
-                  : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-950 dark:hover:text-white'
+                  ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <Layers className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+              <Layers className="w-3.5 h-3.5 text-amber-600 shrink-0" strokeWidth={1.6} />
               <span className="sm:hidden">Ведомость (ОСВ)</span>
               <span className="hidden sm:inline">Оборотно-сальдовая ведомость (ОСВ)</span>
             </button>
@@ -546,13 +558,13 @@ export function Tab1DatabaseOsv() {
               type="button"
               onClick={() => setSubView('explorer')}
               disabled={!db1C}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium whitespace-nowrap transition-colors disabled:opacity-40 ${
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors disabled:opacity-40 ${
                 subView === 'explorer'
-                  ? 'bg-white text-zinc-950 shadow-sm dark:bg-zinc-800 dark:text-white'
-                  : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-950 dark:hover:text-white'
+                  ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <Database className="w-3.5 h-3.5" />
+              <Database className="w-3.5 h-3.5" strokeWidth={1.6} />
               Справочники, Документы и Регистры 1С
             </button>
           </div>
@@ -562,7 +574,7 @@ export function Tab1DatabaseOsv() {
             <div
               role="group"
               aria-label="Источник данных ОСВ"
-              className="flex flex-wrap items-center gap-1 p-1 rounded-md bg-zinc-100 dark:bg-zinc-900 text-xs"
+              className="flex flex-wrap items-center gap-1 p-1 rounded-xl bg-slate-100/90 dark:bg-slate-800/80 text-xs"
             >
               {(
                 [
@@ -577,10 +589,10 @@ export function Tab1DatabaseOsv() {
                     key={mode}
                     type="button"
                     onClick={() => setOsvSourceMode(mode)}
-                    className={`px-2.5 py-1 rounded font-medium whitespace-nowrap transition-colors ${
+                    className={`px-3 py-1.5 rounded-lg font-medium tabular-nums whitespace-nowrap transition-colors ${
                       active
-                        ? 'bg-white text-zinc-950 shadow-sm dark:bg-zinc-800 dark:text-white'
-                        : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-950 dark:hover:text-white'
+                        ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                     }`}
                   >
                     {label}
@@ -593,32 +605,32 @@ export function Tab1DatabaseOsv() {
 
         {/* Flexible Period Bar + Quick Presets + Search & Toggles */}
         {subView === 'osv' && (
-          <div className="pt-2.5 border-t border-zinc-100 dark:border-zinc-800/80 space-y-2.5 text-xs">
+          <div className="pt-3 border-t border-slate-100 dark:border-slate-800/80 space-y-3 text-xs">
             <div className="flex flex-wrap items-center justify-between gap-3">
               {/* Arbitrary Date Inputs + Month Dropdown */}
               <div className="flex flex-wrap items-center gap-2">
-                <span className="inline-flex items-center gap-1 font-medium text-zinc-700 dark:text-zinc-300">
-                  <Calendar className="w-3.5 h-3.5 text-amber-600" />
+                <span className="inline-flex items-center gap-1.5 font-medium text-slate-700 dark:text-slate-300">
+                  <Calendar className="w-3.5 h-3.5 text-amber-600" strokeWidth={1.6} />
                   Период ОСВ:
                 </span>
                 <input
                   type="date"
                   aria-label="ОСВ с даты"
-                  value={periodFilter.dateFrom}
+                  value={periodFilter.dateFrom ?? ''}
                   onChange={(e) =>
                     setPeriodFilter({ ...periodFilter, dateFrom: e.target.value })
                   }
-                  className="px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono tabular-nums text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:border-amber-600"
+                  className="px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 tabular-nums text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-amber-600"
                 />
-                <span className="text-zinc-400">—</span>
+                <span className="text-slate-400">—</span>
                 <input
                   type="date"
                   aria-label="ОСВ по дату"
-                  value={periodFilter.dateTo}
+                  value={periodFilter.dateTo ?? ''}
                   onChange={(e) =>
                     setPeriodFilter({ ...periodFilter, dateTo: e.target.value })
                   }
-                  className="px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono tabular-nums text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:border-amber-600"
+                  className="px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 tabular-nums text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-amber-600"
                 />
 
                 <select
@@ -635,7 +647,7 @@ export function Tab1DatabaseOsv() {
                       });
                     }
                   }}
-                  className="px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs text-zinc-800 dark:text-zinc-200"
+                  className="px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-800 dark:text-slate-200"
                 >
                   <option value="">По месяцам ({reportingYear})...</option>
                   {MONTH_OPTIONS.map((m) => (
@@ -647,7 +659,7 @@ export function Tab1DatabaseOsv() {
               </div>
 
               {/* 1-Click Quarter / Half-year / Year Presets */}
-              <div className="flex flex-wrap items-center gap-1">
+              <div className="flex flex-wrap items-center gap-1.5">
                 {periodPresets.map((preset) => {
                   const isCurrent =
                     periodFilter.dateFrom === preset.dateFrom &&
@@ -662,10 +674,10 @@ export function Tab1DatabaseOsv() {
                           dateTo: preset.dateTo,
                         })
                       }
-                      className={`px-2 py-1 rounded border text-[11px] font-medium whitespace-nowrap transition-colors ${
+                      className={`px-3 py-1 rounded-full border text-[11px] font-medium tabular-nums whitespace-nowrap transition-colors ${
                         isCurrent
-                          ? 'border-amber-600 bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-700'
-                          : 'border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-800'
+                          ? 'border-amber-500 bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-700'
+                          : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                       }`}
                     >
                       {preset.label}
@@ -676,50 +688,53 @@ export function Tab1DatabaseOsv() {
             </div>
 
             {/* Search + Subconto / Off-balance Toggles + Excel Export */}
-            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+            <div className="flex flex-wrap items-center justify-between gap-2.5 pt-0.5">
               <div className="flex flex-wrap items-center gap-2">
                 <div className="relative w-56 sm:w-64">
-                  <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                  <Search
+                    strokeWidth={1.6}
+                    className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"
+                  />
                   <input
                     type="text"
                     aria-label="Поиск счёта или субконто в ОСВ"
                     value={osvAccountSearch}
                     onChange={(e) => setOsvAccountSearch(e.target.value)}
                     placeholder="Код счёта, название или субконто..."
-                    className="w-full pl-8 pr-7 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:border-amber-600"
+                    className="w-full pl-8 pr-7 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-amber-600"
                   />
                   {osvAccountSearch && (
                     <button
                       type="button"
                       aria-label="Очистить поиск счёта"
                       onClick={() => setOsvAccountSearch('')}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-700"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
                     >
-                      <X className="w-3 h-3" />
+                      <X className="w-3.5 h-3.5" strokeWidth={1.6} />
                     </button>
                   )}
                 </div>
 
-                <label className="inline-flex items-center gap-1.5 cursor-pointer select-none px-2.5 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-zinc-50/70 dark:bg-zinc-900/50">
+                <label className="inline-flex items-center gap-1.5 cursor-pointer select-none px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-900/50">
                   <input
                     type="checkbox"
                     checked={expandSubconto}
                     onChange={(e) => setExpandSubconto(e.target.checked)}
-                    className="rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                    className="rounded border-slate-300 text-amber-600 focus:ring-amber-500"
                   />
-                  <span className="text-zinc-800 dark:text-zinc-200 font-medium whitespace-nowrap">
+                  <span className="text-slate-800 dark:text-slate-200 font-medium whitespace-nowrap">
                     Развернуть по субконто
                   </span>
                 </label>
 
-                <label className="inline-flex items-center gap-1.5 cursor-pointer select-none px-2.5 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-zinc-50/70 dark:bg-zinc-900/50">
+                <label className="inline-flex items-center gap-1.5 cursor-pointer select-none px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-900/50">
                   <input
                     type="checkbox"
                     checked={showOffBalance}
                     onChange={(e) => setShowOffBalance(e.target.checked)}
-                    className="rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                    className="rounded border-slate-300 text-amber-600 focus:ring-amber-500"
                   />
-                  <span className="text-zinc-700 dark:text-zinc-300 whitespace-nowrap">
+                  <span className="text-slate-700 dark:text-slate-300 whitespace-nowrap">
                     Забалансовые (МЦ.02, МЦ.04)
                   </span>
                 </label>
@@ -733,7 +748,7 @@ export function Tab1DatabaseOsv() {
                       onChange={(e) =>
                         setBalanceAnchorOverride(e.target.value as BalanceAnchorOverride)
                       }
-                      className="px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs text-zinc-700 dark:text-zinc-300"
+                      className="px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-700 dark:text-slate-300"
                     >
                       <option value="auto">Сальдо БД: Авто</option>
                       <option value="treat_raw_as_end">Остатки файла = Конец периода</option>
@@ -746,23 +761,23 @@ export function Tab1DatabaseOsv() {
                 <button
                   type="button"
                   onClick={() => setAllGroupsCollapsed(false)}
-                  className="px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 whitespace-nowrap"
+                  className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 whitespace-nowrap transition-colors"
                 >
                   Развернуть субсчета
                 </button>
                 <button
                   type="button"
                   onClick={() => setAllGroupsCollapsed(true)}
-                  className="px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 whitespace-nowrap"
+                  className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 whitespace-nowrap transition-colors"
                 >
                   Свернуть группы
                 </button>
                 <button
                   type="button"
                   onClick={exportOsvToExcel}
-                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-100 dark:hover:bg-zinc-200 dark:text-zinc-950 font-medium whitespace-nowrap transition-colors"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white dark:bg-slate-100 dark:hover:bg-slate-200 dark:text-slate-950 font-medium whitespace-nowrap transition-colors"
                 >
-                  <Download className="w-3.5 h-3.5 text-amber-400 dark:text-amber-600" />
+                  <Download className="w-3.5 h-3.5 text-amber-400 dark:text-amber-600" strokeWidth={1.6} />
                   Скачать ОСВ в Excel (.xlsx)
                 </button>
               </div>
@@ -776,51 +791,51 @@ export function Tab1DatabaseOsv() {
         <div className="space-y-4">
           {/* 5 Smart Auditor Hints Block */}
           {auditorHints.length > 0 && (
-            <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] divide-y divide-zinc-100 dark:divide-zinc-800/80">
-              <div className="px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 bg-zinc-50/70 dark:bg-zinc-900/40 text-xs">
-                <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+            <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.04)] overflow-hidden divide-y divide-slate-100 dark:divide-slate-800/80">
+              <div className="px-5 py-3 flex flex-wrap items-center justify-between gap-2 bg-slate-50/70 dark:bg-slate-800/40 text-xs">
+                <span className="font-semibold text-slate-900 dark:text-slate-100">
                   Умные подсказки главного бухгалтера по текущей ОСВ ({formatDateRu(periodFilter.dateFrom)} — {formatDateRu(periodFilter.dateTo)})
                 </span>
-                <span className="text-zinc-500 dark:text-zinc-400">
+                <span className="text-slate-500 dark:text-slate-400">
                   Нажмите на любой счёт в таблице ниже, чтобы открыть «Карточку счёта»
                 </span>
               </div>
 
-              <div className="divide-y divide-zinc-100 dark:divide-zinc-800/70">
+              <div className="divide-y divide-slate-100 dark:divide-slate-800/70">
                 {auditorHints.map((hint) => (
                   <div
                     key={hint.id}
-                    className="px-4 py-2.5 flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 text-xs"
+                    className="px-5 py-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs"
                   >
                     <div className="flex items-start gap-2.5 min-w-0">
                       {hint.severity === 'error' ? (
-                        <AlertCircle className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+                        <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" strokeWidth={1.6} />
                       ) : hint.severity === 'warning' ? (
-                        <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                        <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" strokeWidth={1.6} />
                       ) : (
-                        <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" strokeWidth={1.6} />
                       )}
                       <div className="space-y-0.5 min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+                          <span className="font-semibold text-slate-900 dark:text-slate-100">
                             {hint.title}
                           </span>
                           {hint.accountCode && (
                             <button
                               type="button"
                               onClick={() => setSelectedAccountDrilldown(hint.accountCode!)}
-                              className="font-mono text-[11px] text-amber-700 dark:text-amber-400 hover:underline"
+                              className="tabular-nums text-[11px] font-medium text-amber-700 dark:text-amber-400 hover:underline"
                             >
                               · Карточка счёта {hint.accountCode}
                             </button>
                           )}
                         </div>
-                        <p className="text-zinc-600 dark:text-zinc-400 leading-relaxed">
+                        <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
                           {hint.explanation}
                         </p>
                         {hint.howToFix1C && (
-                          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                            <strong className="font-medium text-zinc-700 dark:text-zinc-300">
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                            <strong className="font-medium text-slate-700 dark:text-slate-300">
                               В 1С:БП 3.0:{' '}
                             </strong>
                             {hint.howToFix1C}
@@ -836,9 +851,8 @@ export function Tab1DatabaseOsv() {
                           <button
                             type="button"
                             onClick={() => runSmartAutoFixAll()}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-700 text-white font-medium text-xs whitespace-nowrap transition-colors"
+                            className="inline-flex items-center justify-center px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-medium text-xs whitespace-nowrap transition-colors"
                           >
-                            <Sparkles className="w-3.5 h-3.5" />
                             {hint.quickActionLabel || 'Исправить автоматически'}
                           </button>
                         )}
@@ -846,10 +860,10 @@ export function Tab1DatabaseOsv() {
                           <button
                             type="button"
                             onClick={() => jumpToOperation(hint.operationId!)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-800 dark:text-zinc-200 font-medium text-xs whitespace-nowrap transition-colors"
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 font-medium text-xs whitespace-nowrap transition-colors"
                           >
                             {hint.quickActionLabel || 'Перейти к операции'}
-                            <ExternalLink className="w-3 h-3" />
+                            <ExternalLink className="w-3 h-3" strokeWidth={1.6} />
                           </button>
                         )}
                       </div>
@@ -861,270 +875,272 @@ export function Tab1DatabaseOsv() {
           )}
 
           {/* Balance calculation provenance bar */}
-          <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 rounded border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/50 text-xs text-zinc-600 dark:text-zinc-400">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.03)] text-xs text-slate-600 dark:text-slate-400">
             <span>
-              <strong className="font-medium text-zinc-800 dark:text-zinc-200">
+              <strong className="font-medium text-slate-800 dark:text-slate-200">
                 Методика расчёта ({reportingYear} г.):{' '}
               </strong>
               {osvReport.balanceModeDescription}
               {historicalPostingsCount > 0 && osvSourceMode !== 'queued_only' && (
-                <span className="ml-1.5 text-amber-700 dark:text-amber-400">
+                <span className="ml-1.5 text-amber-700 dark:text-amber-400 tabular-nums">
                   · Архив до 01.01.{reportingYear} ({historicalPostingsCount} провод.) свёрнут во входящее сальдо
                 </span>
               )}
             </span>
-            <span className="font-mono tabular-nums">
+            <span className="tabular-nums font-medium text-slate-700 dark:text-slate-300">
               {formatDateRu(periodFilter.dateFrom)} — {formatDateRu(periodFilter.dateTo)}
             </span>
           </div>
 
           {/* Main OSV Table */}
-          <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] overflow-x-auto">
-            <table className="w-full text-xs border-collapse">
-              <thead>
-                <tr className="border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/70 text-zinc-600 dark:text-zinc-400">
-                  <th
-                    rowSpan={2}
-                    className="py-2.5 px-3 text-left font-semibold w-28 border-r border-zinc-200 dark:border-zinc-800"
-                  >
-                    Счёт
-                  </th>
-                  <th
-                    rowSpan={2}
-                    className="py-2.5 px-3 text-left font-semibold min-w-[240px] border-r border-zinc-200 dark:border-zinc-800"
-                  >
-                    Наименование счёта {expandSubconto ? '/ Субконто' : ''}
-                  </th>
-                  <th
-                    colSpan={2}
-                    className="py-1.5 px-3 text-center font-semibold border-b border-r border-zinc-200 dark:border-zinc-800"
-                  >
-                    Сальдо на начало периода
-                  </th>
-                  <th
-                    colSpan={2}
-                    className="py-1.5 px-3 text-center font-semibold border-b border-r border-zinc-200 dark:border-zinc-800"
-                  >
-                    Обороты за период
-                  </th>
-                  <th
-                    colSpan={2}
-                    className="py-1.5 px-3 text-center font-semibold border-b border-zinc-200 dark:border-zinc-800"
-                  >
-                    Сальдо на конец периода
-                  </th>
-                </tr>
-                <tr className="border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-900/50 text-[11px] text-zinc-500">
-                  <th className="py-1.5 px-3 text-right font-medium border-r border-zinc-200 dark:border-zinc-800 w-32">
-                    Дебет
-                  </th>
-                  <th className="py-1.5 px-3 text-right font-medium border-r border-zinc-200 dark:border-zinc-800 w-32">
-                    Кредит
-                  </th>
-                  <th className="py-1.5 px-3 text-right font-medium border-r border-zinc-200 dark:border-zinc-800 w-32">
-                    Дебет
-                  </th>
-                  <th className="py-1.5 px-3 text-right font-medium border-r border-zinc-200 dark:border-zinc-800 w-32">
-                    Кредит
-                  </th>
-                  <th className="py-1.5 px-3 text-right font-medium border-r border-zinc-200 dark:border-zinc-800 w-32">
-                    Дебет
-                  </th>
-                  <th className="py-1.5 px-3 text-right font-medium w-32">Кредит</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800/70">
-                {visibleOsvRows.length === 0 ? (
-                  <tr>
-                    <td colSpan={8} className="py-10 text-center text-zinc-500">
-                      Нет движений и остатков за выбранный период ({formatDateRu(periodFilter.dateFrom)} — {formatDateRu(periodFilter.dateTo)}).
-                    </td>
+          <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.04)] overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400">
+                    <th
+                      rowSpan={2}
+                      className="py-3 px-3.5 text-left font-semibold w-28 border-r border-slate-200/80 dark:border-slate-800"
+                    >
+                      Счёт
+                    </th>
+                    <th
+                      rowSpan={2}
+                      className="py-3 px-3.5 text-left font-semibold min-w-[240px] border-r border-slate-200/80 dark:border-slate-800"
+                    >
+                      Наименование счёта {expandSubconto ? '/ Субконто' : ''}
+                    </th>
+                    <th
+                      colSpan={2}
+                      className="py-2 px-3 text-center font-semibold border-b border-r border-slate-200/80 dark:border-slate-800"
+                    >
+                      Сальдо на начало периода
+                    </th>
+                    <th
+                      colSpan={2}
+                      className="py-2 px-3 text-center font-semibold border-b border-r border-slate-200/80 dark:border-slate-800"
+                    >
+                      Обороты за период
+                    </th>
+                    <th
+                      colSpan={2}
+                      className="py-2 px-3 text-center font-semibold border-b border-slate-200/80 dark:border-slate-800"
+                    >
+                      Сальдо на конец периода
+                    </th>
                   </tr>
-                ) : (
-                  visibleOsvRows.map((row) => {
-                    const isCollapsed = Boolean(collapsedGroups[row.code]);
-                    const isSelected = selectedAccountDrilldown === row.code;
-                    const subRows =
-                      expandSubconto && !row.isGroup
-                        ? osvReport.subcontoRowsByAccount?.[row.code] ?? []
-                        : [];
+                  <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40 text-[11px] text-slate-500">
+                    <th className="py-1.5 px-3 text-right font-medium border-r border-slate-200/80 dark:border-slate-800 w-32">
+                      Дебет
+                    </th>
+                    <th className="py-1.5 px-3 text-right font-medium border-r border-slate-200/80 dark:border-slate-800 w-32">
+                      Кредит
+                    </th>
+                    <th className="py-1.5 px-3 text-right font-medium border-r border-slate-200/80 dark:border-slate-800 w-32">
+                      Дебет
+                    </th>
+                    <th className="py-1.5 px-3 text-right font-medium border-r border-slate-200/80 dark:border-slate-800 w-32">
+                      Кредит
+                    </th>
+                    <th className="py-1.5 px-3 text-right font-medium border-r border-slate-200/80 dark:border-slate-800 w-32">
+                      Дебет
+                    </th>
+                    <th className="py-1.5 px-3 text-right font-medium w-32">Кредит</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800/70">
+                  {visibleOsvRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="py-10 text-center text-slate-500">
+                        Нет движений и остатков за выбранный период ({formatDateRu(periodFilter.dateFrom)} — {formatDateRu(periodFilter.dateTo)}).
+                      </td>
+                    </tr>
+                  ) : (
+                    visibleOsvRows.map((row) => {
+                      const isCollapsed = Boolean(collapsedGroups[row.code]);
+                      const isSelected = selectedAccountDrilldown === row.code;
+                      const subRows =
+                        expandSubconto && !row.isGroup
+                          ? osvReport.subcontoRowsByAccount?.[row.code] ?? []
+                          : [];
 
-                    return (
-                      <React.Fragment key={row.code}>
-                        <tr
-                          onClick={() => setSelectedAccountDrilldown(row.code)}
-                          className={`cursor-pointer transition-colors ${
-                            row.isGroup
-                              ? 'bg-zinc-50/90 dark:bg-zinc-900/40 font-semibold text-zinc-900 dark:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800/70'
-                              : isSelected
-                                ? 'bg-amber-50/70 dark:bg-amber-950/30'
-                                : 'hover:bg-zinc-50 dark:hover:bg-zinc-900/30 text-zinc-800 dark:text-zinc-200'
-                          }`}
-                        >
-                          <td className="py-2 px-3 font-mono tabular-nums border-r border-zinc-100 dark:border-zinc-800/70 whitespace-nowrap">
-                            <div className="flex items-center gap-1">
-                              {row.isGroup ? (
-                                <button
-                                  type="button"
-                                  aria-label={`Свернуть или развернуть счёт ${row.code}`}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    toggleGroupCollapse(row.code);
-                                  }}
-                                  className="p-0.5 rounded hover:bg-zinc-200 dark:hover:bg-zinc-700"
-                                >
-                                  {isCollapsed ? (
-                                    <ChevronRight className="w-3.5 h-3.5" />
-                                  ) : (
-                                    <ChevronDown className="w-3.5 h-3.5" />
-                                  )}
-                                </button>
-                              ) : (
-                                <span className={row.parentCode ? 'pl-5' : ''} />
-                              )}
-                              <span>{row.code}</span>
-                            </div>
-                          </td>
-
-                          <td className="py-2 px-3 border-r border-zinc-100 dark:border-zinc-800/70">
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="truncate">{row.name}</span>
-                              <div className="flex items-center gap-2 shrink-0 text-[11px] text-zinc-400">
-                                {isOffBalanceAccountCode(row.code) && (
-                                  <span className="font-mono">забаланс</span>
-                                )}
-                                {row.isCollapsedSynthetic && <span>свёрнуто</span>}
-                              </div>
-                            </div>
-                          </td>
-
-                          <td
-                            className={`py-2 px-3 text-right font-mono tabular-nums border-r border-zinc-100 dark:border-zinc-800/70 ${
-                              row.hasRedStart && row.type === 'active'
-                                ? 'text-red-600 dark:text-red-400 font-semibold'
-                                : ''
-                            }`}
-                          >
-                            {formatMoney(row.startDebit)}
-                          </td>
-                          <td
-                            className={`py-2 px-3 text-right font-mono tabular-nums border-r border-zinc-100 dark:border-zinc-800/70 ${
-                              row.hasRedStart && row.type === 'passive'
-                                ? 'text-red-600 dark:text-red-400 font-semibold'
-                                : ''
-                            }`}
-                          >
-                            {formatMoney(row.startCredit)}
-                          </td>
-
-                          <td className="py-2 px-3 text-right font-mono tabular-nums border-r border-zinc-100 dark:border-zinc-800/70">
-                            {formatMoney(row.turnoverDebit)}
-                          </td>
-                          <td className="py-2 px-3 text-right font-mono tabular-nums border-r border-zinc-100 dark:border-zinc-800/70">
-                            {formatMoney(row.turnoverCredit)}
-                          </td>
-
-                          <td
-                            className={`py-2 px-3 text-right font-mono tabular-nums border-r border-zinc-100 dark:border-zinc-800/70 ${
-                              row.hasRedEnd && row.type === 'active'
-                                ? 'text-red-600 dark:text-red-400 font-semibold'
-                                : ''
-                            }`}
-                          >
-                            {formatMoney(row.endDebit)}
-                          </td>
-                          <td
-                            className={`py-2 px-3 text-right font-mono tabular-nums ${
-                              row.hasRedEnd && row.type === 'passive'
-                                ? 'text-red-600 dark:text-red-400 font-semibold'
-                                : ''
-                            }`}
-                          >
-                            {formatMoney(row.endCredit)}
-                          </td>
-                        </tr>
-
-                        {/* Subconto Expansion Rows */}
-                        {subRows.map((sub) => (
+                      return (
+                        <React.Fragment key={row.code}>
                           <tr
-                            key={`${row.code}:sub:${sub.subcontoKey}`}
                             onClick={() => setSelectedAccountDrilldown(row.code)}
-                            className="cursor-pointer bg-zinc-50/40 dark:bg-zinc-900/20 hover:bg-zinc-100/60 dark:hover:bg-zinc-900/50 text-[11px] text-zinc-600 dark:text-zinc-400"
+                            className={`cursor-pointer transition-colors ${
+                              row.isGroup
+                                ? 'bg-slate-50/90 dark:bg-slate-800/40 font-semibold text-slate-900 dark:text-slate-100 hover:bg-slate-100/80 dark:hover:bg-slate-800/70'
+                                : isSelected
+                                  ? 'bg-amber-50/70 dark:bg-amber-950/30'
+                                  : 'hover:bg-slate-50/80 dark:hover:bg-slate-800/30 text-slate-800 dark:text-slate-200'
+                            }`}
                           >
-                            <td className="py-1.5 px-3 pl-9 font-mono text-zinc-400 border-r border-zinc-100 dark:border-zinc-800/70">
-                              ↳ субконто
+                            <td className="py-2.5 px-3.5 tabular-nums font-medium border-r border-slate-100 dark:border-slate-800/70 whitespace-nowrap">
+                              <div className="flex items-center gap-1">
+                                {row.isGroup ? (
+                                  <button
+                                    type="button"
+                                    aria-label={`Свернуть или развернуть счёт ${row.code}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      toggleGroupCollapse(row.code);
+                                    }}
+                                    className="p-0.5 rounded-md hover:bg-slate-200/80 dark:hover:bg-slate-700"
+                                  >
+                                    {isCollapsed ? (
+                                      <ChevronRight className="w-3.5 h-3.5" strokeWidth={1.6} />
+                                    ) : (
+                                      <ChevronDown className="w-3.5 h-3.5" strokeWidth={1.6} />
+                                    )}
+                                  </button>
+                                ) : (
+                                  <span className={row.parentCode ? 'pl-5' : ''} />
+                                )}
+                                <span>{row.code}</span>
+                              </div>
                             </td>
-                            <td className="py-1.5 px-3 pl-6 border-r border-zinc-100 dark:border-zinc-800/70 truncate">
-                              {sub.subcontoLabel}
+
+                            <td className="py-2.5 px-3.5 border-r border-slate-100 dark:border-slate-800/70">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="truncate">{row.name}</span>
+                                <div className="flex items-center gap-2 shrink-0 text-[11px] text-slate-400">
+                                  {isOffBalanceAccountCode(row.code) && (
+                                    <span>забаланс</span>
+                                  )}
+                                  {row.isCollapsedSynthetic && <span>свёрнуто</span>}
+                                </div>
+                              </div>
                             </td>
-                            <td className="py-1.5 px-3 text-right font-mono tabular-nums border-r border-zinc-100 dark:border-zinc-800/70">
-                              {formatMoney(sub.startDebit)}
-                            </td>
-                            <td className="py-1.5 px-3 text-right font-mono tabular-nums border-r border-zinc-100 dark:border-zinc-800/70">
-                              {formatMoney(sub.startCredit)}
-                            </td>
-                            <td className="py-1.5 px-3 text-right font-mono tabular-nums border-r border-zinc-100 dark:border-zinc-800/70">
-                              {formatMoney(sub.turnoverDebit)}
-                            </td>
-                            <td className="py-1.5 px-3 text-right font-mono tabular-nums border-r border-zinc-100 dark:border-zinc-800/70">
-                              {formatMoney(sub.turnoverCredit)}
-                            </td>
+
                             <td
-                              className={`py-1.5 px-3 text-right font-mono tabular-nums border-r border-zinc-100 dark:border-zinc-800/70 ${
-                                sub.hasRedEnd ? 'text-red-600 dark:text-red-400 font-semibold' : ''
+                              className={`py-2.5 px-3 text-right tabular-nums border-r border-slate-100 dark:border-slate-800/70 ${
+                                row.hasRedStart && row.type === 'active'
+                                  ? 'text-rose-600 dark:text-rose-400 font-semibold'
+                                  : ''
                               }`}
                             >
-                              {formatMoney(sub.endDebit)}
+                              {formatMoney(row.startDebit)}
                             </td>
                             <td
-                              className={`py-1.5 px-3 text-right font-mono tabular-nums ${
-                                sub.hasRedEnd ? 'text-red-600 dark:text-red-400 font-semibold' : ''
+                              className={`py-2.5 px-3 text-right tabular-nums border-r border-slate-100 dark:border-slate-800/70 ${
+                                row.hasRedStart && row.type === 'passive'
+                                  ? 'text-rose-600 dark:text-rose-400 font-semibold'
+                                  : ''
                               }`}
                             >
-                              {formatMoney(sub.endCredit)}
+                              {formatMoney(row.startCredit)}
+                            </td>
+
+                            <td className="py-2.5 px-3 text-right tabular-nums border-r border-slate-100 dark:border-slate-800/70">
+                              {formatMoney(row.turnoverDebit)}
+                            </td>
+                            <td className="py-2.5 px-3 text-right tabular-nums border-r border-slate-100 dark:border-slate-800/70">
+                              {formatMoney(row.turnoverCredit)}
+                            </td>
+
+                            <td
+                              className={`py-2.5 px-3 text-right tabular-nums border-r border-slate-100 dark:border-slate-800/70 ${
+                                row.hasRedEnd && row.type === 'active'
+                                  ? 'text-rose-600 dark:text-rose-400 font-semibold'
+                                  : ''
+                              }`}
+                            >
+                              {formatMoney(row.endDebit)}
+                            </td>
+                            <td
+                              className={`py-2.5 px-3 text-right tabular-nums ${
+                                row.hasRedEnd && row.type === 'passive'
+                                  ? 'text-rose-600 dark:text-rose-400 font-semibold'
+                                  : ''
+                              }`}
+                            >
+                              {formatMoney(row.endCredit)}
                             </td>
                           </tr>
-                        ))}
-                      </React.Fragment>
-                    );
-                  })
-                )}
-              </tbody>
-              <tfoot>
-                <tr className="border-t-2 border-zinc-300 dark:border-zinc-700 bg-zinc-100/90 dark:bg-zinc-900 font-semibold text-zinc-950 dark:text-white">
-                  <td
-                    colSpan={2}
-                    className="py-2.5 px-3 border-r border-zinc-200 dark:border-zinc-800"
-                  >
-                    ИТОГО по балансовым субсчетам
-                  </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums border-r border-zinc-200 dark:border-zinc-800">
-                    {formatMoney(osvReport.totals.startDebit, true)}
-                  </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums border-r border-zinc-200 dark:border-zinc-800">
-                    {formatMoney(osvReport.totals.startCredit, true)}
-                  </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums border-r border-zinc-200 dark:border-zinc-800">
-                    {formatMoney(osvReport.totals.turnoverDebit, true)}
-                  </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums border-r border-zinc-200 dark:border-zinc-800">
-                    {formatMoney(osvReport.totals.turnoverCredit, true)}
-                  </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums border-r border-zinc-200 dark:border-zinc-800">
-                    {formatMoney(osvReport.totals.endDebit, true)}
-                  </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums">
-                    {formatMoney(osvReport.totals.endCredit, true)}
-                  </td>
-                </tr>
-              </tfoot>
-            </table>
+
+                          {/* Subconto Expansion Rows */}
+                          {subRows.map((sub) => (
+                            <tr
+                              key={`${row.code}:sub:${sub.subcontoKey}`}
+                              onClick={() => setSelectedAccountDrilldown(row.code)}
+                              className="cursor-pointer bg-slate-50/40 dark:bg-slate-800/20 hover:bg-slate-100/60 dark:hover:bg-slate-800/50 text-[11px] text-slate-600 dark:text-slate-400"
+                            >
+                              <td className="py-1.5 px-3.5 pl-9 text-slate-400 border-r border-slate-100 dark:border-slate-800/70">
+                                ↳ субконто
+                              </td>
+                              <td className="py-1.5 px-3.5 pl-6 border-r border-slate-100 dark:border-slate-800/70 truncate">
+                                {sub.subcontoLabel}
+                              </td>
+                              <td className="py-1.5 px-3 text-right tabular-nums border-r border-slate-100 dark:border-slate-800/70">
+                                {formatMoney(sub.startDebit)}
+                              </td>
+                              <td className="py-1.5 px-3 text-right tabular-nums border-r border-slate-100 dark:border-slate-800/70">
+                                {formatMoney(sub.startCredit)}
+                              </td>
+                              <td className="py-1.5 px-3 text-right tabular-nums border-r border-slate-100 dark:border-slate-800/70">
+                                {formatMoney(sub.turnoverDebit)}
+                              </td>
+                              <td className="py-1.5 px-3 text-right tabular-nums border-r border-slate-100 dark:border-slate-800/70">
+                                {formatMoney(sub.turnoverCredit)}
+                              </td>
+                              <td
+                                className={`py-1.5 px-3 text-right tabular-nums border-r border-slate-100 dark:border-slate-800/70 ${
+                                  sub.hasRedEnd ? 'text-rose-600 dark:text-rose-400 font-semibold' : ''
+                                }`}
+                              >
+                                {formatMoney(sub.endDebit)}
+                              </td>
+                              <td
+                                className={`py-1.5 px-3 text-right tabular-nums ${
+                                  sub.hasRedEnd ? 'text-rose-600 dark:text-rose-400 font-semibold' : ''
+                                }`}
+                              >
+                                {formatMoney(sub.endCredit)}
+                              </td>
+                            </tr>
+                          ))}
+                        </React.Fragment>
+                      );
+                    })
+                  )}
+                </tbody>
+                <tfoot>
+                  <tr className="border-t-2 border-slate-300 dark:border-slate-700 bg-slate-100/90 dark:bg-slate-800/80 font-semibold text-slate-900 dark:text-white">
+                    <td
+                      colSpan={2}
+                      className="py-3 px-3.5 border-r border-slate-200 dark:border-slate-800"
+                    >
+                      ИТОГО по балансовым субсчетам
+                    </td>
+                    <td className="py-3 px-3 text-right tabular-nums border-r border-slate-200 dark:border-slate-800">
+                      {formatMoney(osvReport.totals.startDebit, true)}
+                    </td>
+                    <td className="py-3 px-3 text-right tabular-nums border-r border-slate-200 dark:border-slate-800">
+                      {formatMoney(osvReport.totals.startCredit, true)}
+                    </td>
+                    <td className="py-3 px-3 text-right tabular-nums border-r border-slate-200 dark:border-slate-800">
+                      {formatMoney(osvReport.totals.turnoverDebit, true)}
+                    </td>
+                    <td className="py-3 px-3 text-right tabular-nums border-r border-slate-200 dark:border-slate-800">
+                      {formatMoney(osvReport.totals.turnoverCredit, true)}
+                    </td>
+                    <td className="py-3 px-3 text-right tabular-nums border-r border-slate-200 dark:border-slate-800">
+                      {formatMoney(osvReport.totals.endDebit, true)}
+                    </td>
+                    <td className="py-3 px-3 text-right tabular-nums">
+                      {formatMoney(osvReport.totals.endCredit, true)}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
           </div>
 
           {/* Slide-Over Drawer: Карточка счёта 1С */}
           {selectedAccountDrilldown && (
             <div
-              className="fixed inset-0 z-40 flex justify-end bg-black/30 backdrop-blur-[1px]"
+              className="fixed inset-0 z-40 flex justify-end bg-slate-950/30 backdrop-blur-[2px]"
               onClick={() => setSelectedAccountDrilldown(null)}
             >
               <div
@@ -1132,17 +1148,17 @@ export function Tab1DatabaseOsv() {
                 aria-modal="true"
                 aria-label={`Карточка счёта ${selectedAccountDrilldown}`}
                 onClick={(e) => e.stopPropagation()}
-                className="w-full max-w-4xl h-full bg-white dark:bg-[#121418] border-l border-zinc-200 dark:border-zinc-800 shadow-xl flex flex-col"
+                className="w-full max-w-4xl h-full bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 shadow-xl flex flex-col"
               >
                 {/* Drawer Header */}
-                <div className="px-5 py-4 border-b border-zinc-200 dark:border-zinc-800 flex items-start justify-between gap-4">
+                <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-start justify-between gap-4">
                   <div className="space-y-1">
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-                      <span className="font-mono font-semibold text-amber-700 dark:text-amber-400">
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                      <span className="font-semibold text-amber-700 dark:text-amber-400">
                         1С:БП 3.0 · Карточка счёта
                       </span>
                       <span>·</span>
-                      <span className="font-mono tabular-nums">
+                      <span className="tabular-nums">
                         {formatDateRu(periodFilter.dateFrom)} — {formatDateRu(periodFilter.dateTo)}
                       </span>
                       {selectedOsvRow && (
@@ -1159,7 +1175,7 @@ export function Tab1DatabaseOsv() {
                         </>
                       )}
                     </div>
-                    <h2 className="text-base font-semibold text-zinc-950 dark:text-white">
+                    <h2 className="text-base font-semibold tabular-nums text-slate-900 dark:text-white">
                       Счёт {selectedAccountDrilldown} — {selectedOsvRow?.name || 'Движения по счёту'}
                     </h2>
                   </div>
@@ -1168,36 +1184,36 @@ export function Tab1DatabaseOsv() {
                     type="button"
                     aria-label="Закрыть карточку счёта"
                     onClick={() => setSelectedAccountDrilldown(null)}
-                    className="p-1.5 rounded border border-zinc-200 dark:border-zinc-700 text-zinc-500 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                    className="p-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800"
                   >
-                    <X className="w-4 h-4" />
+                    <X className="w-4 h-4" strokeWidth={1.6} />
                   </button>
                 </div>
 
                 {/* Drawer Summary Balances */}
                 {selectedOsvRow && (
-                  <div className="px-5 py-3 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/40 grid grid-cols-3 gap-3 text-xs">
+                  <div className="px-6 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 grid grid-cols-3 gap-3 text-xs">
                     <div>
-                      <div className="text-zinc-500 dark:text-zinc-400">Сальдо на начало</div>
-                      <div className="mt-0.5 font-mono font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+                      <div className="text-slate-500 dark:text-slate-400">Сальдо на начало</div>
+                      <div className="mt-0.5 font-semibold tabular-nums text-slate-900 dark:text-slate-100">
                         Дт {formatMoney(selectedOsvRow.startDebit, true)} · Кт{' '}
                         {formatMoney(selectedOsvRow.startCredit, true)}
                       </div>
                     </div>
                     <div>
-                      <div className="text-zinc-500 dark:text-zinc-400">Обороты за период</div>
-                      <div className="mt-0.5 font-mono font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+                      <div className="text-slate-500 dark:text-slate-400">Обороты за период</div>
+                      <div className="mt-0.5 font-semibold tabular-nums text-slate-900 dark:text-slate-100">
                         Дт {formatMoney(selectedOsvRow.turnoverDebit, true)} · Кт{' '}
                         {formatMoney(selectedOsvRow.turnoverCredit, true)}
                       </div>
                     </div>
                     <div>
-                      <div className="text-zinc-500 dark:text-zinc-400">Сальдо на конец</div>
+                      <div className="text-slate-500 dark:text-slate-400">Сальдо на конец</div>
                       <div
-                        className={`mt-0.5 font-mono font-semibold tabular-nums ${
+                        className={`mt-0.5 font-semibold tabular-nums ${
                           selectedOsvRow.hasRedEnd
-                            ? 'text-red-600 dark:text-red-400'
-                            : 'text-zinc-900 dark:text-zinc-100'
+                            ? 'text-rose-600 dark:text-rose-400'
+                            : 'text-slate-900 dark:text-slate-100'
                         }`}
                       >
                         Дт {formatMoney(selectedOsvRow.endDebit, true)} · Кт{' '}
@@ -1208,24 +1224,24 @@ export function Tab1DatabaseOsv() {
                 )}
 
                 {/* Chronological Movements Table */}
-                <div className="flex-1 overflow-auto p-5">
-                  <div className="rounded border border-zinc-200 dark:border-zinc-800 overflow-x-auto">
+                <div className="flex-1 overflow-auto p-6">
+                  <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 overflow-x-auto">
                     <table className="w-full text-xs">
-                      <thead className="sticky top-0 bg-zinc-50 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 text-zinc-500">
+                      <thead className="sticky top-0 bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-slate-500">
                         <tr>
-                          <th className="py-2 px-3 text-left font-medium">Дата</th>
-                          <th className="py-2 px-3 text-left font-medium">Документ и аналитика</th>
-                          <th className="py-2 px-3 text-left font-medium">Корр. счёт</th>
-                          <th className="py-2 px-3 text-right font-medium">Дебет</th>
-                          <th className="py-2 px-3 text-right font-medium">Кредит</th>
-                          <th className="py-2 px-3 text-right font-medium">Текущее сальдо</th>
-                          <th className="py-2 px-3 text-right font-medium">Действие</th>
+                          <th className="py-2.5 px-3 text-left font-medium">Дата</th>
+                          <th className="py-2.5 px-3 text-left font-medium">Документ и аналитика</th>
+                          <th className="py-2.5 px-3 text-left font-medium">Корр. счёт</th>
+                          <th className="py-2.5 px-3 text-right font-medium">Дебет</th>
+                          <th className="py-2.5 px-3 text-right font-medium">Кредит</th>
+                          <th className="py-2.5 px-3 text-right font-medium">Текущее сальдо</th>
+                          <th className="py-2.5 px-3 text-right font-medium">Действие</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                         {drilldownMovements.length === 0 ? (
                           <tr>
-                            <td colSpan={7} className="py-10 text-center text-zinc-500">
+                            <td colSpan={7} className="py-10 text-center text-slate-500">
                               За выбранный период нет оборотов по счёту {selectedAccountDrilldown} (только входящий/исходящий остаток).
                             </td>
                           </tr>
@@ -1233,16 +1249,16 @@ export function Tab1DatabaseOsv() {
                           drilldownMovements.map((m) => (
                             <tr
                               key={m.id}
-                              className="hover:bg-zinc-50 dark:hover:bg-zinc-900/40"
+                              className="hover:bg-slate-50 dark:hover:bg-slate-800/40"
                             >
-                              <td className="py-2 px-3 font-mono tabular-nums whitespace-nowrap align-top">
+                              <td className="py-2.5 px-3 tabular-nums whitespace-nowrap align-top">
                                 {formatDateRu(m.date)}
-                                <div className="text-[10px] text-zinc-400 font-sans">
+                                <div className="text-[10px] text-slate-400">
                                   {m.source === 'db' ? 'База 1С' : 'Новая оп.'}
                                 </div>
                               </td>
-                              <td className="py-2 px-3 align-top max-w-[280px]">
-                                <div className="font-medium text-zinc-900 dark:text-zinc-100 truncate">
+                              <td className="py-2.5 px-3 align-top max-w-[280px]">
+                                <div className="font-medium text-slate-900 dark:text-slate-100 truncate">
                                   {m.docLabel}
                                 </div>
                                 {m.subconto && (
@@ -1250,24 +1266,24 @@ export function Tab1DatabaseOsv() {
                                     {m.subconto}
                                   </div>
                                 )}
-                                <div className="text-[11px] text-zinc-500 dark:text-zinc-400 line-clamp-2">
+                                <div className="text-[11px] text-slate-500 dark:text-slate-400 line-clamp-2">
                                   {m.description}
                                 </div>
                               </td>
-                              <td className="py-2 px-3 font-mono font-semibold align-top">
+                              <td className="py-2.5 px-3 tabular-nums font-semibold align-top">
                                 {m.corrAccount || 'забаланс'}
                               </td>
-                              <td className="py-2 px-3 text-right font-mono tabular-nums align-top">
+                              <td className="py-2.5 px-3 text-right tabular-nums align-top">
                                 {m.debitAmount > 0 ? formatMoney(m.debitAmount, true) : '—'}
                               </td>
-                              <td className="py-2 px-3 text-right font-mono tabular-nums align-top">
+                              <td className="py-2.5 px-3 text-right tabular-nums align-top">
                                 {m.creditAmount > 0 ? formatMoney(m.creditAmount, true) : '—'}
                               </td>
                               <td
-                                className={`py-2 px-3 text-right font-mono tabular-nums font-medium align-top whitespace-nowrap ${
+                                className={`py-2.5 px-3 text-right tabular-nums font-medium align-top whitespace-nowrap ${
                                   m.isRedRunning
-                                    ? 'text-red-600 dark:text-red-400 font-semibold'
-                                    : 'text-zinc-900 dark:text-zinc-100'
+                                    ? 'text-rose-600 dark:text-rose-400 font-semibold'
+                                    : 'text-slate-900 dark:text-slate-100'
                                 }`}
                               >
                                 {m.runningDebit > 0
@@ -1276,7 +1292,7 @@ export function Tab1DatabaseOsv() {
                                     ? `Кт ${formatMoney(m.runningCredit, true)}`
                                     : '0,00'}
                               </td>
-                              <td className="py-2 px-3 text-right align-top whitespace-nowrap">
+                              <td className="py-2.5 px-3 text-right align-top whitespace-nowrap">
                                 {m.operationId ? (
                                   <button
                                     type="button"
@@ -1285,13 +1301,13 @@ export function Tab1DatabaseOsv() {
                                       setSelectedAccountDrilldown(null);
                                       jumpToOperation(targetOpId);
                                     }}
-                                    className="inline-flex items-center gap-1 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-[11px] font-medium text-amber-700 dark:text-amber-400"
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-[11px] font-medium text-amber-700 dark:text-amber-400"
                                   >
                                     Перейти к операции
-                                    <ExternalLink className="w-3 h-3" />
+                                    <ExternalLink className="w-3 h-3" strokeWidth={1.6} />
                                   </button>
                                 ) : (
-                                  <span className="text-[11px] text-zinc-400">Архив БД</span>
+                                  <span className="text-[11px] text-slate-400">Архив БД</span>
                                 )}
                               </td>
                             </tr>
@@ -1309,8 +1325,8 @@ export function Tab1DatabaseOsv() {
 
       {/* SUBVIEW 2: FULL 1C DATABASE EXPLORER */}
       {subView === 'explorer' && db1C && (
-        <div className="rounded border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121418] overflow-hidden">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 dark:border-zinc-800 px-4 py-2.5 bg-zinc-50/70 dark:bg-zinc-900/40">
+        <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.04)] overflow-hidden">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800 px-5 py-3 bg-slate-50/70 dark:bg-slate-800/40">
             <div className="flex flex-wrap items-center gap-1.5 text-xs">
               {(
                 [
@@ -1328,10 +1344,10 @@ export function Tab1DatabaseOsv() {
                     setExplorerSection(sec);
                     setSearchQuery('');
                   }}
-                  className={`px-3 py-1.5 rounded font-medium transition-colors ${
+                  className={`px-3 py-1.5 rounded-xl font-medium tabular-nums transition-colors ${
                     explorerSection === sec
                       ? 'bg-amber-600 text-white'
-                      : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200/60 dark:hover:bg-zinc-800'
+                      : 'text-slate-700 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800'
                   }`}
                 >
                   {label}
@@ -1341,78 +1357,81 @@ export function Tab1DatabaseOsv() {
 
             {explorerSection !== 'org_policy' && (
               <div className="relative w-full sm:w-64">
-                <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                <Search
+                  strokeWidth={1.6}
+                  className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"
+                />
                 <input
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Поиск по реквизитам, ИНН, сумме..."
-                  className="w-full pl-8 pr-3 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs focus:outline-none focus:border-amber-600"
+                  className="w-full pl-8 pr-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs focus:outline-none focus:border-amber-600"
                 />
               </div>
             )}
           </div>
 
           {explorerSection === 'org_policy' && (
-            <div className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4 text-xs">
-              <div className="rounded border border-zinc-200 dark:border-zinc-800 p-4 space-y-2.5">
-                <h3 className="text-sm font-semibold text-zinc-950 dark:text-white">
+            <div className="p-5 grid grid-cols-1 lg:grid-cols-2 gap-4 text-xs">
+              <div className="rounded-xl border border-slate-200/80 dark:border-slate-800 p-4 space-y-2.5">
+                <h3 className="text-sm font-semibold text-slate-900 dark:text-white">
                   Карточка организации в 1С
                 </h3>
                 <dl className="grid grid-cols-3 gap-y-2 gap-x-3">
-                  <dt className="text-zinc-500">Сокращённое наим.:</dt>
+                  <dt className="text-slate-500">Сокращённое наим.:</dt>
                   <dd className="col-span-2 font-medium">{db1C.organization.name || '—'}</dd>
-                  <dt className="text-zinc-500">Полное наим.:</dt>
+                  <dt className="text-slate-500">Полное наим.:</dt>
                   <dd className="col-span-2">{db1C.organization.fullName || '—'}</dd>
-                  <dt className="text-zinc-500">ИНН / КПП:</dt>
-                  <dd className="col-span-2 font-mono tabular-nums">
+                  <dt className="text-slate-500">ИНН / КПП:</dt>
+                  <dd className="col-span-2 tabular-nums">
                     {db1C.organization.inn || '—'} / {db1C.organization.kpp || '—'}
                   </dd>
-                  <dt className="text-zinc-500">ОГРН:</dt>
-                  <dd className="col-span-2 font-mono tabular-nums">{db1C.organization.ogrn || '—'}</dd>
-                  <dt className="text-zinc-500">Расчётный счёт:</dt>
-                  <dd className="col-span-2 font-mono tabular-nums">
+                  <dt className="text-slate-500">ОГРН:</dt>
+                  <dd className="col-span-2 tabular-nums">{db1C.organization.ogrn || '—'}</dd>
+                  <dt className="text-slate-500">Расчётный счёт:</dt>
+                  <dd className="col-span-2 tabular-nums">
                     {db1C.organization.bankAccount || '—'}
                   </dd>
-                  <dt className="text-zinc-500">Банк / БИК:</dt>
-                  <dd className="col-span-2">
+                  <dt className="text-slate-500">Банк / БИК:</dt>
+                  <dd className="col-span-2 tabular-nums">
                     {db1C.organization.bankName || '—'}{' '}
                     {db1C.organization.bik ? `(БИК ${db1C.organization.bik})` : ''}
                   </dd>
-                  <dt className="text-zinc-500">Руководитель:</dt>
+                  <dt className="text-slate-500">Руководитель:</dt>
                   <dd className="col-span-2">{db1C.organization.director || '—'}</dd>
-                  <dt className="text-zinc-500">Главный бухгалтер:</dt>
+                  <dt className="text-slate-500">Главный бухгалтер:</dt>
                   <dd className="col-span-2">{db1C.organization.chiefAccountant || '—'}</dd>
                 </dl>
               </div>
 
-              <div className="rounded border border-zinc-200 dark:border-zinc-800 p-4 space-y-2.5">
-                <h3 className="text-sm font-semibold text-zinc-950 dark:text-white">
+              <div className="rounded-xl border border-slate-200/80 dark:border-slate-800 p-4 space-y-2.5">
+                <h3 className="text-sm font-semibold text-slate-900 dark:text-white">
                   Учётная политика и РегистрыСведений
                 </h3>
                 <dl className="grid grid-cols-2 gap-y-2 gap-x-3">
-                  <dt className="text-zinc-500">Система налогообложения:</dt>
+                  <dt className="text-slate-500">Система налогообложения:</dt>
                   <dd className="font-semibold">{db1C.accountingPolicy.taxSystem}</dd>
-                  <dt className="text-zinc-500">Основная ставка НДС:</dt>
-                  <dd className="font-mono">{db1C.accountingPolicy.vatRate}%</dd>
-                  <dt className="text-zinc-500">Закрытие счёта 26:</dt>
+                  <dt className="text-slate-500">Основная ставка НДС:</dt>
+                  <dd className="tabular-nums">{db1C.accountingPolicy.vatRate}%</dd>
+                  <dt className="text-slate-500">Закрытие счёта 26:</dt>
                   <dd>
                     {db1C.accountingPolicy.directCosting26To9008
                       ? 'Директ-костинг (в Дт 90.08.1)'
                       : 'В себестоимость производства (Дт 20.01)'}
                   </dd>
-                  <dt className="text-zinc-500">Оценка МПЗ:</dt>
+                  <dt className="text-slate-500">Оценка МПЗ:</dt>
                   <dd>{db1C.accountingPolicy.inventoryValuationMethod}</dd>
-                  <dt className="text-zinc-500">Источник выгрузки:</dt>
-                  <dd className="font-mono truncate">{db1C.sourceFileName}</dd>
+                  <dt className="text-slate-500">Источник выгрузки:</dt>
+                  <dd className="truncate">{db1C.sourceFileName}</dd>
                 </dl>
 
                 {Object.keys(db1C.rawRegisters).length > 0 && (
-                  <div className="pt-2 border-t border-zinc-100 dark:border-zinc-800">
-                    <div className="text-[11px] font-medium text-zinc-500 mb-1">
+                  <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
+                    <div className="text-[11px] font-medium text-slate-500 mb-1">
                       Данные РегистрыСведений из JSON:
                     </div>
-                    <pre className="p-2.5 rounded bg-zinc-50 dark:bg-zinc-950 font-mono text-[11px] max-h-48 overflow-auto">
+                    <pre className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 font-mono text-[11px] max-h-48 overflow-auto">
                       {JSON.stringify(db1C.rawRegisters, null, 2)}
                     </pre>
                   </div>
@@ -1423,9 +1442,9 @@ export function Tab1DatabaseOsv() {
 
           {explorerSection === 'directories' && (
             <div className="grid grid-cols-1 md:grid-cols-12 min-h-[380px]">
-              <div className="md:col-span-3 border-b md:border-b-0 md:border-r border-zinc-200 dark:border-zinc-800 p-2 space-y-1 bg-zinc-50/40 dark:bg-zinc-900/20">
+              <div className="md:col-span-3 border-b md:border-b-0 md:border-r border-slate-200 dark:border-slate-800 p-2.5 space-y-1 bg-slate-50/40 dark:bg-slate-800/20">
                 {directoryKeys.length === 0 ? (
-                  <div className="p-4 text-xs text-zinc-500">
+                  <div className="p-4 text-xs text-slate-500">
                     В выгрузке отсутствует секция ВсеСправочники
                   </div>
                 ) : (
@@ -1437,14 +1456,14 @@ export function Tab1DatabaseOsv() {
                         key={dirKey}
                         type="button"
                         onClick={() => setSelectedDirKey(dirKey)}
-                        className={`w-full flex items-center justify-between px-3 py-2 rounded text-xs text-left transition-colors ${
+                        className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs text-left transition-colors ${
                           active
-                            ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950 font-medium'
-                            : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                            ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-950 font-medium'
+                            : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
                         }`}
                       >
                         <span className="truncate">{dirKey}</span>
-                        <span className="font-mono text-[11px] opacity-75 ml-2">{count}</span>
+                        <span className="tabular-nums text-[11px] opacity-75 ml-2">{count}</span>
                       </button>
                     );
                   })
@@ -1462,16 +1481,16 @@ export function Tab1DatabaseOsv() {
 
           {explorerSection === 'documents' && (
             <div className="space-y-2">
-              <div className="px-4 pt-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="px-5 pt-3 flex flex-wrap items-center justify-between gap-2 text-xs">
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="text-zinc-500">Вид документа:</span>
+                  <span className="text-slate-500">Вид документа:</span>
                   <button
                     type="button"
                     onClick={() => setDocKindFilter('ALL')}
-                    className={`px-2 py-1 rounded ${
+                    className={`px-2.5 py-1 rounded-full tabular-nums ${
                       docKindFilter === 'ALL'
-                        ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
-                        : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
+                        ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-950'
+                        : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
                     }`}
                   >
                     Все ({db1C.documents.length})
@@ -1481,10 +1500,10 @@ export function Tab1DatabaseOsv() {
                       key={kind}
                       type="button"
                       onClick={() => setDocKindFilter(kind)}
-                      className={`px-2 py-1 rounded ${
+                      className={`px-2.5 py-1 rounded-full ${
                         docKindFilter === kind
-                          ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
-                          : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
+                          ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-950'
+                          : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
                       }`}
                     >
                       {kind}
@@ -1492,33 +1511,35 @@ export function Tab1DatabaseOsv() {
                   ))}
                 </div>
                 {historicalDocsCount > 0 && (
-                  <label className="inline-flex items-center gap-1.5 cursor-pointer text-zinc-600 dark:text-zinc-400">
+                  <label className="inline-flex items-center gap-1.5 cursor-pointer text-slate-600 dark:text-slate-400">
                     <input
                       type="checkbox"
                       checked={showHistoricalArchive}
                       onChange={(e) => setShowHistoricalArchive(e.target.checked)}
-                      className="rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                      className="rounded border-slate-300 text-amber-600 focus:ring-amber-500"
                     />
-                    <span>Показать архив до {reportingYear} г. ({historicalDocsCount})</span>
+                    <span className="tabular-nums">
+                      Показать архив до {reportingYear} г. ({historicalDocsCount})
+                    </span>
                   </label>
                 )}
               </div>
 
               <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
                 <table className="w-full text-xs">
-                  <thead className="sticky top-0 bg-zinc-50 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 text-zinc-500">
+                  <thead className="sticky top-0 bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-slate-500">
                     <tr>
-                      <th className="py-2 px-3 text-left">Статус</th>
-                      <th className="py-2 px-3 text-left">Вид документа</th>
-                      <th className="py-2 px-3 text-left">Номер</th>
-                      <th className="py-2 px-3 text-left">Дата</th>
-                      <th className="py-2 px-3 text-left">Контрагент</th>
-                      <th className="py-2 px-3 text-left">Договор</th>
-                      <th className="py-2 px-3 text-right">Сумма</th>
-                      <th className="py-2 px-3 text-left">Комментарий</th>
+                      <th className="py-2.5 px-3.5 text-left">Статус</th>
+                      <th className="py-2.5 px-3.5 text-left">Вид документа</th>
+                      <th className="py-2.5 px-3.5 text-left">Номер</th>
+                      <th className="py-2.5 px-3.5 text-left">Дата</th>
+                      <th className="py-2.5 px-3.5 text-left">Контрагент</th>
+                      <th className="py-2.5 px-3.5 text-left">Договор</th>
+                      <th className="py-2.5 px-3.5 text-right">Сумма</th>
+                      <th className="py-2.5 px-3.5 text-left">Комментарий</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {db1C.documents
                       .filter(
                         (d) =>
@@ -1533,29 +1554,29 @@ export function Tab1DatabaseOsv() {
                           .includes(q);
                       })
                       .map((doc) => (
-                        <tr key={doc.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-900/40">
-                          <td className="py-1.5 px-3">
+                        <tr key={doc.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                          <td className="py-2 px-3.5">
                             <span
                               className={`text-[11px] font-medium ${
                                 doc.posted
                                   ? 'text-emerald-700 dark:text-emerald-400'
-                                  : 'text-zinc-500'
+                                  : 'text-slate-500'
                               }`}
                             >
                               {doc.posted ? 'Проведён' : 'Черновик'}
                             </span>
                           </td>
-                          <td className="py-1.5 px-3 font-medium">{doc.documentKind}</td>
-                          <td className="py-1.5 px-3 font-mono tabular-nums">{doc.number || '—'}</td>
-                          <td className="py-1.5 px-3 font-mono tabular-nums whitespace-nowrap">
+                          <td className="py-2 px-3.5 font-medium">{doc.documentKind}</td>
+                          <td className="py-2 px-3.5 tabular-nums">{doc.number || '—'}</td>
+                          <td className="py-2 px-3.5 tabular-nums whitespace-nowrap">
                             {formatDateRu(doc.date)}
                           </td>
-                          <td className="py-1.5 px-3">{doc.counterparty || '—'}</td>
-                          <td className="py-1.5 px-3 text-zinc-500">{doc.contract || '—'}</td>
-                          <td className="py-1.5 px-3 text-right font-mono tabular-nums font-medium">
+                          <td className="py-2 px-3.5">{doc.counterparty || '—'}</td>
+                          <td className="py-2 px-3.5 text-slate-500">{doc.contract || '—'}</td>
+                          <td className="py-2 px-3.5 text-right tabular-nums font-medium">
                             {formatMoney(doc.amount, true)}
                           </td>
-                          <td className="py-1.5 px-3 text-zinc-500 max-w-xs truncate">
+                          <td className="py-2 px-3.5 text-slate-500 max-w-xs truncate">
                             {doc.comment || '—'}
                           </td>
                         </tr>
@@ -1569,7 +1590,7 @@ export function Tab1DatabaseOsv() {
           {explorerSection === 'postings' && (
             <div className="space-y-2">
               {historicalPostingsCount > 0 && (
-                <div className="px-4 pt-3 flex items-center justify-between text-xs text-zinc-600 dark:text-zinc-400">
+                <div className="px-5 pt-3 flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
                   <span>
                     Отображаются проводки отчётного {reportingYear} года (архив до 01.01.{reportingYear} свёрнут во входящее сальдо ОСВ).
                   </span>
@@ -1578,27 +1599,29 @@ export function Tab1DatabaseOsv() {
                       type="checkbox"
                       checked={showHistoricalArchive}
                       onChange={(e) => setShowHistoricalArchive(e.target.checked)}
-                      className="rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                      className="rounded border-slate-300 text-amber-600 focus:ring-amber-500"
                     />
-                    <span>Показать архив до {reportingYear} г. ({historicalPostingsCount})</span>
+                    <span className="tabular-nums">
+                      Показать архив до {reportingYear} г. ({historicalPostingsCount})
+                    </span>
                   </label>
                 </div>
               )}
               <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
                 <table className="w-full text-xs">
-                  <thead className="sticky top-0 bg-zinc-50 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 text-zinc-500">
+                  <thead className="sticky top-0 bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-slate-500">
                     <tr>
-                      <th className="py-2 px-3 text-left">Дата</th>
-                      <th className="py-2 px-3 text-left">Регистратор</th>
-                      <th className="py-2 px-3 text-left">Дт</th>
-                      <th className="py-2 px-3 text-left">Субконто Дт</th>
-                      <th className="py-2 px-3 text-left">Кт</th>
-                      <th className="py-2 px-3 text-left">Субконто Кт</th>
-                      <th className="py-2 px-3 text-right">Сумма</th>
-                      <th className="py-2 px-3 text-left">Содержание</th>
+                      <th className="py-2.5 px-3.5 text-left">Дата</th>
+                      <th className="py-2.5 px-3.5 text-left">Регистратор</th>
+                      <th className="py-2.5 px-3.5 text-left">Дт</th>
+                      <th className="py-2.5 px-3.5 text-left">Субконто Дт</th>
+                      <th className="py-2.5 px-3.5 text-left">Кт</th>
+                      <th className="py-2.5 px-3.5 text-left">Субконто Кт</th>
+                      <th className="py-2.5 px-3.5 text-right">Сумма</th>
+                      <th className="py-2.5 px-3.5 text-left">Содержание</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {db1C.postings
                       .filter(
                         (p) =>
@@ -1612,25 +1635,25 @@ export function Tab1DatabaseOsv() {
                           .includes(q);
                       })
                       .map((p) => (
-                        <tr key={p.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-900/40">
-                          <td className="py-1.5 px-3 font-mono tabular-nums whitespace-nowrap">
+                        <tr key={p.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                          <td className="py-2 px-3.5 tabular-nums whitespace-nowrap">
                             {formatDateRu(p.date)}
                           </td>
-                          <td className="py-1.5 px-3 max-w-[220px] truncate">
+                          <td className="py-2 px-3.5 max-w-[220px] truncate">
                             {p.documentLabel || `${p.documentType} №${p.documentNumber}`}
                           </td>
-                          <td className="py-1.5 px-3 font-mono font-semibold">{p.debit}</td>
-                          <td className="py-1.5 px-3 text-zinc-500 max-w-[180px] truncate">
+                          <td className="py-2 px-3.5 tabular-nums font-semibold">{p.debit}</td>
+                          <td className="py-2 px-3.5 text-slate-500 max-w-[180px] truncate">
                             {p.debitSubconto.join(' / ') || '—'}
                           </td>
-                          <td className="py-1.5 px-3 font-mono font-semibold">{p.credit}</td>
-                          <td className="py-1.5 px-3 text-zinc-500 max-w-[180px] truncate">
+                          <td className="py-2 px-3.5 tabular-nums font-semibold">{p.credit}</td>
+                          <td className="py-2 px-3.5 text-slate-500 max-w-[180px] truncate">
                             {p.creditSubconto.join(' / ') || '—'}
                           </td>
-                          <td className="py-1.5 px-3 text-right font-mono tabular-nums font-medium">
+                          <td className="py-2 px-3.5 text-right tabular-nums font-medium">
                             {formatMoney(p.amount, true)}
                           </td>
-                          <td className="py-1.5 px-3 text-zinc-500">{p.description}</td>
+                          <td className="py-2 px-3.5 text-slate-500">{p.description}</td>
                         </tr>
                       ))}
                   </tbody>
@@ -1642,27 +1665,27 @@ export function Tab1DatabaseOsv() {
           {explorerSection === 'raw_balances' && (
             <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
               <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-zinc-50 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 text-zinc-500">
+                <thead className="sticky top-0 bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-slate-500">
                   <tr>
-                    <th className="py-2 px-3 text-left">Счёт</th>
-                    <th className="py-2 px-3 text-left">Субконто</th>
-                    <th className="py-2 px-3 text-right">Остаток Дт (файл)</th>
-                    <th className="py-2 px-3 text-right">Остаток Кт (файл)</th>
-                    <th className="py-2 px-3 text-right">Кол-во</th>
+                    <th className="py-2.5 px-3.5 text-left">Счёт</th>
+                    <th className="py-2.5 px-3.5 text-left">Субконто</th>
+                    <th className="py-2.5 px-3.5 text-right">Остаток Дт (файл)</th>
+                    <th className="py-2.5 px-3.5 text-right">Остаток Кт (файл)</th>
+                    <th className="py-2.5 px-3.5 text-right">Кол-во</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                   {db1C.rawBalances.map((b) => (
-                    <tr key={b.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-900/40">
-                      <td className="py-1.5 px-3 font-mono font-semibold">{b.account}</td>
-                      <td className="py-1.5 px-3 text-zinc-500">{b.subconto || '—'}</td>
-                      <td className="py-1.5 px-3 text-right font-mono tabular-nums">
+                    <tr key={b.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                      <td className="py-2 px-3.5 tabular-nums font-semibold">{b.account}</td>
+                      <td className="py-2 px-3.5 text-slate-500">{b.subconto || '—'}</td>
+                      <td className="py-2 px-3.5 text-right tabular-nums">
                         {formatMoney(b.rawDebit || b.startDebit || b.endDebit)}
                       </td>
-                      <td className="py-1.5 px-3 text-right font-mono tabular-nums">
+                      <td className="py-2 px-3.5 text-right tabular-nums">
                         {formatMoney(b.rawCredit || b.startCredit || b.endCredit)}
                       </td>
-                      <td className="py-1.5 px-3 text-right font-mono tabular-nums">
+                      <td className="py-2 px-3.5 text-right tabular-nums">
                         {b.quantity ?? '—'}
                       </td>
                     </tr>
@@ -1704,7 +1727,7 @@ function DirectoryDynamicTable({
 
   if (rows.length === 0) {
     return (
-      <div className="p-8 text-center text-xs text-zinc-500">
+      <div className="p-8 text-center text-xs text-slate-500">
         Справочник пуст в выгруженной базе 1С.
       </div>
     );
@@ -1713,18 +1736,18 @@ function DirectoryDynamicTable({
   return (
     <div className="max-h-[480px] overflow-auto">
       <table className="w-full text-xs">
-        <thead className="sticky top-0 bg-zinc-50 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 text-zinc-500">
+        <thead className="sticky top-0 bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-slate-500">
           <tr>
             {columns.map((col) => (
-              <th key={col} className="py-2 px-3 text-left font-medium whitespace-nowrap">
+              <th key={col} className="py-2.5 px-3.5 text-left font-medium whitespace-nowrap">
                 {col}
               </th>
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
           {filtered.map((row, idx) => (
-            <tr key={idx} className="hover:bg-zinc-50 dark:hover:bg-zinc-900/40">
+            <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
               {columns.map((col) => {
                 const val = row[col];
                 const str =
@@ -1736,8 +1759,8 @@ function DirectoryDynamicTable({
                 return (
                   <td
                     key={col}
-                    className={`py-1.5 px-3 max-w-[260px] truncate ${
-                      /инн|кпп|код|номер|счет|бик/i.test(col) ? 'font-mono tabular-nums' : ''
+                    className={`py-2 px-3.5 max-w-[260px] truncate ${
+                      /инн|кпп|код|номер|счет|бик/i.test(col) ? 'tabular-nums' : ''
                     }`}
                   >
                     {str || '—'}
