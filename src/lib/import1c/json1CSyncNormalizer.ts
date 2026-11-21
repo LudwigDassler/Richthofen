@@ -733,12 +733,32 @@ export function normalize1CDatabaseExport(
         if (!name) return null;
         const inn = pickStr(row, ['ИНН', 'inn']).replace(/\D/g, '');
         const fullName = pickStr(row, ['НаименованиеПолное', 'ПолноеИмя', 'ФИОПолное', 'fullName']);
+        const salaryNum = pickNum(row, ['Оклад', 'РазмерОклада', 'ТарифнаяСтавка', 'ФОТ', 'salary', 'fot']);
+        const positionStr = pickStr(row, ['Должность', 'position']);
+        const subdivisionStr = pickStr(row, ['Подразделение', 'ПодразделениеОрганизации', 'subdivision']);
+        const hireDateStr = normalizeDateISO(pickStr(row, ['ДатаПриема', 'ДатаПриёма', 'hireDate']));
+        const extraObj: Record<string, string> = {};
+        if (inn) {
+          extraObj.inn = inn;
+          extraObj['ИНН'] = inn;
+        }
+        if (fullName) extraObj.fullName = fullName;
+        if (salaryNum > 0) {
+          extraObj.salary = String(salaryNum);
+          extraObj['Оклад'] = String(salaryNum);
+        }
+        if (positionStr) {
+          extraObj.position = positionStr;
+          extraObj['Должность'] = positionStr;
+        }
+        if (subdivisionStr) extraObj['Подразделение'] = subdivisionStr;
+        if (hireDateStr) extraObj['ДатаПриема'] = hireDateStr;
         return {
           id: `${prefix}-${idx + 1}`,
           code1C: pickStr(row, ['Код', 'ТабельныйНомер', 'Code']),
           name,
           kind: pickStr(row, ['ВидРасхода', 'ВидДвижения', 'ВидСтатьи', 'Должность', 'ИНН']),
-          extra: inn || fullName ? { ...(inn ? { inn } : {}), ...(fullName ? { fullName } : {}) } : undefined,
+          extra: Object.keys(extraObj).length > 0 ? extraObj : undefined,
         };
       })
       .filter((x): x is DirectorySimpleItem1C => x !== null);
@@ -923,14 +943,14 @@ export function normalize1CDatabaseExport(
     }
   }
 
-  const startDebitKeys = ['СальдоНачДт', 'СальдоНачальноеДт', 'ОстатокНачДт', 'НачальныйОстатокДт', 'startDebit'];
-  const startCreditKeys = ['СальдоНачКт', 'СальдоНачальноеКт', 'ОстатокНачКт', 'НачальныйОстатокКт', 'startCredit'];
-  const turnDebitKeys = ['ОборотДт', 'ОборотыДт', 'СуммаОборотДт', 'turnoverDebit'];
-  const turnCreditKeys = ['ОборотКт', 'ОборотыКт', 'СуммаОборотКт', 'turnoverCredit'];
-  const endDebitKeys = ['СальдоКонДт', 'СальдоКонечноеДт', 'ОстатокКонДт', 'КонечныйОстатокДт', 'endDebit'];
-  const endCreditKeys = ['СальдоКонКт', 'СальдоКонечноеКт', 'ОстатокКонКт', 'КонечныйОстатокКт', 'endCredit'];
-  const genericDebitKeys = ['СуммаОстатокДт', 'ОстатокДт', 'Дебет', 'СальдоДт', 'СуммаДт', 'rawDebit', 'debit'];
-  const genericCreditKeys = ['СуммаОстатокКт', 'ОстатокКт', 'Кредит', 'СальдоКт', 'СуммаКт', 'rawCredit', 'credit'];
+  const startDebitKeys = ['СальдоНачДт', 'СальдоНачальноеДт', 'СальдоНачальноеДебет', 'СальдоНачДебет', 'ОстатокНачДт', 'ОстатокНачальныйДебет', 'НачальныйОстатокДт', 'startDebit'];
+  const startCreditKeys = ['СальдоНачКт', 'СальдоНачальноеКт', 'СальдоНачальноеКредит', 'СальдоНачКредит', 'ОстатокНачКт', 'ОстатокНачальныйКредит', 'НачальныйОстатокКт', 'startCredit'];
+  const turnDebitKeys = ['ОборотДт', 'ОборотыДт', 'ОборотДебет', 'ОборотыДебет', 'СуммаОборотДт', 'turnoverDebit'];
+  const turnCreditKeys = ['ОборотКт', 'ОборотыКт', 'ОборотКредит', 'ОборотыКредит', 'СуммаОборотКт', 'turnoverCredit'];
+  const endDebitKeys = ['СальдоКонДт', 'СальдоКонечноеДт', 'СальдоКонечноеДебет', 'СальдоКонДебет', 'ОстатокКонДт', 'КонечныйОстатокДт', 'endDebit'];
+  const endCreditKeys = ['СальдоКонКт', 'СальдоКонечноеКт', 'СальдоКонечноеКредит', 'СальдоКонКредит', 'ОстатокКонКт', 'КонечныйОстатокКт', 'endCredit'];
+  const genericDebitKeys = ['СуммаОстатокДт', 'СуммаОстатокДебет', 'ОстатокДт', 'ОстатокДебет', 'Дебет', 'СальдоДт', 'СальдоДебет', 'СуммаДт', 'rawDebit', 'debit'];
+  const genericCreditKeys = ['СуммаОстатокКт', 'СуммаОстатокКредит', 'ОстатокКт', 'ОстатокКредит', 'Кредит', 'СальдоКт', 'СальдоКредит', 'СуммаКт', 'rawCredit', 'credit'];
 
   const rawBalances: BalanceRow1C[] = [];
   rawBalanceItems.forEach((row, idx) => {

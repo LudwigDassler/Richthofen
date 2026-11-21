@@ -3,6 +3,8 @@ import {
   AuditGuide1CBP30,
   AuditIssue,
   AutoFixChangeRecord,
+  AutofixExecutionSummary,
+  AutofixRuleId,
   CounterpartyResolutionSource,
   Database1CSnapshot,
   DEFAULT_SBERBANK_BIK,
@@ -38,7 +40,77 @@ import {
   extractRequisitesFromFreeText,
   normalizeOperationDateToReportingYear,
 } from '@/lib/import1c/batchFileParser';
-import { validateRussianInnChecksum } from '@/lib/egrul/egrulLookup';
+import {
+  generateEducationalInnKpp,
+  inferOrganizationRegionCode,
+  KNOWN_MAJOR_RUSSIAN_COUNTERPARTIES,
+  selectBestEgrulCandidate,
+  validateRussianInnChecksum,
+} from '@/lib/egrul/egrulLookup';
+
+export interface AutofixRegistryEntry {
+  id: AutofixRuleId;
+  label: string;
+  description: string;
+}
+
+export const AUTOFIX_REGISTRY: Record<AutofixRuleId, AutofixRegistryEntry> = {
+  normalize_date_year: {
+    id: 'normalize_date_year',
+    label: 'Приведение года даты к отчётному периоду',
+    description: 'Нормализует шаблонные годы дат Excel к рабочему отчётному году базы 1С.',
+  },
+  disable_duplicate_doc: {
+    id: 'disable_duplicate_doc',
+    label: 'Исключение дубликата документа 1С',
+    description: 'Отключает повторное проведение документа, уже присутствующего в базе 1С.',
+  },
+  reclassify_legacy_doc: {
+    id: 'reclassify_legacy_doc',
+    label: 'Переклассификация вида документа 1С:БП 3.0',
+    description: 'Приводит ошибочный вид документа к профильному документу 1С:БП 3.0 и пересчитывает НДС.',
+  },
+  resolve_amount_and_links: {
+    id: 'resolve_amount_and_links',
+    label: 'Вывод суммы и привязка расчётов по 7 уровням контура',
+    description: 'Рассчитывает суммы и связывает контрагентов/договоры по хронологической модели базы 1С.',
+  },
+  fill_formal_requisites: {
+    id: 'fill_formal_requisites',
+    label: 'Автозаполнение формальных реквизитов карточки 1С',
+    description: 'Заполняет ИНН/КПП (с валидной контрольной суммой ФНС по региону организации), основной договор, склад и статью затрат.',
+  },
+  replace_group_account: {
+    id: 'replace_group_account',
+    label: 'Замена группового счёта на субсчёт Плана счетов 1С',
+    description: 'Заменяет синтетический счёт-группу на рабочий конечный субсчёт 1С:БП 3.0.',
+  },
+  flip_red_settlement_subaccount: {
+    id: 'flip_red_settlement_subaccount',
+    label: 'Переклассификация расчётов и авансов (60.01↔60.02, 62.01↔62.02)',
+    description: 'Устраняет отрицательное сальдо на счетах расчётов переносом предоплаты на субсчёт авансов.',
+  },
+  generate_cash_withdrawal_cover: {
+    id: 'generate_cash_withdrawal_cover',
+    label: 'Пополнение кассы с расчётного счёта (Дт 50.01 Кт 51)',
+    description: 'Устраняет отрицательный остаток кассы 50.01 при достаточном остатке средств на счёте 51.',
+  },
+  offset_advances_60_62: {
+    id: 'offset_advances_60_62',
+    label: 'Автоматический зачёт взаимных авансов (60 / 62)',
+    description: 'Сворачивает развёрнутое сальдо между счетами расчётов и авансов (60.01↔60.02, 62.02↔62.01).',
+  },
+  accrue_advance_vat_76av: {
+    id: 'accrue_advance_vat_76av',
+    label: 'Исчисление НДС с полученных авансов (Дт 76.АВ Кт 68.02)',
+    description: 'Формирует счёт-фактуру на остаток полученного аванса покупателя по расчётной ставке НДС.',
+  },
+  close_period_accounts: {
+    id: 'close_period_accounts',
+    label: 'Регламентное закрытие месяца (20, 25, 26, 44, 90, 91, 99)',
+    description: 'Закрывает затратные счета и формирует финансовый результат и налог на прибыль за период.',
+  },
+};
 
 let autoFixIdSeq = 0;
 function nextAutoFixId(prefix: string): string {
@@ -533,6 +605,7 @@ export function runAuditDiagnostics(params: {
   }
 
   // 2. Red balances ("краснота") on active / passive accounts
+  const row51ForCover = osv.leafRows.find((r) => r.code === '51');
   for (const row of osv.leafRows) {
     if (row.hasRedEnd) {
       const val = row.type === 'active' ? row.endDebit : row.endCredit;
@@ -541,9 +614,19 @@ export function runAuditDiagnostics(params: {
         row.code === '62.01' ||
         row.code === '60.02' ||
         row.code === '62.02';
+      const isCashCoverableFromBank =
+        row.code === '50.01' &&
+        Boolean(row51ForCover && row51ForCover.endDebit >= Math.abs(val) + 0.01);
+      const canFixRed = isSettlementReclassifiable || isCashCoverableFromBank;
+      const redFixId: AutofixRuleId | undefined = isSettlementReclassifiable
+        ? 'flip_red_settlement_subaccount'
+        : isCashCoverableFromBank
+          ? 'generate_cash_withdrawal_cover'
+          : undefined;
       const redDetails = buildRedBalanceGuide1C(row.code, row.name, val);
       issues.push({
         id: `red-end-${row.code}`,
+        fixId: redFixId,
         severity: 'error',
         category: 'red_balance',
         accountCode: row.code,
@@ -551,13 +634,17 @@ export function runAuditDiagnostics(params: {
         description: `Счёт ${row.code} «${row.name}» (${row.type === 'active' ? 'активный' : 'пассивный'}) имеет отрицательное конечное сальдо ${val.toFixed(2)} ₽.`,
         accountingReason: redDetails.accountingReason,
         quickFixLabel: isSettlementReclassifiable
-          ? 'Нажмите «Исправить всё автоматически» для переклассификации и зачёта авансов'
-          : 'Проверьте хронологию и полноту приходных документов по счёту ' + row.code,
+          ? 'Нажмите «Исправить» для переклассификации и зачёта авансов'
+          : isCashCoverableFromBank
+            ? 'Нажмите «Исправить» для пополнения кассы 50.01 с расчётного счёта 51'
+            : 'Проверьте хронологию и полноту приходных документов по счёту ' + row.code,
         guide1C: redDetails.guide1C,
-        canAutoFixBy1C: isSettlementReclassifiable,
+        canAutoFixBy1C: canFixRed,
         autoFixActionLabel: isSettlementReclassifiable
           ? 'Переклассифицировать расчёты / авансы (60.01↔60.02, 62.01↔62.02)'
-          : undefined,
+          : isCashCoverableFromBank
+            ? 'Отразить снятие наличных с р/с в кассу (Дт 50.01 Кт 51)'
+            : undefined,
       });
     }
   }
@@ -569,13 +656,14 @@ export function runAuditDiagnostics(params: {
     const offsetAmt = Math.min(acc6001.endCredit, acc6002.endDebit);
     issues.push({
       id: 'unoffset-advance-60',
+      fixId: 'offset_advances_60_62',
       severity: 'warning',
       category: 'unoffset_advance',
       accountCode: '60',
       title: 'Незачтённые авансы поставщикам (счета 60.01 и 60.02)',
       description: `Одновременно числится кредиторская задолженность на 60.01 (${acc6001.endCredit.toFixed(2)} ₽) и выданный аванс на 60.02 (${acc6002.endDebit.toFixed(2)} ₽). Возможен зачёт на сумму до ${offsetAmt.toFixed(2)} ₽.`,
       accountingReason: `Развёрнутое сальдо по счёту 60 искажает строки бухгалтерского баланса (дебиторскую и кредиторскую задолженность). При поступлении ТМЦ/услуг после предоплаты должна формироваться проводка зачёта аванса Дт 60.01 Кт 60.02 на сумму ${offsetAmt.toFixed(2)} ₽.`,
-      quickFixLabel: 'Автоматический зачёт Дт 60.01 Кт 60.02 кнопкой «Исправить всё автоматически»',
+      quickFixLabel: 'Автоматический зачёт Дт 60.01 Кт 60.02 кнопкой «Исправить»',
       guide1C: {
         menuPath: 'Покупки → Поступление (акты, накладные, УПД) (или Покупки → Корректировка долга)',
         documentKind: 'Поступление (акт, накладная, УПД)',
@@ -598,13 +686,14 @@ export function runAuditDiagnostics(params: {
     const offsetAmt = Math.min(acc6201.endDebit, acc6202.endCredit);
     issues.push({
       id: 'unoffset-advance-62',
+      fixId: 'offset_advances_60_62',
       severity: 'warning',
       category: 'unoffset_advance',
       accountCode: '62',
       title: 'Незачтённые авансы покупателей (счета 62.01 и 62.02)',
       description: `Одновременно числится дебиторская задолженность на 62.01 (${acc6201.endDebit.toFixed(2)} ₽) и полученный аванс на 62.02 (${acc6202.endCredit.toFixed(2)} ₽). Возможен зачёт на сумму до ${offsetAmt.toFixed(2)} ₽.`,
       accountingReason: `При отгрузке в счёт полученной предоплаты должен быть выполнен зачёт Дт 62.02 Кт 62.01 (${offsetAmt.toFixed(2)} ₽), иначе завышаются дебиторская и кредиторская задолженности и не применяется вычет НДС с аванса (Дт 68.02 Кт 76.АВ).`,
-      quickFixLabel: 'Автоматический зачёт Дт 62.02 Кт 62.01 кнопкой «Исправить всё автоматически»',
+      quickFixLabel: 'Автоматический зачёт Дт 62.02 Кт 62.01 кнопкой «Исправить»',
       guide1C: {
         menuPath: 'Продажи → Реализация (акты, накладные, УПД) (или Продажи → Корректировка долга)',
         documentKind: 'Реализация (акт, накладная, УПД)',
@@ -630,13 +719,14 @@ export function runAuditDiagnostics(params: {
     if (expected76AV - current76AV > 1) {
       issues.push({
         id: 'missing-advance-vat-76av',
+        fixId: 'accrue_advance_vat_76av',
         severity: 'warning',
         category: 'vat_discrepancy',
         accountCode: '76.АВ',
         title: 'Не начислен НДС с полученных авансов покупателей (76.АВ — 68.02)',
         description: `По остатку авансов на счёте 62.02 (${acc6202.endCredit.toFixed(2)} ₽) расчётный НДС ${vatRate}/${100 + vatRate} составляет ${expected76AV.toFixed(2)} ₽ (отражено на 76.АВ: ${current76AV.toFixed(2)} ₽).`,
         accountingReason: `Согласно п. 1 ст. 167 НК РФ налогоплательщик на ОСНО обязан исчислить НДС по расчётной ставке ${vatRate}/${100 + vatRate} с суммы полученной предоплаты и выставить счёт-фактуру на аванс (Дт 76.АВ Кт 68.02).`,
-        quickFixLabel: 'Сформировать СФ на аванс кнопкой «Исправить всё автоматически»',
+        quickFixLabel: 'Сформировать СФ на аванс кнопкой «Исправить»',
         guide1C: {
           menuPath: 'Банк и касса → Регистрация счетов-фактур → Счета-фактуры на аванс',
           documentKind: 'Обработка «Регистрация счетов-фактур на аванс» → Счет-фактура выданный (на аванс)',
@@ -682,18 +772,19 @@ export function runAuditDiagnostics(params: {
     }
   }
 
-  // 4. Unclosed month-end accounts (20.01, 26, 44.01, 90, 91)
+  // 4. Unclosed month-end accounts (20.01, 25, 26, 44.01, 90, 91)
   const acc20 = osv.leafRows.find((r) => r.code === '20.01');
   if (acc20 && acc20.endDebit > 0.01) {
     issues.push({
       id: 'unclosed-20',
+      fixId: 'close_period_accounts',
       severity: 'warning',
       category: 'unclosed_period',
       accountCode: '20.01',
       title: 'Остаток на счёте 20.01 «Основное производство»',
       description: `На конец периода на счёте 20.01 числится дебетовый остаток ${acc20.endDebit.toFixed(2)} ₽ (незавершённое производство или не выполнено закрытие счёта 20).`,
       accountingReason: `Если у организации нет незавершённого производства (НЗП), прямые производственные затраты по счёту 20.01 закрываются ежемесячно в Дт 90.02.1 (или 43/40) по номенклатурным группам.`,
-      quickFixLabel: 'Нажмите «Исправить всё автоматически» для регламентного закрытия месяца',
+      quickFixLabel: 'Нажмите «Исправить» для регламентного закрытия месяца',
       guide1C: {
         menuPath: 'Операции → Закрытие месяца',
         documentKind: 'Регламентная операция «Закрытие счетов 20, 23, 25, 26»',
@@ -709,17 +800,42 @@ export function runAuditDiagnostics(params: {
     });
   }
 
+  const acc25 = osv.leafRows.find((r) => r.code === '25');
+  if (acc25 && acc25.endDebit > 0.01) {
+    issues.push({
+      id: 'unclosed-25',
+      fixId: 'close_period_accounts',
+      severity: 'warning',
+      category: 'unclosed_period',
+      accountCode: '25',
+      title: 'Не закрыт счёт 25 «Общепроизводственные расходы»',
+      description: `На конец периода на счёте 25 числится остаток ${acc25.endDebit.toFixed(2)} ₽. По РСБУ счёт 25 не имеет конечного сальдо.`,
+      accountingReason: `Общепроизводственные расходы ежемесячно распределяются со счёта 25 в дебет счёта 20.01 пропорционально базе распределения (Инструкция к Плану счетов РСБУ, ФСБУ 5/2019).`,
+      quickFixLabel: 'Закрыть счёт 25 кнопкой «Исправить»',
+      guide1C: {
+        menuPath: 'Операции → Закрытие месяца',
+        documentKind: 'Регламентная операция «Закрытие счетов 20, 23, 25, 26»',
+        checkPoints: ['Проверьте подразделение и базу распределения косвенных расходов в Учётной политике'],
+        repostInstruction: 'Операции → Закрытие месяца → Выполнить закрытие месяца',
+        verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 25 (сальдо = 0,00 ₽)',
+      },
+      canAutoFixBy1C: true,
+      autoFixActionLabel: 'Закрыть счёт 25 в основное производство',
+    });
+  }
+
   const acc26 = osv.leafRows.find((r) => r.code === '26');
   if (acc26 && acc26.endDebit > 0.01) {
     issues.push({
       id: 'unclosed-26',
+      fixId: 'close_period_accounts',
       severity: 'warning',
       category: 'unclosed_period',
       accountCode: '26',
       title: 'Не закрыт счёт 26 «Общехозяйственные расходы»',
       description: `На конец периода на счёте 26 числится остаток ${acc26.endDebit.toFixed(2)} ₽. По РСБУ счёт 26 закрывается ежемесячно.`,
       accountingReason: `Общехозяйственные (управленческие) расходы по ФСБУ 5/2019 и Инструкции к Плану счетов не формируют остаток НЗП и в полном объёме списываются в Дт 90.08.1 («Директ-костинг») на конец каждого месяца.`,
-      quickFixLabel: 'Закрыть счёт 26 кнопкой «Исправить всё автоматически»',
+      quickFixLabel: 'Закрыть счёт 26 кнопкой «Исправить»',
       guide1C: {
         menuPath: 'Операции → Закрытие месяца',
         documentKind: 'Регламентная операция «Закрытие счетов 20, 23, 25, 26»',
@@ -739,13 +855,14 @@ export function runAuditDiagnostics(params: {
   if (acc4401 && acc4401.endDebit > 0.01) {
     issues.push({
       id: 'unclosed-44',
+      fixId: 'close_period_accounts',
       severity: 'warning',
       category: 'unclosed_period',
       accountCode: '44.01',
       title: 'Не закрыт счёт 44.01 «Издержки обращения»',
       description: `На конец периода на счёте 44.01 числится остаток ${acc4401.endDebit.toFixed(2)} ₽.`,
       accountingReason: `Коммерческие расходы торговой организации (кроме транспортных расходов в доле остатка товаров) ежемесячно списываются со счёта 44.01 в дебет счёта 90.07.1 / 90.02.1.`,
-      quickFixLabel: 'Закрыть счёт 44.01 кнопкой «Исправить всё автоматически»',
+      quickFixLabel: 'Закрыть счёт 44.01 кнопкой «Исправить»',
       guide1C: {
         menuPath: 'Операции → Закрытие месяца',
         documentKind: 'Регламентная операция «Закрытие счета 44 "Издержки обращения"»',
@@ -765,13 +882,14 @@ export function runAuditDiagnostics(params: {
     const residual = group90.endCredit > 0 ? group90.endCredit : -group90.endDebit;
     issues.push({
       id: 'unclosed-90',
+      fixId: 'close_period_accounts',
       severity: 'warning',
       category: 'unclosed_period',
       accountCode: '90',
       title: 'Не закрыт счёт 90 «Продажи» на финансовый результат (90.09 — 99.01.1)',
       description: `Синтетический счёт 90 имеет ненулевое свёрнутое сальдо на конец периода (${Math.abs(residual).toFixed(2)} ₽).`,
       accountingReason: `По Плану счетов РСБУ синтетический счёт 90 на конец каждого месяца не должен иметь сальдо (субсчета 90.01, 90.02, 90.03, 90.08 накапливают обороты в течение года, а финансовый результат месяца переносится проводкой 90.09 ↔ 99.01.1).`,
-      quickFixLabel: 'Закрыть счёт 90 кнопкой «Исправить всё автоматически»',
+      quickFixLabel: 'Закрыть счёт 90 кнопкой «Исправить»',
       guide1C: {
         menuPath: 'Операции → Закрытие месяца',
         documentKind: 'Регламентная операция «Закрытие счетов 90, 91»',
@@ -792,13 +910,14 @@ export function runAuditDiagnostics(params: {
     const residual = group91.endCredit > 0 ? group91.endCredit : -group91.endDebit;
     issues.push({
       id: 'unclosed-91',
+      fixId: 'close_period_accounts',
       severity: 'warning',
       category: 'unclosed_period',
       accountCode: '91',
       title: 'Не закрыт счёт 91 «Прочие доходы и расходы» (91.09 — 99.01.1)',
       description: `Синтетический счёт 91 имеет ненулевое свёрнутое сальдо на конец периода (${Math.abs(residual).toFixed(2)} ₽).`,
       accountingReason: `Сопоставление оборотов по прочим доходам (91.01) и прочим расходам (91.02, включая РКО банка и проценты) ежемесячно списывается с субсчёта 91.09 на счёт 99.01.1.`,
-      quickFixLabel: 'Закрыть счёт 91 кнопкой «Исправить всё автоматически»',
+      quickFixLabel: 'Закрыть счёт 91 кнопкой «Исправить»',
       guide1C: {
         menuPath: 'Операции → Закрытие месяца',
         documentKind: 'Регламентная операция «Закрытие счетов 90, 91»',
@@ -818,6 +937,7 @@ export function runAuditDiagnostics(params: {
     if (op.isDuplicateIn1C && op.includeInProcessing) {
       issues.push({
         id: `dup-enabled-${op.id}`,
+        fixId: 'disable_duplicate_doc',
         severity: 'warning',
         category: 'duplicate_doc',
         operationId: op.id,
@@ -826,7 +946,7 @@ export function runAuditDiagnostics(params: {
           op.duplicateReason ??
           'Операция совпадает с уже проведённым документом в БД 1С и может задвоить обороты.',
         accountingReason: `Повторное проведение первичного документа с той же датой, суммой и контрагентом задвоит обороты по счетам расчётов и налоговую базу по НДС / налогу на прибыль.`,
-        quickFixLabel: 'Нажмите «Исправить всё автоматически» или снимите галочку включения документа во вкладке 2',
+        quickFixLabel: 'Нажмите «Исправить» или снимите галочку включения документа во вкладке 2',
         guide1C: {
           menuPath: 'Администрирование → Обслуживание → Корректировка данных → Поиск и удаление дублей (или Журнал операций)',
           documentKind: op.docType1C,
@@ -858,6 +978,7 @@ export function runAuditDiagnostics(params: {
       const targetNeedsCp = doesOperationRequireCounterparty(naturalCheck.category);
       issues.push({
         id: `misclassified-doc-${op.id}`,
+        fixId: 'reclassify_legacy_doc',
         severity: 'warning',
         category: 'missing_requisite',
         operationId: op.id,
@@ -865,7 +986,7 @@ export function runAuditDiagnostics(params: {
         description: targetNeedsCp
           ? `Операция «${op.description.slice(0, 70)}» по содержанию соответствует «${DOC_TYPE_LABELS_1C[naturalCheck.docType1C]}». Нажмите «Исправить» для переклассификации документа и пересчёта НДС/проводок.`
           : `Операция «${op.description.slice(0, 70)}» распознана как «${DOC_TYPE_LABELS_1C[naturalCheck.docType1C]}», не требует внешнего контрагента и НДС.`,
-        accountingReason: `В 1С:Бухгалтерия 8.3 (ред. 3.0) кассово-банковские перемещения (50↔51), подотчётные суммы (71.01), отгрузки продукции (90.01.1), кадровые и складские документы проводятся профильными видами операций с корректным режимом НДС.`,
+        accountingReason: `В 1С:Бухгалтерия 8.3 (ред. 3.0) кассово-банковские перемещения (50↔51), подотчётные суммы (71.01), отгрузки продукции (90.01.1), кадровые, договорные и складские документы проводятся профильными видами операций с корректным режимом НДС.`,
         quickFixLabel: 'Нажмите «Исправить» для переклассификации документа и пересчёта проводок',
         guide1C: {
           menuPath: 'Банк и касса / Продажи / Склад / Зарплата и кадры',
@@ -884,11 +1005,13 @@ export function runAuditDiagnostics(params: {
       });
     }
 
-    // Missing primary amount check ("Требуется сумма") — NEVER flag HR orders, writs of execution, payroll calculated_by_1c, neutral manual ops, or reclassifiable operations!
+    // Missing primary amount check ("Требуется сумма") — NEVER flag HR orders, writs, contract/policy events, payroll calculated_by_1c, neutral manual ops, or reclassifiable operations!
     const isCalculatedBy1C =
       op.amountMode === 'calculated_by_1c' ||
       op.category === 'hr_hire' ||
       op.category === 'writ_of_execution' ||
+      op.category === 'contract_event' ||
+      op.category === 'policy_event' ||
       op.category === 'payroll_accrual' ||
       op.category === 'insurance_accrual' ||
       op.category === 'manual' ||
@@ -899,17 +1022,21 @@ export function runAuditDiagnostics(params: {
       (op.amountMode === 'required_missing' ||
         ((op.needsAmount || op.amount < 0.01) && op.category !== 'closing'))
     ) {
+      const checkedSources = op.resolverTrace?.checkedSourcesWhenMissing;
+      const checkedSummary =
+        checkedSources && checkedSources.length > 0
+          ? `Проверены все 7 уровней расчётного контура задания: ${checkedSources.join('; ')}.`
+          : 'Проверены все 7 уровней расчётного контура задания (колонка суммы Excel, формулы в тексте строки, открытые расчёты 60/62, периодические договоры, остатки счетов 68/69/70/76.41/08/10/41/43, регистры ФОТ/ОС/векселей и история базы 1С) — числовое основание во входных файлах не найдено.';
       issues.push({
         id: `missing-amount-${op.id}`,
         severity: 'error',
         category: 'missing_amount',
         operationId: op.id,
-        title: `Требуется указать сумму операции: «${op.description.slice(0, 58)}»`,
-        description:
-          op.amountCalculationNote ||
-          'В строке Excel не была указана сумма первичного расчётного документа, и её невозможно однозначно вывести из остатков 68/69 или связанных авансов.',
-        accountingReason: `Согласно ст. 9 Федерального закона № 402-ФЗ «О бухгалтерском учёте» денежное измерение внешнего первичного расчётного документа (платёжного поручения, накладной поставщика, акта, реализации) обязательно.`,
-        quickFixLabel: 'Введите сумму документа в поле ниже и нажмите «Применить»',
+        title: `Требуется уточнить сумму внешней операции: «${op.description.slice(0, 58)}»`,
+        description: checkedSummary,
+        accountingReason:
+          'Для формирования проводок внешнего расчётного документа в контуре задания должно присутствовать числовое основание (сумма в колонке, количество × цена, условие договора, остаток счёта расчётов или исторический аналог в БД 1С). Поскольку во входных данных сумма не задана, введите её в поле ниже.',
+        quickFixLabel: 'Введите сумму операции в поле ниже и нажмите «Применить»',
         guide1C: {
           menuPath:
             op.docType1C === 'СписаниеСРасчетногоСчета' || op.docType1C === 'ПоступлениеНаРасчетныйСчет'
@@ -919,10 +1046,10 @@ export function runAuditDiagnostics(params: {
                 : 'Покупки → Поступление (акты, накладные, УПД)',
           documentKind: op.docType1C,
           checkPoints: [
-            'Сверьте сумму с бумажным / ЭДО оригиналом первичного документа (платёжным поручением, ТОРГ-12, актом или УПД)',
-            'При оплате задолженности по налогам сверьте кредитовое сальдо по счетам 68 и 69 в ОСВ на дату платежа',
+            'Проверьте условие учебного задания (таблицу исходных данных или примечание к хозяйственной операции)',
+            'При оплате задолженности сверьте сальдо соответствующего счёта расчётов в ОСВ на дату операции',
           ],
-          repostInstruction: 'Укажите цену/сумму в документе → нажмите «Провести и закрыть»',
+          repostInstruction: 'Укажите сумму в документе → нажмите «Провести и закрыть»',
           verifyInOsv: 'Отчеты → Движения документа (кнопка Дт/Кт в шапке документа 1С)',
         },
         canAutoFixBy1C: false,
@@ -978,8 +1105,10 @@ export function runAuditDiagnostics(params: {
         (op.category === 'bank_out' || op.category === 'cash_out') &&
         contextCpMatches.length > 0;
       const canAutoLinkCp = canAutoLinkBuyer || canAutoLinkSupplierByContext;
+      const canFixCpName = canResolveFounder || canAutoLinkCp;
       issues.push({
         id: `missing-cp-name-${op.id}`,
+        fixId: canFixCpName ? 'resolve_amount_and_links' : undefined,
         severity: canAutoLinkCp ? 'warning' : 'error',
         category: 'missing_requisite',
         operationId: op.id,
@@ -992,8 +1121,8 @@ export function runAuditDiagnostics(params: {
             ? `Документ «${op.description.slice(0, 70)}» (${op.amount.toFixed(2)} ₽): покупатель может быть привязан автоматически по авансу 62.02 / договору кнопкой «Исправить».`
             : `Документ «${op.description.slice(0, 70)}» (${op.amount.toFixed(2)} ₽): выберите контрагента из базы 1С или введите наименование (от 2 символов).`,
         accountingReason: `Субконто «Контрагенты» является обязательным аналитическим разрезом по счетам 60, 62 и 76 в 1С БП 3.0. Без указания контрагента невозможна сверка расчётов и заполнение книг покупок/продаж.`,
-        quickFixLabel: canAutoLinkCp
-          ? 'Нажмите «Исправить» для автопривязки контрагента по неоплаченным накладным / предоплате'
+        quickFixLabel: canFixCpName
+          ? 'Нажмите «Исправить» для автопривязки контрагента по связанным расчётам'
           : 'Выберите контрагента из базы 1С или введите наименование и нажмите «Применить»',
         guide1C: {
           menuPath: 'Справочники → Покупки и продажи → Контрагенты',
@@ -1004,7 +1133,8 @@ export function runAuditDiagnostics(params: {
           repostInstruction: 'Заполните поле «Контрагент» и «Договор» → «Провести и закрыть»',
           verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 60 / 62 (проверить отсутствие пустого субконто «<...>»)',
         },
-        canAutoFixBy1C: canResolveFounder || canAutoLinkCp,
+        canAutoFixBy1C: canFixCpName,
+        autoFixActionLabel: canFixCpName ? 'Привязать контрагента автоматически' : undefined,
         inlineTarget: {
           kind: 'operation_field',
           operationId: op.id,
@@ -1026,32 +1156,32 @@ export function runAuditDiagnostics(params: {
       const isEducational = op.counterpartySource === 'educational_unverified';
       issues.push({
         id: `missing-inn-${op.id}`,
-        severity: isEducational ? 'warning' : 'error',
+        fixId: 'fill_formal_requisites',
+        severity: 'warning',
         category: 'missing_requisite',
         operationId: op.id,
         title: isEducational
-          ? `Учебный контрагент (не найден в ЕГРЮЛ): ${trimmedCpName} — ИНН не заполнен`
+          ? `Учебный контрагент: ${trimmedCpName} — ИНН/КПП готовы к автозаполнению`
           : `Не заполнен ИНН контрагента: ${trimmedCpName}`,
         description: resolvable
-          ? `Контрагент найден в базе 1С — реквизиты подтянутся автоматически кнопкой «Исправить всё автоматически».`
-          : isEducational
-            ? `Организация «${trimmedCpName}» отсутствует в справочнике 1С и в официальном реестре ЕГРЮЛ ФНС (учебный контрагент). При необходимости введите учебный/ручной ИНН (10 или 12 цифр) в блоке выше.`
-            : `Контрагент «${trimmedCpName}» отсутствует в справочнике 1С. Нажмите «Исправить всё автоматически» для поиска реального ИНН/КПП в ЕГРЮЛ ФНС или укажите ИНН вручную.`,
-        accountingReason: `По п. 5 ст. 169 НК РФ ИНН и КПП продавца/покупателя — обязательные реквизиты счёта-фактуры; при выгрузке декларации по НДС (разделы 8 и 9) ФНС проверяет ИНН/КПП каждого контрагента по базе ЕГРН/ЕГРЮЛ.`,
-        quickFixLabel: isEducational
-          ? 'Укажите ИНН вручную (если задан условием задачи) или оставьте учебную карточку'
-          : 'Нажмите «Проверить в ЕГРЮЛ» / «Исправить всё автоматически» или введите ИНН вручную',
+          ? `Контрагент найден в базе 1С — реквизиты подтянутся автоматически кнопкой «Исправить».`
+          : `Формальный реквизит карточки «${trimmedCpName}» (на сальдо и обороты ОСВ не влияет): нажмите «Исправить» для подстановки ИНН/КПП по ЕГРЮЛ или генерации валидного учебного ИНН/КПП с контрольной цифрой ФНС.`,
+        accountingReason: `По п. 5 ст. 169 НК РФ ИНН и КПП указываются в карточке контрагента и счёте-фактуре (ФЛК разделов 8 и 9 декларации по НДС). На бухгалтерские проводки и баланс ОСВ реквизит ИНН не влияет.`,
+        quickFixLabel: 'Нажмите «Исправить» для автоматического заполнения ИНН/КПП или укажите вручную',
         guide1C: {
           menuPath: 'Справочники → Покупки и продажи → Контрагенты',
           documentKind: 'Справочник «Контрагенты» (карточка элемента)',
           checkPoints: [
-            'Откройте карточку контрагента → введите ИНН или наименование в строку «Заполнить реквизиты по ИНН или наименованию» (сервис 1С:Контрагент)',
-            'Проверьте заполнение полей ИНН (10 цифр для ЮЛ / 12 для ИП), КПП (9 цифр для ЮЛ) и Основного банковского счёта',
+            'Откройте карточку контрагента → заполните ИНН (10 цифр для ЮЛ / 12 для ИП) и КПП (9 цифр для ЮЛ)',
+            'Для учебной организации используйте валидный ИНН региона организации с корректной контрольной цифрой ФНС',
           ],
-          repostInstruction: 'Нажмите «Записать и закрыть» в карточке контрагента и перепроведите счёта-фактуры за квартал',
-          verifyInOsv: 'Отчеты → Экспресс-проверка ведения учета (контроль ИНН/КПП контрагентов в книге покупок и продаж)',
+          repostInstruction: 'Нажмите «Записать и закрыть» в карточке контрагента',
+          verifyInOsv: 'Отчеты → Экспресс-проверка ведения учета (контроль ИНН/КПП контрагентов)',
         },
-        canAutoFixBy1C: resolvable || !isEducational,
+        canAutoFixBy1C: true,
+        autoFixActionLabel: resolvable
+          ? 'Подтянуть ИНН/КПП из базы 1С'
+          : 'Заполнить ИНН/КПП автоматически',
         inlineTarget: {
           kind: 'operation_field',
           operationId: op.id,
@@ -1074,17 +1204,19 @@ export function runAuditDiagnostics(params: {
       if (!checkRes.valid) {
         issues.push({
           id: `invalid-inn-checksum-${op.id}`,
+          fixId: 'fill_formal_requisites',
           severity: 'warning',
           category: 'missing_requisite',
           operationId: op.id,
           title: `Проверьте контрольную цифру ИНН у «${trimmedCpName}»`,
           description:
             checkRes.reason ||
-            'Введённый ИНН не проходит проверку контрольного числа по алгоритму ФНС России — 1С:БП 3.0 выдаст предупреждение в счёте-фактуре.',
+            'Введённый ИНН не проходит проверку контрольного числа по алгоритму ФНС России — нажмите «Исправить» для коррекции контрольного разряда.',
           accountingReason:
-            'В 1С:Бухгалтерия 8.3 встроен контроль ИНН по весовым коэффициентам ФНС (модуль 11). Опечатка в одной цифре приведёт к ошибке ФЛК книги покупок/продаж.',
-          quickFixLabel: 'Исправьте контрольную цифру ИНН или подставьте учебный валидный ИНН/КПП',
-          canAutoFixBy1C: false,
+            'В 1С:Бухгалтерия 8.3 встроен контроль ИНН по весовым коэффициентам ФНС (модуль 11). Опечатка в одной цифре приведёт к предупреждению ФЛК книги покупок/продаж.',
+          quickFixLabel: 'Нажмите «Исправить» для подстановки валидного ИНН/КПП по контрольному числу ФНС',
+          canAutoFixBy1C: true,
+          autoFixActionLabel: 'Исправить контрольную цифру ИНН',
           inlineTarget: {
             kind: 'operation_field',
             operationId: op.id,
@@ -1107,24 +1239,17 @@ export function runAuditDiagnostics(params: {
       op.counterpartyInn.replace(/\D/g, '').length === 10 &&
       op.counterpartyKpp.replace(/\D/g, '').length !== 9
     ) {
-      const resolvableKpp = Boolean(
-        db1C?.counterparties.some(
-          (c) =>
-            c.kpp.replace(/\D/g, '').length === 9 &&
-            (c.inn.replace(/\D/g, '') === op.counterpartyInn.replace(/\D/g, '') ||
-              normalizeEntityKey(c.name) === normalizeEntityKey(trimmedCpName))
-        )
-      );
       issues.push({
         id: `missing-kpp-${op.id}`,
+        fixId: 'fill_formal_requisites',
         severity: 'warning',
         category: 'missing_requisite',
         operationId: op.id,
         title: `Не указан КПП юрлица: ${trimmedCpName}`,
         description:
           'Для корректного формирования книги покупок/продаж и счёта-фактуры в 1С БП 3.0 требуется КПП (9 цифр).',
-        accountingReason: `Для российской организации (10-значный ИНН) КПП состоит из 9 цифр (первые 4 — код ИФНС, далее «01001» для головной организации). Без КПП декларация по НДС не проходит форматно-логический контроль.`,
-        quickFixLabel: 'Подтянуть КПП из ЕГРЮЛ кнопкой «Исправить всё автоматически» или ввести 9 цифр вручную',
+        accountingReason: `Для российской организации (10-значный ИНН) КПП состоит из 9 цифр (первые 4 — код ИФНС, далее «01001» для головной организации).`,
+        quickFixLabel: 'Нажмите «Исправить» для автоматической подстановки КПП (9 цифр)',
         guide1C: {
           menuPath: 'Справочники → Контрагенты → Карточка контрагента',
           documentKind: 'Справочник «Контрагенты»',
@@ -1135,6 +1260,7 @@ export function runAuditDiagnostics(params: {
           verifyInOsv: 'Отчеты → Книга покупок / Книга продаж (колонка ИНН/КПП продавца/покупателя)',
         },
         canAutoFixBy1C: true,
+        autoFixActionLabel: 'Заполнить КПП автоматически',
         inlineTarget: {
           kind: 'operation_field',
           operationId: op.id,
@@ -1149,14 +1275,15 @@ export function runAuditDiagnostics(params: {
     if (op.bindings.contract.status === 'missing') {
       issues.push({
         id: `missing-contract-${op.id}`,
+        fixId: 'fill_formal_requisites',
         severity: 'warning',
         category: 'missing_requisite',
         operationId: op.id,
         title: `Не заполнен договор контрагента (${op.counterpartyName || 'без имени'})`,
         description:
           'Счета 60 и 62 в 1С БП 3.0 ведутся в разрезе субконто «Договоры». Автоисправление подберёт договор из БД 1С или создаст основной договор.',
-        accountingReason: `Без субконто «Договоры» в 1С БП 3.0 не работает автоматический зачёт авансов между платёжным поручением и накладной/актом (остатки повисают развёрнуто на 60.01/60.02 или 62.01/62.02).`,
-        quickFixLabel: 'Нажмите «Исправить всё автоматически» для привязки/создания договора',
+        accountingReason: `Без субконто «Договоры» в 1С БП 3.0 не работает автоматический зачёт авансов между платёжным поручением и накладной/актом.`,
+        quickFixLabel: 'Нажмите «Исправить» для привязки/создания основного договора',
         guide1C: {
           menuPath: 'Справочники → Контрагенты → Договоры',
           documentKind: `${op.docType1C} (реквизит «Договор»)`,
@@ -1168,6 +1295,7 @@ export function runAuditDiagnostics(params: {
           verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 60 / 62 с детализацией по субконто «Договоры»',
         },
         canAutoFixBy1C: true,
+        autoFixActionLabel: 'Подобрать / создать основной договор',
         inlineTarget: {
           kind: 'operation_field',
           operationId: op.id,
@@ -1182,13 +1310,14 @@ export function runAuditDiagnostics(params: {
     if (op.bindings.warehouse.status === 'missing') {
       issues.push({
         id: `missing-warehouse-${op.id}`,
+        fixId: 'fill_formal_requisites',
         severity: 'warning',
         category: 'missing_requisite',
         operationId: op.id,
         title: `Не указан склад учёта МПЗ (${op.docType1C})`,
         description: 'Для проведения документа движения ТМЦ в 1С БП 3.0 требуется реквизит «Склад».',
         accountingReason: `Количественно-суммовой учёт на счетах 10, 41 и 43 ведётся в разрезе субконто «Склады». Несовпадение или отсутствие склада блокирует списание себестоимости при отгрузке.`,
-        quickFixLabel: 'Нажмите «Исправить всё автоматически» для подстановки склада из БД 1С',
+        quickFixLabel: 'Нажмите «Исправить» для подстановки основного склада учёта',
         guide1C: {
           menuPath: 'Справочники → Товары и услуги → Склады',
           documentKind: op.docType1C,
@@ -1199,6 +1328,7 @@ export function runAuditDiagnostics(params: {
           verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 41.01 / 10.01 с группировкой по Складам',
         },
         canAutoFixBy1C: true,
+        autoFixActionLabel: 'Проставить основной склад',
         inlineTarget: {
           kind: 'operation_field',
           operationId: op.id,
@@ -1213,6 +1343,7 @@ export function runAuditDiagnostics(params: {
     if (op.bindings.expenseItem.status === 'missing') {
       issues.push({
         id: `missing-expense-${op.id}`,
+        fixId: 'fill_formal_requisites',
         severity: 'warning',
         category: 'missing_requisite',
         operationId: op.id,
@@ -1220,7 +1351,7 @@ export function runAuditDiagnostics(params: {
         description:
           'Для затратных счетов (20, 26, 44) необходимо заполнить аналитику «Статьи затрат».',
         accountingReason: `Аналитика «Статьи затрат» определяет порядок закрытия затратных счетов в бухгалтерском учёте и классификацию прямых/косвенных расходов в налоговом учёте (ст. 318 НК РФ).`,
-        quickFixLabel: 'Нажмите «Исправить всё автоматически» для автоподбора статьи затрат',
+        quickFixLabel: 'Нажмите «Исправить» для автоподбора статьи затрат',
         guide1C: {
           menuPath: 'Справочники → Доходы и расходы → Статьи затрат',
           documentKind: op.docType1C,
@@ -1231,6 +1362,7 @@ export function runAuditDiagnostics(params: {
           verifyInOsv: 'Отчеты → Анализ субконто «Статьи затрат» и ОСВ по счёту 26 / 20 / 44',
         },
         canAutoFixBy1C: true,
+        autoFixActionLabel: 'Подобрать статью затрат',
         inlineTarget: {
           kind: 'operation_field',
           operationId: op.id,
@@ -1246,18 +1378,22 @@ export function runAuditDiagnostics(params: {
       op.entries.length === 0 &&
       op.category !== 'hr_hire' &&
       op.category !== 'writ_of_execution' &&
+      op.category !== 'contract_event' &&
+      op.category !== 'policy_event' &&
       op.category !== 'closing' &&
+      op.category !== 'manual' &&
       ((!op.needsAmount && op.amount >= 0.01) || op.amountMode === 'calculated_by_1c')
     ) {
       issues.push({
         id: `empty-entries-${op.id}`,
+        fixId: 'resolve_amount_and_links',
         severity: 'error',
         category: 'unbalanced_entry',
         operationId: op.id,
         title: `Отсутствуют проводки у операции «${op.description.slice(0, 50)}»`,
         description: 'Операция включена в расчёт, но список проводок пуст.',
         accountingReason: `Непроведённый документ не отражается в регистре бухгалтерии и искажает ОСВ.`,
-        quickFixLabel: 'Нажмите «Исправить всё автоматически» для генерации проводок РСБУ',
+        quickFixLabel: 'Нажмите «Исправить» для генерации проводок РСБУ',
         guide1C: {
           menuPath: 'Операции → Журнал операций',
           documentKind: op.docType1C,
@@ -1266,6 +1402,7 @@ export function runAuditDiagnostics(params: {
           verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость за период',
         },
         canAutoFixBy1C: true,
+        autoFixActionLabel: 'Сформировать проводки РСБУ',
       });
     }
 
@@ -1314,6 +1451,7 @@ export function runAuditDiagnostics(params: {
         if (dtInfo.isGroup) {
           issues.push({
             id: `group-dt-${entry.id}`,
+            fixId: 'replace_group_account',
             severity: 'warning',
             category: 'missing_requisite',
             operationId: op.id,
@@ -1321,7 +1459,7 @@ export function runAuditDiagnostics(params: {
             title: `Указан групповой счёт Дт ${entry.debit} вместо субсчёта`,
             description: `В 1С БП 3.0 проводки формируются по конечным субсчетам (например, ${entry.debit}.01 вместо ${entry.debit}).`,
             accountingReason: `В Плане счетов 1С БП 3.0 у счёта-группы ${entry.debit} установлен признак «Запретить использование в проводках» — платформа не позволит записать движение без выбора субсчёта.`,
-            quickFixLabel: 'Заменить на рабочий субсчёт кнопкой «Исправить всё автоматически»',
+            quickFixLabel: 'Заменить на рабочий субсчёт кнопкой «Исправить»',
             guide1C: {
               menuPath: 'Главное → План счетов → Счет ' + entry.debit,
               documentKind: op.docType1C,
@@ -1330,6 +1468,7 @@ export function runAuditDiagnostics(params: {
               verifyInOsv: `Отчеты → Оборотно-сальдовая ведомость по счету ${entry.debit} (по субсчетам)`,
             },
             canAutoFixBy1C: true,
+            autoFixActionLabel: `Заменить счёт ${entry.debit} на субсчёт`,
             inlineTarget: {
               kind: 'entry_account',
               operationId: op.id,
@@ -1344,6 +1483,7 @@ export function runAuditDiagnostics(params: {
         if (ktInfo.isGroup) {
           issues.push({
             id: `group-kt-${entry.id}`,
+            fixId: 'replace_group_account',
             severity: 'warning',
             category: 'missing_requisite',
             operationId: op.id,
@@ -1351,7 +1491,7 @@ export function runAuditDiagnostics(params: {
             title: `Указан групповой счёт Кт ${entry.credit} вместо субсчёта`,
             description: `В 1С БП 3.0 проводки формируются по конечным субсчетам (например, ${entry.credit}.01 вместо ${entry.credit}).`,
             accountingReason: `Счёт ${entry.credit} имеет подчинённые субсчета и в 1С БП 3.0 закрыт для прямого выбора в проводках.`,
-            quickFixLabel: 'Заменить на рабочий субсчёт кнопкой «Исправить всё автоматически»',
+            quickFixLabel: 'Заменить на рабочий субсчёт кнопкой «Исправить»',
             guide1C: {
               menuPath: 'Главное → План счетов → Счет ' + entry.credit,
               documentKind: op.docType1C,
@@ -1360,6 +1500,7 @@ export function runAuditDiagnostics(params: {
               verifyInOsv: `Отчеты → Оборотно-сальдовая ведомость по счету ${entry.credit} (по субсчетам)`,
             },
             canAutoFixBy1C: true,
+            autoFixActionLabel: `Заменить счёт ${entry.credit} на субсчёт`,
             inlineTarget: {
               kind: 'entry_account',
               operationId: op.id,
@@ -1381,14 +1522,17 @@ export function runAuditDiagnostics(params: {
 const DEFAULT_SUBACCOUNT_MAP: Record<string, string> = {
   '01': '01.01',
   '02': '02.01',
-  '08': '08.04',
+  '04': '04.01',
+  '08': '08.04.1',
   '10': '10.01',
   '19': '19.03',
   '20': '20.01',
   '41': '41.01',
   '44': '44.01',
   '50': '50.01',
+  '55': '55.04',
   '57': '57.01',
+  '58': '58.02',
   '60': '60.01',
   '62': '62.01',
   '66': '66.03',
@@ -1689,8 +1833,37 @@ export function generatePeriodClosingOperations(params: {
     }
   }
 
+  const acc25 = osv.leafRows.find((r) => r.code === '25');
+  const total25ToClose = round2(acc25?.endDebit ?? 0);
+  if (total25ToClose > 0.01) {
+    closingEntries.push({
+      id: nextAutoFixId('close-25'),
+      debit: '20.01',
+      credit: '25',
+      debitSubconto: nomGroup,
+      creditSubconto: 'Общепроизводственные расходы',
+      amount: total25ToClose,
+      description: 'Распределение общепроизводственных расходов (счёт 25) в основное производство (20.01)',
+    });
+    log.push(`Закрыт счёт 25 в Дт 20.01 на сумму ${total25ToClose.toFixed(2)} ₽`);
+    structuredChanges.push({
+      id: nextAutoFixId('chg-close-25'),
+      whatWas: `Незакрытое сальдо Дт 25 = ${total25ToClose.toFixed(2)} ₽`,
+      whatBecame: `Проводка Дт 20.01 Кт 25 = ${total25ToClose.toFixed(2)} ₽ (сальдо 25 = 0,00 ₽)`,
+      basis: 'Ежемесячное распределение общепроизводственных расходов (Инструкция к Плану счетов РСБУ)',
+      category: 'closing',
+    });
+  }
+
   const acc20 = osv.leafRows.find((r) => r.code === '20.01');
-  const total20ToClose = round2((acc20?.endDebit ?? 0) + addedDeprTo20 + (!directCosting ? (osv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0) + addedDeprTo26 : 0));
+  const total20ToClose = round2(
+    (acc20?.endDebit ?? 0) +
+      total25ToClose +
+      addedDeprTo20 +
+      (!directCosting
+        ? (osv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0) + addedDeprTo26
+        : 0)
+  );
   const total26ToClose = round2((osv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0) + addedDeprTo26);
 
   if (total26ToClose > 0.01) {
@@ -1968,6 +2141,7 @@ export function autoFixAllBy1CDb(params: {
   fixedCount: number;
   log: string[];
   structuredChanges: AutoFixChangeRecord[];
+  executionSummary: AutofixExecutionSummary;
 } {
   const {
     db1C,
@@ -1980,14 +2154,36 @@ export function autoFixAllBy1CDb(params: {
   let fixedCount = 0;
   const log: string[] = [];
   const structuredChanges: AutoFixChangeRecord[] = [];
+  const appliedRuleSet = new Set<AutofixRuleId>();
+
+  const osvBefore = calculateCurrentOsv(operations);
+  const issuesBeforeList = runAuditDiagnostics({ db1C, operations, osv: osvBefore });
+  const issuesBeforeCount = issuesBeforeList.length;
+  const autofixableBeforeCount = issuesBeforeList.filter((i) => i.canAutoFixBy1C).length;
+  const criticalBeforeCount = operations.filter(
+    (o) => o.includeInProcessing && o.readinessStatus === 'critical_error'
+  ).length;
+
+  const homeRegion = inferOrganizationRegionCode({
+    organizationInn: db1C?.organization.inn,
+    organizationBik: db1C?.organization.bik || defaultBik,
+  });
+
+  // Deterministic formal-requisite cache per counterparty group key across all passes
+  const formalCpRequisiteCache = new Map<
+    string,
+    { inn: string; kpp: string; source: CounterpartyResolutionSource }
+  >();
 
   const recordChange = (
     whatWas: string,
     whatBecame: string,
     basis: string,
     category: AutoFixChangeRecord['category'],
+    ruleId: AutofixRuleId,
     operationId?: string
   ) => {
+    appliedRuleSet.add(ruleId);
     structuredChanges.push({
       id: nextAutoFixId(`fix-${structuredChanges.length + 1}`),
       whatWas,
@@ -1998,794 +2194,1029 @@ export function autoFixAllBy1CDb(params: {
     });
   };
 
-  // Remove stale auto-generated ops before recalculating fresh ones
-  const manualAndImportedOps = operations.filter((op) => !op.autoGeneratedKind);
-  const enrichedOps: QueuedOperation[] = [];
+  let workingOperations: QueuedOperation[] = operations.map((o) => ({
+    ...o,
+    bindings: { ...o.bindings },
+    entries: o.entries.map((e) => ({ ...e })),
+  }));
+  let passesExecuted = 0;
 
-  for (const origOp of manualAndImportedOps) {
-    let op: QueuedOperation = {
-      ...origOp,
-      bindings: { ...origOp.bindings },
-      entries: origOp.entries.map((e) => ({ ...e })),
-    };
+  for (let pass = 1; pass <= 5; pass++) {
+    passesExecuted = pass;
 
-    // 0a. Normalize stray template years (e.g. 2020 / 2024) to reportingYear if reportingYear is specified
-    if (reportingYear && op.date && !op.date.startsWith(`${reportingYear}-`)) {
-      const prevDate = op.date;
-      const normDate = normalizeOperationDateToReportingYear(op.date, reportingYear);
-      if (normDate && normDate !== prevDate) {
-        op.date = normDate;
-        fixedCount++;
-        log.push(`Нормализована дата документа: ${prevDate} → ${normDate}`);
-        recordChange(
-          `Дата документа: ${prevDate}`,
-          `Дата документа: ${normDate}`,
-          `Приведение шаблонного года Excel к рабочему отчётному году ${reportingYear}`,
-          'date_year',
-          op.id
-        );
-      }
-    }
+    // Strip regulatory auto-generated closing/offset ops (regenerated cleanly at end of each pass)
+    const manualAndImportedOps = workingOperations.filter((op) => !op.autoGeneratedKind);
+    const enrichedOps: QueuedOperation[] = [];
 
-    // 0b. Extract inline requisites (ИНН/КПП/р/сч/БИК/количество/цена) from description if missing
-    const inlineReq = extractRequisitesFromFreeText(op.description, reportingYear);
-    const naturalPreCheck = detectOperationClassification({
-      description: op.description,
-      nomenclatureName: op.nomenclatureName || inlineReq.nomenclatureHint,
-      counterpartyName: op.counterpartyName || inlineReq.counterparty,
-    });
-    const opRequiresCommercialCp =
-      doesOperationRequireCounterparty(op.category) &&
-      doesOperationRequireCounterparty(naturalPreCheck.category);
-
-    if (
-      (op.category === 'alimony_payout' || naturalPreCheck.category === 'alimony_payout') &&
-      !op.alimonyRecipientInn &&
-      (inlineReq.alimonyRecipientInnHint || inlineReq.inn)
-    ) {
-      op.alimonyRecipientInn = inlineReq.alimonyRecipientInnHint || inlineReq.inn;
-    } else if (opRequiresCommercialCp && !op.counterpartyInn && inlineReq.inn) {
-      op.counterpartyInn = inlineReq.inn;
-      op.counterpartySource = 'excel_explicit';
-      fixedCount++;
-      log.push(`Из текста операции извлечён ИНН ${inlineReq.inn}`);
-      recordChange(
-        'ИНН контрагента: не заполнен',
-        `ИНН: ${inlineReq.inn}`,
-        'Прямое извлечение реквизитов из текста первичной операции',
-        'counterparty_requisites',
-        op.id
-      );
-    }
-    if (opRequiresCommercialCp && !op.counterpartyKpp && inlineReq.kpp) {
-      op.counterpartyKpp = inlineReq.kpp;
-      fixedCount++;
-      recordChange(
-        'КПП контрагента: не заполнен',
-        `КПП: ${inlineReq.kpp}`,
-        'Прямое извлечение КПП из текста операции',
-        'counterparty_requisites',
-        op.id
-      );
-    }
-    if (!op.counterpartyBankAccount && inlineReq.bankAccount) {
-      op.counterpartyBankAccount = inlineReq.bankAccount;
-      fixedCount++;
-      recordChange(
-        'Расчётный счёт получателя: не заполнен',
-        `р/сч ${inlineReq.bankAccount}`,
-        'Извлечение банковских реквизитов из текста операции',
-        'bank_bik',
-        op.id
-      );
-    }
-    if (!op.counterpartyBik && inlineReq.bik) {
-      op.counterpartyBik = inlineReq.bik;
-      op.counterpartyBankName = inlineReq.bankName;
-      fixedCount++;
-      recordChange(
-        'БИК банка контрагента: по умолчанию',
-        `БИК ${inlineReq.bik} (${inlineReq.bankName})`,
-        'Прямое указание БИК в тексте операции (приоритет над банком по умолчанию)',
-        'bank_bik',
-        op.id
-      );
-    }
-    if (!op.organizationBik) {
-      op.organizationBik = db1C?.organization.bik || defaultBik;
-      op.organizationBankName = db1C?.organization.bankName || DEFAULT_SBERBANK_NAME;
-    }
-
-    // 1. Disable accidental duplicates if enabled
-    if (op.isDuplicateIn1C && op.includeInProcessing) {
-      op.includeInProcessing = false;
-      fixedCount++;
-      log.push(`Исключён из расчёта дубликат документа: «${op.description.slice(0, 50)}»`);
-      recordChange(
-        `Дубликат включён в расчёт: «${op.description.slice(0, 45)}»`,
-        'Исключён из проведения (защита от задвоения оборотов)',
-        op.duplicateReason || 'Совпадение с уже проведённым документом в базе 1С',
-        'duplicate_guard',
-        op.id
-      );
-    }
-
-    if (!op.includeInProcessing) {
-      enrichedOps.push(op);
-      continue;
-    }
-
-    // Sanitize accidental <2-char counterparty fragment
-    if (op.counterpartyName.trim().length > 0 && op.counterpartyName.trim().length < 2) {
-      op.counterpartyName = '';
-      op.counterpartyInn = '';
-      op.counterpartyKpp = '';
-      if (doesOperationRequireCounterparty(op.category)) {
-        op.bindings.counterparty = { status: 'missing', note: 'Не указан контрагент' };
-      } else {
-        op.bindings.counterparty = { status: 'not_required' };
-      }
-    }
-
-    // Build chronological prior operations (both already-enriched ops and any earlier-dated ops in queue, including HR/writ registrations with 0 balance amount!)
-    const buildChronoPriors = (targetOp: QueuedOperation): QueuedOperation[] => {
-      const byId = new Map<string, QueuedOperation>();
-      for (const p of enrichedOps) {
-        if (p.id !== targetOp.id && p.includeInProcessing) {
-          byId.set(p.id, p);
-        }
-      }
-      for (const other of manualAndImportedOps) {
-        if (
-          other.id !== targetOp.id &&
-          !byId.has(other.id) &&
-          other.includeInProcessing &&
-          (other.amount >= 0.01 ||
-            other.category === 'hr_hire' ||
-            other.category === 'writ_of_execution') &&
-          (!targetOp.date || !other.date || other.date <= targetOp.date)
-        ) {
-          byId.set(other.id, other);
-        }
-      }
-      return Array.from(byId.values());
-    };
-
-    // 1a. Reclassify any misclassified operations (including legacy ПоступлениеТоваровУслуг fallbacks for cash/bank, 71.01 accountable, sales, loans, founder, warehouse, production, or neutral manual)
-    const naturalClass = detectOperationClassification({
-      description: op.description,
-      nomenclatureName: op.nomenclatureName || inlineReq.nomenclatureHint,
-      counterpartyName: op.counterpartyName || inlineReq.counterparty,
-    });
-    const shouldReclassify = isMisclassifiedLegacyOperation(op);
-
-    if (shouldReclassify) {
-      const prevDocType = op.docType1C;
-      const prevHadNeedsAmount = Boolean(op.needsAmount || op.amountMode === 'required_missing');
-      const prevVatRate = op.vatRate;
-      const prevCp = op.counterpartyName;
-      const naturalNeedsCp = doesOperationRequireCounterparty(naturalClass.category);
-
-      const seqCtx: BatchSequentialContext = {
-        priorOperations: buildChronoPriors(op),
-        reportingYear,
-        defaultBik,
-        defaultBankName: DEFAULT_SBERBANK_NAME,
-        assumeInvoiceOnVatPurchase: [
-          'purchase_goods',
-          'purchase_materials',
-          'purchase_services',
-          'purchase_equipment',
-        ].includes(naturalClass.category),
+    for (const origOp of manualAndImportedOps) {
+      let op: QueuedOperation = {
+        ...origOp,
+        bindings: { ...origOp.bindings },
+        entries: origOp.entries.map((e) => ({ ...e })),
       };
 
-      const reclassified = bindAndGenerateOperation(
-        {
-          rowKey: op.rowKey,
-          sourceFileName: op.sourceFileName,
-          date: op.date,
-          docNumber: op.docNumber,
-          description: op.description,
-          amount:
-            naturalClass.category === 'sale_goods' &&
-            (op.quantity ?? inlineReq.quantity) &&
-            (op.unitPrice ?? inlineReq.unitPrice)
-              ? 0
-              : op.amount,
-          quantity: op.quantity ?? inlineReq.quantity,
-          unitPrice: op.unitPrice ?? inlineReq.unitPrice,
-          counterpartyName: naturalNeedsCp
-            ? op.counterpartyName || inlineReq.counterparty
-            : naturalClass.category === 'founder_contribution'
-              ? op.counterpartyName
-              : '',
-          counterpartyInn: naturalNeedsCp ? op.counterpartyInn : '',
-          counterpartyKpp: naturalNeedsCp ? op.counterpartyKpp : '',
-          counterpartyBankAccount: naturalNeedsCp ? op.counterpartyBankAccount : undefined,
-          counterpartyBik: naturalNeedsCp ? op.counterpartyBik : undefined,
-          counterpartyBankName: naturalNeedsCp ? op.counterpartyBankName : undefined,
-          counterpartySource: naturalNeedsCp ? op.counterpartySource : undefined,
-          contractName: naturalNeedsCp ? op.contractName : '',
-          nomenclatureName: op.nomenclatureName || inlineReq.nomenclatureHint,
-          nomenclatureGroupHint:
-            op.nomenclatureGroupName && op.nomenclatureGroupName !== 'Основная номенклатурная группа'
-              ? op.nomenclatureGroupName
-              : inlineReq.productionObjectHint,
-          employeeName: op.employeeName || inlineReq.employeeHint,
-          monthlySalary: op.monthlySalary ?? inlineReq.monthlySalaryHint,
-          employeePosition: op.employeePosition || inlineReq.employeePositionHint,
-          usefulLifeMonths: op.usefulLifeMonths ?? inlineReq.usefulLifeMonthsHint,
-          depreciationBaseAmount: op.depreciationBaseAmount,
-          alimonyRecipientName: op.alimonyRecipientName || inlineReq.alimonyRecipientHint,
-          alimonyRecipientInn: op.alimonyRecipientInn || inlineReq.alimonyRecipientInnHint,
-          alimonyRatePercent: op.alimonyRatePercent ?? inlineReq.alimonyRatePercentHint,
-          alimonyShareLabel: op.alimonyShareLabel || inlineReq.alimonyShareLabelHint,
-          financialNotesSummary: op.financialNotesSummary || inlineReq.financialNotesSummaryHint,
-          warehouseName: op.warehouseName,
-          warehouseToHint: op.warehouseToName,
-          expenseItemName: op.expenseItemName,
-          cashFlowItemName: op.cashFlowItemName,
-          costAccountHint: op.costAccount,
-          materialAccountHint: op.materialAccount,
-        },
-        db1C,
-        op.id,
-        seqCtx
-      );
-
-      op = { ...reclassified, includeInProcessing: op.includeInProcessing };
-      fixedCount++;
-      const entryPreview =
-        op.entries.length > 0
-          ? op.entries
-              .map((e) => (e.isOffBalance ? `Дт ${e.debit}` : `Дт ${e.debit} Кт ${e.credit}`))
-              .join('; ')
-          : 'ожидает уточнения реквизитов';
-      log.push(
-        `Переклассифицирована операция «${op.description.slice(0, 50)}»: ${prevDocType} → ${op.docType1C} (${entryPreview})`
-      );
-      recordChange(
-        `1С: ${prevDocType}${prevVatRate > 0 ? `, НДС ${prevVatRate}%` : ''}${prevHadNeedsAmount ? ', ошибка «Требуется сумма»' : ''}${!naturalNeedsCp && prevCp ? `, ложный запрос контрагента` : ''}`,
-        `1С: ${op.docType1C} (${DOC_TYPE_LABELS_1C[op.docType1C]})${op.documentSubKind1C ? ` · ${op.documentSubKind1C}` : ''}${op.employeeName ? ` · ${op.employeeName}` : ''}${op.counterpartyName ? ` · ${op.counterpartyName}` : ''} — ${entryPreview}${op.amount >= 0.01 ? ` (${op.amount.toFixed(2)} ₽)` : ''}`,
-        'Интеллектуальный классификатор 1С:БП 3.0 (касса, банк, подотчёт 71.01, реализация 90.01.1, займы, ТМЦ)',
-        'doc_reclassification',
-        op.id
-      );
-    }
-
-    // 1a-bis. Auto-link missing buyer on already-classified sales (`sale_goods` / `sale_services`) or fix net-price VAT rule ("по цене без НДС")
-    if (
-      !shouldReclassify &&
-      (op.category === 'sale_goods' || op.category === 'sale_services') &&
-      (!op.counterpartyName.trim() ||
-        (/по\s+цене\s+без\s+ндс/i.test(op.description) && op.vatRule !== 'on_top'))
-    ) {
-      const prevCp = op.counterpartyName.trim();
-      const prevAmt = op.amount;
-      const prevVatRule = op.vatRule;
-      const seqCtx: BatchSequentialContext = {
-        priorOperations: buildChronoPriors(op),
-        reportingYear,
-        defaultBik,
-        defaultBankName: DEFAULT_SBERBANK_NAME,
-        assumeInvoiceOnVatPurchase: false,
-      };
-      const rebuiltSale = bindAndGenerateOperation(
-        {
-          rowKey: op.rowKey,
-          sourceFileName: op.sourceFileName,
-          date: op.date,
-          docNumber: op.docNumber,
-          description: op.description,
-          amount:
-            /по\s+цене\s+без\s+ндс/i.test(op.description) &&
-            (op.quantity ?? inlineReq.quantity) &&
-            (op.unitPrice ?? inlineReq.unitPrice)
-              ? 0
-              : op.amount,
-          quantity: op.quantity ?? inlineReq.quantity,
-          unitPrice: op.unitPrice ?? inlineReq.unitPrice,
-          counterpartyName: op.counterpartyName || inlineReq.counterparty,
-          counterpartyInn: op.counterpartyInn,
-          counterpartyKpp: op.counterpartyKpp,
-          contractName: op.contractName,
-          nomenclatureName: op.nomenclatureName || inlineReq.nomenclatureHint,
-          warehouseName: op.warehouseName,
-          docTypeHint: op.docType1C,
-          categoryHint: op.category,
-        },
-        db1C,
-        op.id,
-        seqCtx
-      );
-      if (
-        rebuiltSale.counterpartyName !== prevCp ||
-        Math.abs(rebuiltSale.amount - prevAmt) >= 0.01 ||
-        rebuiltSale.vatRule !== prevVatRule
-      ) {
-        op = { ...rebuiltSale, includeInProcessing: op.includeInProcessing };
-        fixedCount++;
-        log.push(
-          `Уточнена реализация «${op.description.slice(0, 50)}»: ${
-            op.counterpartyName ? `покупатель «${op.counterpartyName}», ` : ''
-          }сумма с НДС ${op.amount.toFixed(2)} ₽`
-        );
-        recordChange(
-          `Реализация: ${prevCp ? prevCp : 'покупатель не указан'}, сумма ${prevAmt.toFixed(2)} ₽`,
-          `Покупатель: ${op.counterpartyName || 'не указан'}, сумма с НДС: ${op.amount.toFixed(2)} ₽ (НДС ${op.vatAmount.toFixed(2)} ₽)`,
-          'Хронологическое связывание покупателя по авансам 62.02 / договорам БД 1С и расчёт НДС 20% сверху (п. 1 ст. 168 НК РФ)',
-          'directory_binding',
-          op.id
-        );
-      }
-    }
-
-    // 1b. Auto-compute missing amount OR propagate batch stock cost using chronological context!
-    if (
-      !shouldReclassify &&
-      (op.amount < 0.01 || op.needsAmount || op.amountMode === 'calculated_by_1c') &&
-      op.category !== 'closing'
-    ) {
-      const prevAmt = op.amount;
-      const prevEntriesLen = op.entries.length;
-      const seqCtx: BatchSequentialContext = {
-        priorOperations: buildChronoPriors(op),
-        reportingYear,
-        defaultBik,
-        defaultBankName: DEFAULT_SBERBANK_NAME,
-        assumeInvoiceOnVatPurchase: true,
-      };
-      const recomputed = bindAndGenerateOperation(
-        {
-          rowKey: op.rowKey,
-          sourceFileName: op.sourceFileName,
-          date: op.date,
-          docNumber: op.docNumber,
-          description: op.description,
-          amount: 0,
-          quantity: op.quantity ?? inlineReq.quantity,
-          unitPrice: op.unitPrice ?? inlineReq.unitPrice,
-          counterpartyName:
-            op.category === 'bank_out' && op.counterpartyName.includes(';')
-              ? ''
-              : op.counterpartyName || inlineReq.counterparty,
-          counterpartyInn:
-            op.category === 'bank_out' && op.counterpartyName.includes(';')
-              ? ''
-              : op.counterpartyInn,
-          counterpartyKpp:
-            op.category === 'bank_out' && op.counterpartyName.includes(';')
-              ? ''
-              : op.counterpartyKpp,
-          counterpartyBankAccount: op.counterpartyBankAccount,
-          counterpartyBik: op.counterpartyBik,
-          counterpartyBankName: op.counterpartyBankName,
-          counterpartySource: op.counterpartySource,
-          egrulCandidates: op.egrulCandidates,
-          contractName: op.contractName,
-          nomenclatureName: op.nomenclatureName || inlineReq.nomenclatureHint,
-          nomenclatureGroupHint:
-            op.nomenclatureGroupName || inlineReq.productionObjectHint,
-          employeeName: op.employeeName || inlineReq.employeeHint,
-          monthlySalary: op.monthlySalary ?? inlineReq.monthlySalaryHint,
-          employeePosition: op.employeePosition || inlineReq.employeePositionHint,
-          usefulLifeMonths: op.usefulLifeMonths ?? inlineReq.usefulLifeMonthsHint,
-          depreciationBaseAmount: op.depreciationBaseAmount,
-          alimonyRecipientName: op.alimonyRecipientName || inlineReq.alimonyRecipientHint,
-          alimonyRecipientInn: op.alimonyRecipientInn || inlineReq.alimonyRecipientInnHint,
-          alimonyRatePercent: op.alimonyRatePercent ?? inlineReq.alimonyRatePercentHint,
-          alimonyShareLabel: op.alimonyShareLabel || inlineReq.alimonyShareLabelHint,
-          financialNotesSummary: op.financialNotesSummary || inlineReq.financialNotesSummaryHint,
-          warehouseName: op.warehouseName,
-          warehouseToHint: op.warehouseToName,
-          expenseItemName: op.expenseItemName,
-          cashFlowItemName: op.cashFlowItemName,
-          costAccountHint: op.costAccount,
-          materialAccountHint: op.materialAccount,
-          docTypeHint: op.docType1C,
-          categoryHint: op.category,
-        },
-        db1C,
-        op.id,
-        seqCtx
-      );
-      if (recomputed.amount >= 0.01 && prevAmt < 0.01) {
-        op = { ...recomputed, includeInProcessing: op.includeInProcessing };
-        fixedCount++;
-        log.push(
-          `Рассчитана сумма операции «${op.description.slice(0, 45)}»: ${op.amount.toFixed(2)} ₽`
-        );
-        recordChange(
-          prevEntriesLen === 0
-            ? 'Сумма операции: не заполнена (0,00 ₽)'
-            : 'Себестоимость списания: расчёт в 1С (0,00 ₽)',
-          `Сумма: ${op.amount.toFixed(2)} ₽ (${op.entries.length} провод.)`,
-          op.amountCalculationNote || 'Авторасчёт по партиям прихода, связанным операциям и сальдо счетов',
-          'amount_calc',
-          op.id
-        );
-      } else if (recomputed.amountMode === 'calculated_by_1c' && prevEntriesLen === 0) {
-        op = { ...recomputed, includeInProcessing: op.includeInProcessing };
-        fixedCount++;
-        log.push(
-          `Сформированы эталонные проводки внутренней операции «${op.description.slice(0, 45)}» (себестоимость рассчитывается в 1С)`
-        );
-      }
-    }
-
-    // Auto-extract founder FIO for 75.01 contributions if missing
-    if (!op.counterpartyName.trim() && isFounderContributionText(op.description)) {
-      const rebuiltFounder = bindAndGenerateOperation(
-        {
-          rowKey: op.rowKey,
-          sourceFileName: op.sourceFileName,
-          date: op.date,
-          docNumber: op.docNumber,
-          description: op.description,
-          amount: op.amount,
-          vatRate: 0,
-          vatRule: 'none',
-          vatAmount: 0,
-        },
-        db1C,
-        op.id
-      );
-      if (rebuiltFounder.counterpartyName) {
-        op = { ...rebuiltFounder, includeInProcessing: op.includeInProcessing };
-        fixedCount++;
-        log.push(
-          `Определён учредитель «${op.counterpartyName}» для взноса в уставный капитал (счёт 75.01)`
-        );
-        recordChange(
-          'Субконто 75.01: не заполнено',
-          `Учредитель: ${op.counterpartyName} (Дт 51/50 Кт 75.01, без НДС)`,
-          'Извлечение ФИО учредителя из текста операции и привязка к справочнику Физлиц 1С',
-          'founder_75',
-          op.id
-        );
-      }
-    }
-
-    // 2. Match Counterparty / Individual in db1C (Контрагенты, ФизическиеЛица, ВсеДокументы)
-    if (op.counterpartyName.trim().length >= 2 && db1C) {
-      const directPersonOrCp = matchPersonOrCounterpartyIn1C(
-        op.counterpartyName,
-        op.counterpartyInn,
-        db1C
-      );
-      const norm = normalizeEntityKey(op.counterpartyName);
-
-      if (directPersonOrCp) {
-        const wasMatched = op.bindings.counterparty.status === 'matched_1c';
-        const prevCpLabel = `${op.counterpartyName} (ИНН: ${op.counterpartyInn || 'пусто'})`;
-        const nameChanged = op.counterpartyName !== directPersonOrCp.name;
-        const innAdded = !op.counterpartyInn && Boolean(directPersonOrCp.inn);
-        const kppAdded = !op.counterpartyKpp && Boolean(directPersonOrCp.kpp);
-
-        op.counterpartyName = directPersonOrCp.name;
-        if (!op.counterpartyInn && directPersonOrCp.inn) {
-          op.counterpartyInn = directPersonOrCp.inn;
-        }
-        if (!op.counterpartyKpp && directPersonOrCp.kpp) {
-          op.counterpartyKpp = directPersonOrCp.kpp;
-        }
-        op.counterpartyKind = directPersonOrCp.kind;
-        op.counterpartySource = 'db_1c';
-        op.bindings.counterparty = {
-          status: 'matched_1c',
-          matchedName: directPersonOrCp.name,
-          matchedCode1C: directPersonOrCp.code1C,
-          matchedInn: directPersonOrCp.inn,
-        };
-        if (!wasMatched || nameChanged || innAdded || kppAdded) {
+      // Pass Stage 1a: Normalize stray template years (e.g. 2020 / 2024) to reportingYear
+      if (reportingYear && op.date && !op.date.startsWith(`${reportingYear}-`)) {
+        const prevDate = op.date;
+        const normDate = normalizeOperationDateToReportingYear(op.date, reportingYear);
+        if (normDate && normDate !== prevDate) {
+          op.date = normDate;
           fixedCount++;
-          log.push(
-            `Привязан элемент справочника 1С (${directPersonOrCp.source}): «${directPersonOrCp.name}»`
-          );
+          log.push(`Нормализована дата документа: ${prevDate} → ${normDate}`);
           recordChange(
-            prevCpLabel,
-            `${op.counterpartyName} (ИНН ${op.counterpartyInn || '—'}, код 1С ${directPersonOrCp.code1C || '—'})`,
-            `Сопоставление со справочником 1С «${directPersonOrCp.source}»`,
-            'directory_binding',
+            `Дата документа: ${prevDate}`,
+            `Дата документа: ${normDate}`,
+            `Приведение шаблонного года Excel к рабочему отчётному году ${reportingYear}`,
+            'date_year',
+            'normalize_date_year',
             op.id
           );
         }
-      } else if (norm.length >= 3) {
-        const matchedCp = db1C.counterparties.find((c) => {
-          if (op.counterpartyInn && c.inn && op.counterpartyInn === c.inn) return true;
-          const cn = normalizeEntityKey(c.name);
-          const fn = normalizeEntityKey(c.fullName ?? '');
-          return (
-            cn === norm ||
-            (cn.length >= 4 && (cn.includes(norm) || norm.includes(cn))) ||
-            (fn.length >= 4 && (fn.includes(norm) || norm.includes(fn)))
-          );
-        });
+      }
 
-        if (matchedCp) {
-          const prevLabel = `${op.counterpartyName} (ИНН: ${op.counterpartyInn || 'пусто'})`;
-          let changed = false;
-          if (op.counterpartyName !== matchedCp.name) {
-            op.counterpartyName = matchedCp.name;
-            changed = true;
-          }
-          if (!op.counterpartyInn && matchedCp.inn) {
-            op.counterpartyInn = matchedCp.inn;
-            changed = true;
-          }
-          if (!op.counterpartyKpp && matchedCp.kpp) {
-            op.counterpartyKpp = matchedCp.kpp;
-            changed = true;
-          }
-          op.counterpartySource = 'db_1c';
-          op.bindings.counterparty = {
-            status: 'matched_1c',
-            matchedName: matchedCp.name,
-            matchedCode1C: matchedCp.code1C,
-            matchedInn: matchedCp.inn,
-          };
-          if (changed) {
-            fixedCount++;
-            log.push(`Подтянуты реквизиты из справочника 1С для контрагента «${matchedCp.name}»`);
-            recordChange(
-              prevLabel,
-              `${matchedCp.name} (ИНН ${matchedCp.inn}, КПП ${matchedCp.kpp || '—'})`,
-              'Автоподбор карточки из справочника «Контрагенты» базы 1С',
-              'directory_binding',
-              op.id
-            );
-          }
+      // Pass Stage 1b: Extract inline requisites from text if missing
+      const inlineReq = extractRequisitesFromFreeText(op.description, reportingYear);
+      const naturalPreCheck = detectOperationClassification({
+        description: op.description,
+        nomenclatureName: op.nomenclatureName || inlineReq.nomenclatureHint,
+        counterpartyName: op.counterpartyName || inlineReq.counterparty,
+      });
+      const opRequiresCommercialCp =
+        doesOperationRequireCounterparty(op.category) &&
+        doesOperationRequireCounterparty(naturalPreCheck.category);
+
+      if (
+        (op.category === 'alimony_payout' || naturalPreCheck.category === 'alimony_payout') &&
+        !op.alimonyRecipientInn &&
+        inlineReq.inn
+      ) {
+        op.alimonyRecipientInn = inlineReq.inn;
+      } else if (opRequiresCommercialCp && !op.counterpartyInn && inlineReq.inn) {
+        op.counterpartyInn = inlineReq.inn;
+        op.counterpartySource = 'excel_explicit';
+        fixedCount++;
+        log.push(`Из текста операции извлечён ИНН ${inlineReq.inn}`);
+        recordChange(
+          'ИНН контрагента: не заполнен',
+          `ИНН: ${inlineReq.inn}`,
+          'Прямое извлечение реквизитов из текста первичной операции',
+          'counterparty_requisites',
+          'fill_formal_requisites',
+          op.id
+        );
+      }
+      if (opRequiresCommercialCp && !op.counterpartyKpp && inlineReq.kpp) {
+        op.counterpartyKpp = inlineReq.kpp;
+        fixedCount++;
+        recordChange(
+          'КПП контрагента: не заполнен',
+          `КПП: ${inlineReq.kpp}`,
+          'Прямое извлечение КПП из текста операции',
+          'counterparty_requisites',
+          'fill_formal_requisites',
+          op.id
+        );
+      }
+      if (!op.counterpartyBankAccount && inlineReq.bankAccount) {
+        op.counterpartyBankAccount = inlineReq.bankAccount;
+        fixedCount++;
+        recordChange(
+          'Расчётный счёт получателя: не заполнен',
+          `р/сч ${inlineReq.bankAccount}`,
+          'Извлечение банковских реквизитов из текста операции',
+          'bank_bik',
+          'fill_formal_requisites',
+          op.id
+        );
+      }
+      if (!op.counterpartyBik && inlineReq.bik) {
+        op.counterpartyBik = inlineReq.bik;
+        op.counterpartyBankName = inlineReq.bankName;
+        fixedCount++;
+        recordChange(
+          'БИК банка контрагента: по умолчанию',
+          `БИК ${inlineReq.bik} (${inlineReq.bankName})`,
+          'Прямое указание БИК в тексте операции (приоритет над банком по умолчанию)',
+          'bank_bik',
+          'fill_formal_requisites',
+          op.id
+        );
+      }
+      if (!op.organizationBik) {
+        op.organizationBik = db1C?.organization.bik || defaultBik;
+        op.organizationBankName = db1C?.organization.bankName || DEFAULT_SBERBANK_NAME;
+      }
+
+      // Pass Stage 1c: Disable accidental duplicates in 1C DB
+      if (op.isDuplicateIn1C && op.includeInProcessing) {
+        op.includeInProcessing = false;
+        fixedCount++;
+        log.push(`Исключён из расчёта дубликат документа: «${op.description.slice(0, 50)}»`);
+        recordChange(
+          `Дубликат включён в расчёт: «${op.description.slice(0, 45)}»`,
+          'Исключён из проведения (защита от задвоения оборотов)',
+          op.duplicateReason || 'Совпадение с уже проведённым документом в базе 1С',
+          'duplicate_guard',
+          'disable_duplicate_doc',
+          op.id
+        );
+      }
+
+      if (!op.includeInProcessing) {
+        enrichedOps.push(op);
+        continue;
+      }
+
+      // Sanitize accidental <2-char counterparty fragment
+      if (op.counterpartyName.trim().length > 0 && op.counterpartyName.trim().length < 2) {
+        op.counterpartyName = '';
+        op.counterpartyInn = '';
+        op.counterpartyKpp = '';
+        if (doesOperationRequireCounterparty(op.category)) {
+          op.bindings.counterparty = { status: 'missing', note: 'Не указан контрагент' };
         } else {
-          const histDoc = db1C.documents.find((d) => {
-            const dn = normalizeEntityKey(d.counterparty);
-            return dn.length >= 4 && (dn.includes(norm) || norm.includes(dn));
-          });
-          if (histDoc) {
-            if (!op.counterpartyInn && histDoc.counterpartyInn) {
-              op.counterpartyInn = histDoc.counterpartyInn;
-              op.counterpartySource = 'db_1c';
-              fixedCount++;
-              log.push(`Подтянут ИНН из журнала документов 1С для «${histDoc.counterparty}»`);
-              recordChange(
-                `ИНН «${op.counterpartyName}»: пусто`,
-                `ИНН: ${histDoc.counterpartyInn}`,
-                'История проведённых документов базы 1С (ВсеДокументы)',
-                'counterparty_requisites',
-                op.id
-              );
-            }
-            if (!op.contractName && histDoc.contract) {
-              op.contractName = histDoc.contract;
-              op.bindings.contract = {
-                status: 'matched_1c',
-                matchedName: histDoc.contract,
-              };
-              fixedCount++;
-            }
-          }
+          op.bindings.counterparty = { status: 'not_required' };
         }
       }
-    }
 
-    // 3. Fill missing contract by 1C contracts, historical docs, or default contract
-    if (op.bindings.contract.status === 'missing') {
-      const cpNorm = normalizeEntityKey(op.counterpartyName);
-      const fromDir = db1C?.contracts.find(
-        (c) =>
-          (op.counterpartyInn && c.counterpartyInn === op.counterpartyInn) ||
-          (cpNorm && normalizeEntityKey(c.counterpartyName) === cpNorm)
-      );
-      const fromDocs = db1C?.documents.find(
-        (d) => d.contract && cpNorm && normalizeEntityKey(d.counterparty) === cpNorm
-      );
+      const buildChronoPriors = (targetOp: QueuedOperation): QueuedOperation[] => {
+        const byId = new Map<string, QueuedOperation>();
+        for (const p of enrichedOps) {
+          if (p.id !== targetOp.id && p.includeInProcessing) {
+            byId.set(p.id, p);
+          }
+        }
+        for (const other of manualAndImportedOps) {
+          if (
+            other.id !== targetOp.id &&
+            !byId.has(other.id) &&
+            other.includeInProcessing &&
+            (other.amount >= 0.01 ||
+              other.category === 'hr_hire' ||
+              other.category === 'writ_of_execution' ||
+              other.category === 'contract_event' ||
+              other.category === 'policy_event') &&
+            (!targetOp.date || !other.date || other.date <= targetOp.date)
+          ) {
+            byId.set(other.id, other);
+          }
+        }
+        return Array.from(byId.values());
+      };
 
-      if (fromDir) {
-        op.contractName = fromDir.name;
-        op.contractNumber = fromDir.number || op.contractNumber;
-        op.contractDate = fromDir.date || op.contractDate;
-        op.bindings.contract = {
-          status: 'matched_1c',
-          matchedName: fromDir.name,
-          matchedCode1C: fromDir.code1C,
-        };
-        fixedCount++;
-        log.push(`Подобран договор 1С «${fromDir.name}» для «${op.counterpartyName}»`);
-        recordChange(
-          `Договор (${op.counterpartyName}): не указан`,
-          `Договор: «${fromDir.name}»`,
-          'Справочник «ДоговорыКонтрагентов» базы 1С',
-          'directory_binding',
-          op.id
-        );
-      } else if (fromDocs?.contract) {
-        op.contractName = fromDocs.contract;
-        op.bindings.contract = {
-          status: 'matched_1c',
-          matchedName: fromDocs.contract,
-        };
-        fixedCount++;
-        log.push(`Подобран договор из истории документов 1С: «${fromDocs.contract}»`);
-        recordChange(
-          `Договор (${op.counterpartyName}): не указан`,
-          `Договор: «${fromDocs.contract}»`,
-          'Журнал документов базы 1С',
-          'directory_binding',
-          op.id
-        );
-      } else if (op.counterpartyName) {
-        op.contractName = 'Основной договор';
-        op.bindings.contract = {
-          status: 'new_for_1c',
-          note: 'Типовой договор будет создан при экспорте в 1С',
-        };
-        fixedCount++;
-        log.push(`Назначен «Основной договор» для контрагента «${op.counterpartyName}»`);
-        recordChange(
-          `Договор (${op.counterpartyName}): не указан`,
-          '«Основной договор» (автосоздание при выгрузке)',
-          'Обязательность субконто «Договоры» на счетах 60/62 в 1С БП 3.0',
-          'directory_binding',
-          op.id
-        );
-      }
-    }
+      // Pass Stage 1d: Reclassify legacy misclassified operations
+      const naturalClass = detectOperationClassification({
+        description: op.description,
+        nomenclatureName: op.nomenclatureName || inlineReq.nomenclatureHint,
+        counterpartyName: op.counterpartyName || inlineReq.counterparty,
+      });
+      const shouldReclassify = isMisclassifiedLegacyOperation(op);
 
-    // 4. Fill missing warehouse from 1C warehouses or historical receipts
-    if (op.bindings.warehouse.status === 'missing') {
-      const whFromDb =
-        db1C?.warehouses[0]?.name ||
-        db1C?.documents.find((d) => Boolean(d.warehouse))?.warehouse;
-      if (whFromDb) {
-        op.warehouseName = whFromDb;
-        op.bindings.warehouse = {
-          status: 'matched_1c',
-          matchedName: whFromDb,
-          matchedCode1C: db1C?.warehouses[0]?.code1C,
-        };
-        fixedCount++;
-        log.push(`Проставлен склад из БД 1С: «${whFromDb}»`);
-        recordChange(
-          'Склад МПЗ: не выбран',
-          `Склад: «${whFromDb}»`,
-          'Справочник «Склады» базы 1С',
-          'directory_binding',
-          op.id
-        );
-      } else {
-        op.warehouseName = 'Основной склад';
-        op.bindings.warehouse = {
-          status: 'new_for_1c',
-          note: 'Склад будет создан при экспорте в 1С',
-        };
-        fixedCount++;
-        recordChange(
-          'Склад МПЗ: не выбран',
-          'Склад: «Основной склад»',
-          'Обязательный реквизит складского учёта счетов 10 / 41 в 1С БП 3.0',
-          'directory_binding',
-          op.id
-        );
-      }
-    }
+      if (shouldReclassify) {
+        const prevDocType = op.docType1C;
+        const prevHadNeedsAmount = Boolean(op.needsAmount || op.amountMode === 'required_missing');
+        const prevVatRate = op.vatRate;
+        const prevCp = op.counterpartyName;
+        const naturalNeedsCp = doesOperationRequireCounterparty(naturalClass.category);
 
-    // 5. Fill missing expense item from 1C expenseItems or historical postings
-    if (op.bindings.expenseItem.status === 'missing') {
-      const cpNorm = normalizeEntityKey(op.counterpartyName);
-      const histPosting = db1C?.postings.find(
-        (p) =>
-          ['20.01', '25', '26', '44.01'].includes(p.debit) &&
-          p.debitSubconto.length > 0 &&
-          cpNorm &&
-          normalizeEntityKey(`${p.counterpartyName ?? ''} ${p.creditSubconto.join(' ')}`).includes(cpNorm)
-      );
-      const histExpName = histPosting?.debitSubconto[0];
-      const fallbackExp = db1C?.expenseItems[0]?.name;
-
-      if (histExpName) {
-        op.expenseItemName = histExpName;
-        op.bindings.expenseItem = { status: 'matched_1c', matchedName: histExpName };
-        fixedCount++;
-        log.push(`Подобрана статья затрат по аналогии с проводками 1С: «${histExpName}»`);
-        recordChange(
-          'Статья затрат: не выбрана',
-          `Статья затрат: «${histExpName}»`,
-          'Анализ предыдущих проводок по данному поставщику в базе 1С',
-          'directory_binding',
-          op.id
-        );
-      } else if (fallbackExp) {
-        op.expenseItemName = fallbackExp;
-        op.bindings.expenseItem = {
-          status: 'matched_1c',
-          matchedName: fallbackExp,
-          matchedCode1C: db1C?.expenseItems[0]?.code1C,
-        };
-        fixedCount++;
-        recordChange(
-          'Статья затрат: не выбрана',
-          `Статья затрат: «${fallbackExp}»`,
-          'Справочник «Статьи затрат» базы 1С',
-          'directory_binding',
-          op.id
-        );
-      } else {
-        op.expenseItemName = 'Прочие общехозяйственные расходы';
-        op.bindings.expenseItem = {
-          status: 'new_for_1c',
-          note: 'Статья затрат будет создана при экспорте',
-        };
-        fixedCount++;
-        recordChange(
-          'Статья затрат: не выбрана',
-          '«Прочие общехозяйственные расходы»',
-          'Стандартная аналитика счёта 26 в 1С БП 3.0',
-          'directory_binding',
-          op.id
-        );
-      }
-    }
-
-    // 6. Regenerate entries if empty (and amount > 0 or calculated_by_1c), or fix group accounts -> subaccounts & update subconto strings
-    if (
-      op.entries.length === 0 &&
-      (op.amount >= 0.01 || op.amountMode === 'calculated_by_1c')
-    ) {
-      op = bindAndGenerateOperation(
-        {
-          rowKey: op.rowKey,
-          sourceFileName: op.sourceFileName,
-          date: op.date,
-          docNumber: op.docNumber,
-          description: op.description,
-          amount: op.amount,
-          vatRate: op.vatRate,
-          vatRule: op.vatRule,
-          vatAmount: op.vatAmount,
-          hasInvoiceSF: op.hasInvoiceSF,
-          counterpartyName: op.counterpartyName,
-          counterpartyInn: op.counterpartyInn,
-          counterpartyKpp: op.counterpartyKpp,
-          counterpartyBankAccount: op.counterpartyBankAccount,
-          counterpartyBik: op.counterpartyBik,
-          counterpartyBankName: op.counterpartyBankName,
-          counterpartySource: op.counterpartySource,
-          egrulCandidates: op.egrulCandidates,
-          contractName: op.contractName,
-          nomenclatureName: op.nomenclatureName,
-          nomenclatureGroupHint: op.nomenclatureGroupName,
-          employeeName: op.employeeName,
-          monthlySalary: op.monthlySalary,
-          employeePosition: op.employeePosition,
-          usefulLifeMonths: op.usefulLifeMonths,
-          depreciationBaseAmount: op.depreciationBaseAmount,
-          alimonyRecipientName: op.alimonyRecipientName,
-          alimonyRecipientInn: op.alimonyRecipientInn,
-          alimonyRatePercent: op.alimonyRatePercent,
-          alimonyShareLabel: op.alimonyShareLabel,
-          financialNotesSummary: op.financialNotesSummary,
-          warehouseName: op.warehouseName,
-          warehouseToHint: op.warehouseToName,
-          expenseItemName: op.expenseItemName,
-          cashFlowItemName: op.cashFlowItemName,
-          costAccountHint: op.costAccount,
-          materialAccountHint: op.materialAccount,
-          docTypeHint: op.docType1C,
-          categoryHint: op.category,
-        },
-        db1C,
-        op.id,
-        {
+        const seqCtx: BatchSequentialContext = {
           priorOperations: buildChronoPriors(op),
           reportingYear,
           defaultBik,
           defaultBankName: DEFAULT_SBERBANK_NAME,
-          assumeInvoiceOnVatPurchase: true,
+          assumeInvoiceOnVatPurchase: [
+            'purchase_goods',
+            'purchase_materials',
+            'purchase_services',
+            'purchase_equipment',
+          ].includes(naturalClass.category),
+        };
+
+        const reclassified = bindAndGenerateOperation(
+          {
+            rowKey: op.rowKey,
+            sourceFileName: op.sourceFileName,
+            date: op.date,
+            docNumber: op.docNumber,
+            description: op.description,
+            amount:
+              naturalClass.category === 'sale_goods' &&
+              (op.quantity ?? inlineReq.quantity) &&
+              (op.unitPrice ?? inlineReq.unitPrice)
+                ? 0
+                : op.amount,
+            quantity: op.quantity ?? inlineReq.quantity,
+            unitPrice: op.unitPrice ?? inlineReq.unitPrice,
+            counterpartyName: naturalNeedsCp
+              ? op.counterpartyName || inlineReq.counterparty
+              : naturalClass.category === 'founder_contribution'
+                ? op.counterpartyName
+                : '',
+            counterpartyInn: naturalNeedsCp ? op.counterpartyInn : '',
+            counterpartyKpp: naturalNeedsCp ? op.counterpartyKpp : '',
+            counterpartyBankAccount: naturalNeedsCp ? op.counterpartyBankAccount : undefined,
+            counterpartyBik: naturalNeedsCp ? op.counterpartyBik : undefined,
+            counterpartyBankName: naturalNeedsCp ? op.counterpartyBankName : undefined,
+            counterpartySource: naturalNeedsCp ? op.counterpartySource : undefined,
+            contractName: naturalNeedsCp ? op.contractName : '',
+            nomenclatureName: op.nomenclatureName || inlineReq.nomenclatureHint,
+            nomenclatureGroupHint:
+              op.nomenclatureGroupName && op.nomenclatureGroupName !== 'Основная номенклатурная группа'
+                ? op.nomenclatureGroupName
+                : inlineReq.productionObjectHint,
+            employeeName: op.employeeName || inlineReq.employeeHint,
+            monthlySalary: op.monthlySalary ?? inlineReq.monthlySalaryHint,
+            employeePosition: op.employeePosition || inlineReq.employeePositionHint,
+            usefulLifeMonths: op.usefulLifeMonths ?? inlineReq.usefulLifeMonthsHint,
+            depreciationBaseAmount: op.depreciationBaseAmount,
+            alimonyRecipientName: op.alimonyRecipientName || inlineReq.alimonyRecipientHint,
+            alimonyRecipientInn:
+              op.alimonyRecipientInn ||
+              (naturalPreCheck.category === 'alimony_payout' ||
+              naturalPreCheck.category === 'writ_of_execution'
+                ? inlineReq.inn
+                : undefined),
+            alimonyRatePercent: op.alimonyRatePercent ?? inlineReq.alimonyRatePercentHint,
+            alimonyShareLabel: op.alimonyShareLabel || inlineReq.alimonyShareLabelHint,
+            financialNotesSummary: op.financialNotesSummary || inlineReq.financialNotesSummaryHint,
+            financialNotesList: op.financialNotesList ?? inlineReq.financialNotesListHint,
+            periodicPaymentAmount: op.periodicPaymentAmount ?? inlineReq.periodicPaymentAmountHint,
+            interestRatePercent: op.interestRatePercent ?? inlineReq.interestRatePercentHint,
+            warehouseName: op.warehouseName,
+            warehouseToHint: op.warehouseToName,
+            expenseItemName: op.expenseItemName,
+            cashFlowItemName: op.cashFlowItemName,
+            costAccountHint: op.costAccount,
+            materialAccountHint: op.materialAccount,
+          },
+          db1C,
+          op.id,
+          seqCtx
+        );
+
+        op = { ...reclassified, includeInProcessing: op.includeInProcessing };
+        fixedCount++;
+        const entryPreview =
+          op.entries.length > 0
+            ? op.entries
+                .map((e) => (e.isOffBalance ? `Дт ${e.debit}` : `Дт ${e.debit} Кт ${e.credit}`))
+                .join('; ')
+            : 'без проводок (регистрационное событие)';
+        log.push(
+          `Переклассифицирована операция «${op.description.slice(0, 50)}»: ${prevDocType} → ${op.docType1C} (${entryPreview})`
+        );
+        recordChange(
+          `1С: ${prevDocType}${prevVatRate > 0 ? `, НДС ${prevVatRate}%` : ''}${prevHadNeedsAmount ? ', ошибка «Требуется сумма»' : ''}${!naturalNeedsCp && prevCp ? `, ложный запрос контрагента` : ''}`,
+          `1С: ${op.docType1C} (${DOC_TYPE_LABELS_1C[op.docType1C]})${op.documentSubKind1C ? ` · ${op.documentSubKind1C}` : ''}${op.employeeName ? ` · ${op.employeeName}` : ''}${op.counterpartyName ? ` · ${op.counterpartyName}` : ''} — ${entryPreview}${op.amount >= 0.01 ? ` (${op.amount.toFixed(2)} ₽)` : ''}`,
+          'Интеллектуальный классификатор 1С:БП 3.0 (касса, банк, подотчёт 71.01, реализация 90.01.1, займы, векселя, ОС, договоры)',
+          'doc_reclassification',
+          'reclassify_legacy_doc',
+          op.id
+        );
+      }
+
+      // Pass Stage 2a: Auto-link missing buyer/supplier or compute missing amount via 8-level resolver
+      if (
+        !shouldReclassify &&
+        (op.category === 'sale_goods' || op.category === 'sale_services') &&
+        (!op.counterpartyName.trim() ||
+          (/по\s+цене\s+без\s+ндс/i.test(op.description) && op.vatRule !== 'on_top'))
+      ) {
+        const prevCp = op.counterpartyName.trim();
+        const prevAmt = op.amount;
+        const prevVatRule = op.vatRule;
+        const rebuiltSale = bindAndGenerateOperation(
+          {
+            rowKey: op.rowKey,
+            sourceFileName: op.sourceFileName,
+            date: op.date,
+            docNumber: op.docNumber,
+            description: op.description,
+            amount:
+              /по\s+цене\s+без\s+ндс/i.test(op.description) &&
+              (op.quantity ?? inlineReq.quantity) &&
+              (op.unitPrice ?? inlineReq.unitPrice)
+                ? 0
+                : op.amount,
+            quantity: op.quantity ?? inlineReq.quantity,
+            unitPrice: op.unitPrice ?? inlineReq.unitPrice,
+            counterpartyName: op.counterpartyName || inlineReq.counterparty,
+            counterpartyInn: op.counterpartyInn,
+            counterpartyKpp: op.counterpartyKpp,
+            contractName: op.contractName,
+            nomenclatureName: op.nomenclatureName || inlineReq.nomenclatureHint,
+            warehouseName: op.warehouseName,
+            docTypeHint: op.docType1C,
+            categoryHint: op.category,
+          },
+          db1C,
+          op.id,
+          {
+            priorOperations: buildChronoPriors(op),
+            reportingYear,
+            defaultBik,
+            defaultBankName: DEFAULT_SBERBANK_NAME,
+            assumeInvoiceOnVatPurchase: false,
+          }
+        );
+        if (
+          rebuiltSale.counterpartyName !== prevCp ||
+          Math.abs(rebuiltSale.amount - prevAmt) >= 0.01 ||
+          rebuiltSale.vatRule !== prevVatRule
+        ) {
+          op = { ...rebuiltSale, includeInProcessing: op.includeInProcessing };
+          fixedCount++;
+          log.push(
+            `Уточнена реализация «${op.description.slice(0, 50)}»: ${
+              op.counterpartyName ? `покупатель «${op.counterpartyName}», ` : ''
+            }сумма с НДС ${op.amount.toFixed(2)} ₽`
+          );
+          recordChange(
+            `Реализация: ${prevCp ? prevCp : 'покупатель не указан'}, сумма ${prevAmt.toFixed(2)} ₽`,
+            `Покупатель: ${op.counterpartyName || 'не указан'}, сумма с НДС: ${op.amount.toFixed(2)} ₽ (НДС ${op.vatAmount.toFixed(2)} ₽)`,
+            'Хронологическое связывание покупателя по авансам 62.02 / договорам БД 1С и расчёт НДС 20% сверху (п. 1 ст. 168 НК РФ)',
+            'directory_binding',
+            'resolve_amount_and_links',
+            op.id
+          );
         }
-      );
-      fixedCount++;
-    } else {
-      const cpSub = [op.counterpartyName, op.contractName].filter(Boolean).join(' / ');
-      op.entries = op.entries.map((entry) => {
+      }
+
+      // Context-link missing supplier on bank_out / cash_out when proven by open 60.01 settlements
+      if (
+        !shouldReclassify &&
+        (op.category === 'bank_out' || op.category === 'cash_out') &&
+        !op.counterpartyName.trim()
+      ) {
+        const ctxMatches = computeContextCounterpartySuggestions(
+          op,
+          [...enrichedOps, ...manualAndImportedOps.filter((m) => !enrichedOps.some((e) => e.id === m.id))],
+          db1C
+        );
+        if (ctxMatches.length === 1) {
+          const singleCp = ctxMatches[0];
+          op.counterpartyName = singleCp.name;
+          op.counterpartyInn = singleCp.inn || op.counterpartyInn;
+          op.counterpartyKpp = singleCp.kpp || op.counterpartyKpp;
+          if (!op.contractName && singleCp.contractName) {
+            op.contractName = singleCp.contractName;
+          }
+          fixedCount++;
+          recordChange(
+            'Контрагент (поставщик): не указан',
+            `Поставщик: «${singleCp.name}» (${singleCp.provenanceLabel})`,
+            'Семантическая привязка оплаты к открытой задолженности по счёту 60.01',
+            'directory_binding',
+            'resolve_amount_and_links',
+            op.id
+          );
+        }
+      }
+
+      if (
+        !shouldReclassify &&
+        (op.amount < 0.01 || op.needsAmount || op.amountMode === 'calculated_by_1c') &&
+        op.category !== 'closing' &&
+        op.category !== 'hr_hire' &&
+        op.category !== 'writ_of_execution' &&
+        op.category !== 'contract_event' &&
+        op.category !== 'policy_event'
+      ) {
+        const prevAmt = op.amount;
+        const prevEntriesLen = op.entries.length;
+        const recomputed = bindAndGenerateOperation(
+          {
+            rowKey: op.rowKey,
+            sourceFileName: op.sourceFileName,
+            date: op.date,
+            docNumber: op.docNumber,
+            description: op.description,
+            amount: 0,
+            quantity: op.quantity ?? inlineReq.quantity,
+            unitPrice: op.unitPrice ?? inlineReq.unitPrice,
+            counterpartyName:
+              op.category === 'bank_out' && op.counterpartyName.includes(';')
+                ? ''
+                : op.counterpartyName || inlineReq.counterparty,
+            counterpartyInn:
+              op.category === 'bank_out' && op.counterpartyName.includes(';')
+                ? ''
+                : op.counterpartyInn,
+            counterpartyKpp:
+              op.category === 'bank_out' && op.counterpartyName.includes(';')
+                ? ''
+                : op.counterpartyKpp,
+            counterpartyBankAccount: op.counterpartyBankAccount,
+            counterpartyBik: op.counterpartyBik,
+            counterpartyBankName: op.counterpartyBankName,
+            counterpartySource: op.counterpartySource,
+            egrulCandidates: op.egrulCandidates,
+            contractName: op.contractName,
+            nomenclatureName: op.nomenclatureName || inlineReq.nomenclatureHint,
+            nomenclatureGroupHint:
+              op.nomenclatureGroupName || inlineReq.productionObjectHint,
+            employeeName: op.employeeName || inlineReq.employeeHint,
+            monthlySalary: op.monthlySalary ?? inlineReq.monthlySalaryHint,
+            employeePosition: op.employeePosition || inlineReq.employeePositionHint,
+            usefulLifeMonths: op.usefulLifeMonths ?? inlineReq.usefulLifeMonthsHint,
+            depreciationBaseAmount: op.depreciationBaseAmount,
+            alimonyRecipientName: op.alimonyRecipientName || inlineReq.alimonyRecipientHint,
+            alimonyRecipientInn:
+              op.alimonyRecipientInn ||
+              (op.category === 'alimony_payout' ? inlineReq.inn : undefined),
+            alimonyRatePercent: op.alimonyRatePercent ?? inlineReq.alimonyRatePercentHint,
+            alimonyShareLabel: op.alimonyShareLabel || inlineReq.alimonyShareLabelHint,
+            financialNotesSummary: op.financialNotesSummary || inlineReq.financialNotesSummaryHint,
+            financialNotesList: op.financialNotesList ?? inlineReq.financialNotesListHint,
+            periodicPaymentAmount: op.periodicPaymentAmount ?? inlineReq.periodicPaymentAmountHint,
+            interestRatePercent: op.interestRatePercent ?? inlineReq.interestRatePercentHint,
+            warehouseName: op.warehouseName,
+            warehouseToHint: op.warehouseToName,
+            expenseItemName: op.expenseItemName,
+            cashFlowItemName: op.cashFlowItemName,
+            costAccountHint: op.costAccount,
+            materialAccountHint: op.materialAccount,
+            docTypeHint: op.docType1C,
+            categoryHint: op.category,
+          },
+          db1C,
+          op.id,
+          {
+            priorOperations: buildChronoPriors(op),
+            reportingYear,
+            defaultBik,
+            defaultBankName: DEFAULT_SBERBANK_NAME,
+            assumeInvoiceOnVatPurchase: true,
+          }
+        );
+        if (recomputed.amount >= 0.01 && prevAmt < 0.01) {
+          op = { ...recomputed, includeInProcessing: op.includeInProcessing };
+          fixedCount++;
+          log.push(
+            `Рассчитана сумма операции «${op.description.slice(0, 45)}»: ${op.amount.toFixed(2)} ₽`
+          );
+          recordChange(
+            prevEntriesLen === 0
+              ? 'Сумма операции: не заполнена (0,00 ₽)'
+              : 'Себестоимость / сумма: расчёт в 1С (0,00 ₽)',
+            `Сумма: ${op.amount.toFixed(2)} ₽ (${op.entries.length} провод.)`,
+            op.amountCalculationNote || 'Авторасчёт по 7 уровням замкнутого контура задания',
+            'amount_calc',
+            'resolve_amount_and_links',
+            op.id
+          );
+        } else if (recomputed.amountMode === 'calculated_by_1c' && prevEntriesLen === 0) {
+          op = { ...recomputed, includeInProcessing: op.includeInProcessing };
+          fixedCount++;
+          log.push(
+            `Сформированы эталонные проводки внутренней операции «${op.description.slice(0, 45)}»`
+          );
+        }
+      }
+
+      // Auto-extract founder FIO for 75.01 contributions if missing
+      if (!op.counterpartyName.trim() && isFounderContributionText(op.description)) {
+        const rebuiltFounder = bindAndGenerateOperation(
+          {
+            rowKey: op.rowKey,
+            sourceFileName: op.sourceFileName,
+            date: op.date,
+            docNumber: op.docNumber,
+            description: op.description,
+            amount: op.amount,
+            vatRate: 0,
+            vatRule: 'none',
+            vatAmount: 0,
+          },
+          db1C,
+          op.id
+        );
+        if (rebuiltFounder.counterpartyName) {
+          op = { ...rebuiltFounder, includeInProcessing: op.includeInProcessing };
+          fixedCount++;
+          log.push(
+            `Определён учредитель «${op.counterpartyName}» для взноса в уставный капитал (счёт 75.01)`
+          );
+          recordChange(
+            'Субконто 75.01: не заполнено',
+            `Учредитель: ${op.counterpartyName} (Дт 51/50 Кт 75.01, без НДС)`,
+            'Извлечение ФИО учредителя из текста операции и привязка к справочнику Физлиц 1С',
+            'founder_75',
+            'resolve_amount_and_links',
+            op.id
+          );
+        }
+      }
+
+      // Pass Stage 3: Match Counterparty in db1C OR Fill Formal Requisites (EGRUL / Known / Valid FNS Educational INN/KPP)
+      if (op.counterpartyName.trim().length >= 2 && db1C) {
+        const directPersonOrCp = matchPersonOrCounterpartyIn1C(
+          op.counterpartyName,
+          op.counterpartyInn,
+          db1C
+        );
+        const norm = normalizeEntityKey(op.counterpartyName);
+
+        if (directPersonOrCp) {
+          const wasMatched = op.bindings.counterparty.status === 'matched_1c';
+          const prevCpLabel = `${op.counterpartyName} (ИНН: ${op.counterpartyInn || 'пусто'})`;
+          const nameChanged = op.counterpartyName !== directPersonOrCp.name;
+          const innAdded = !op.counterpartyInn && Boolean(directPersonOrCp.inn);
+          const kppAdded = !op.counterpartyKpp && Boolean(directPersonOrCp.kpp);
+
+          op.counterpartyName = directPersonOrCp.name;
+          if (!op.counterpartyInn && directPersonOrCp.inn) {
+            op.counterpartyInn = directPersonOrCp.inn;
+          }
+          if (!op.counterpartyKpp && directPersonOrCp.kpp) {
+            op.counterpartyKpp = directPersonOrCp.kpp;
+          }
+          op.counterpartyKind = directPersonOrCp.kind;
+          op.counterpartySource = 'db_1c';
+          op.bindings.counterparty = {
+            status: 'matched_1c',
+            matchedName: directPersonOrCp.name,
+            matchedCode1C: directPersonOrCp.code1C,
+            matchedInn: directPersonOrCp.inn,
+          };
+          if (!wasMatched || nameChanged || innAdded || kppAdded) {
+            fixedCount++;
+            log.push(
+              `Привязан элемент справочника 1С (${directPersonOrCp.source}): «${directPersonOrCp.name}»`
+            );
+            recordChange(
+              prevCpLabel,
+              `${op.counterpartyName} (ИНН ${op.counterpartyInn || '—'}, код 1С ${directPersonOrCp.code1C || '—'})`,
+              `Сопоставление со справочником 1С «${directPersonOrCp.source}»`,
+              'directory_binding',
+              'fill_formal_requisites',
+              op.id
+            );
+          }
+        } else if (norm.length >= 3) {
+          const matchedCp = db1C.counterparties.find((c) => {
+            if (op.counterpartyInn && c.inn && op.counterpartyInn === c.inn) return true;
+            const cn = normalizeEntityKey(c.name);
+            const fn = normalizeEntityKey(c.fullName ?? '');
+            return (
+              cn === norm ||
+              (cn.length >= 4 && (cn.includes(norm) || norm.includes(cn))) ||
+              (fn.length >= 4 && (fn.includes(norm) || norm.includes(fn)))
+            );
+          });
+
+          if (matchedCp) {
+            const prevLabel = `${op.counterpartyName} (ИНН: ${op.counterpartyInn || 'пусто'})`;
+            let changed = false;
+            if (op.counterpartyName !== matchedCp.name) {
+              op.counterpartyName = matchedCp.name;
+              changed = true;
+            }
+            if (!op.counterpartyInn && matchedCp.inn) {
+              op.counterpartyInn = matchedCp.inn;
+              changed = true;
+            }
+            if (!op.counterpartyKpp && matchedCp.kpp) {
+              op.counterpartyKpp = matchedCp.kpp;
+              changed = true;
+            }
+            op.counterpartySource = 'db_1c';
+            op.bindings.counterparty = {
+              status: 'matched_1c',
+              matchedName: matchedCp.name,
+              matchedCode1C: matchedCp.code1C,
+              matchedInn: matchedCp.inn,
+            };
+            if (changed) {
+              fixedCount++;
+              log.push(`Подтянуты реквизиты из справочника 1С для контрагента «${matchedCp.name}»`);
+              recordChange(
+                prevLabel,
+                `${matchedCp.name} (ИНН ${matchedCp.inn}, КПП ${matchedCp.kpp || '—'})`,
+                'Автоподбор карточки из справочника «Контрагенты» базы 1С',
+                'directory_binding',
+                'fill_formal_requisites',
+                op.id
+              );
+            }
+          } else {
+            const histDoc = db1C.documents.find((d) => {
+              const dn = normalizeEntityKey(d.counterparty);
+              return dn.length >= 4 && (dn.includes(norm) || norm.includes(dn));
+            });
+            if (histDoc) {
+              if (!op.counterpartyInn && histDoc.counterpartyInn) {
+                op.counterpartyInn = histDoc.counterpartyInn;
+                op.counterpartySource = 'db_1c';
+                fixedCount++;
+                log.push(`Подтянут ИНН из журнала документов 1С для «${histDoc.counterparty}»`);
+                recordChange(
+                  `ИНН «${op.counterpartyName}»: пусто`,
+                  `ИНН: ${histDoc.counterpartyInn}`,
+                  'История проведённых документов базы 1С (ВсеДокументы)',
+                  'counterparty_requisites',
+                  'fill_formal_requisites',
+                  op.id
+                );
+              }
+              if (!op.contractName && histDoc.contract) {
+                op.contractName = histDoc.contract;
+                op.bindings.contract = {
+                  status: 'matched_1c',
+                  matchedName: histDoc.contract,
+                };
+                fixedCount++;
+              }
+            }
+          }
+        }
+      }
+
+      // Pass Stage 3b: Formal Requisite Autofill for commercial counterparties not in 1C DB (EGRUL -> Known -> Educational FNS INN/KPP)
+      const trimmedCp = op.counterpartyName.trim();
+      const needsFormalCpInn =
+        doesOperationRequireCounterparty(op.category) &&
+        op.bindings.counterparty.status !== 'matched_1c' &&
+        trimmedCp.length >= 2 &&
+        !trimmedCp.includes(';') &&
+        op.counterpartyKind !== 'ФизическоеЛицо' &&
+        !isFounderContributionText(op.description);
+
+      if (needsFormalCpInn) {
+        const cleanCurrentInn = op.counterpartyInn.replace(/\D/g, '');
+        const hasValidChecksumInn =
+          isValidRussianInnFormat(cleanCurrentInn) &&
+          validateRussianInnChecksum(cleanCurrentInn).valid;
+        const cpCacheKey = getCounterpartyGroupKey(trimmedCp);
+
+        if (!hasValidChecksumInn) {
+          const cachedFormal = formalCpRequisiteCache.get(cpCacheKey);
+          if (cachedFormal) {
+            op.counterpartyInn = cachedFormal.inn;
+            op.counterpartyKpp = cachedFormal.kpp || op.counterpartyKpp;
+            op.counterpartySource = cachedFormal.source;
+          } else {
+            // 1. Region-aware active EGRUL candidate if fetched
+            const bestEgrul = selectBestEgrulCandidate(op.egrulCandidates ?? [], {
+              targetName: trimmedCp,
+              homeRegionCode: homeRegion,
+            });
+            // 2. Known major Russian counterparty dictionary
+            const normKey = normalizeEntityKey(trimmedCp);
+            const knownMajor = KNOWN_MAJOR_RUSSIAN_COUNTERPARTIES.find((k) =>
+              k.aliases.some((al) => normKey === al || (al.length >= 4 && normKey.includes(al)))
+            );
+
+            if (bestEgrul && isValidRussianInnFormat(bestEgrul.inn)) {
+              const prevInnLabel = op.counterpartyInn || 'не заполнен';
+              op.counterpartyInn = bestEgrul.inn;
+              op.counterpartyKpp =
+                bestEgrul.kpp ||
+                (bestEgrul.inn.length === 10 ? `${bestEgrul.inn.slice(0, 4)}01001` : '');
+              op.counterpartyOgrn = bestEgrul.ogrn || op.counterpartyOgrn;
+              op.counterpartySource = 'egrul_verified';
+              formalCpRequisiteCache.set(cpCacheKey, {
+                inn: op.counterpartyInn,
+                kpp: op.counterpartyKpp,
+                source: 'egrul_verified',
+              });
+              fixedCount++;
+              log.push(
+                `Заполнен ИНН/КПП из ЕГРЮЛ ФНС для «${trimmedCp}»: ИНН ${op.counterpartyInn}${op.counterpartyKpp ? `, КПП ${op.counterpartyKpp}` : ''}`
+              );
+              recordChange(
+                `ИНН «${trimmedCp}»: ${prevInnLabel}`,
+                `ИНН ${op.counterpartyInn}${op.counterpartyKpp ? `, КПП ${op.counterpartyKpp}` : ''} (действующее ЮЛ ЕГРЮЛ)`,
+                `Приоритет действующей организации региона ${homeRegion} по данным ЕГРЮЛ ФНС`,
+                'counterparty_requisites',
+                'fill_formal_requisites',
+                op.id
+              );
+            } else if (knownMajor) {
+              op.counterpartyInn = knownMajor.inn;
+              op.counterpartyKpp = knownMajor.kpp;
+              op.counterpartyOgrn = knownMajor.ogrn || op.counterpartyOgrn;
+              op.counterpartySource = 'egrul_verified';
+              formalCpRequisiteCache.set(cpCacheKey, {
+                inn: op.counterpartyInn,
+                kpp: op.counterpartyKpp,
+                source: 'egrul_verified',
+              });
+              fixedCount++;
+              recordChange(
+                `ИНН «${trimmedCp}»: не заполнен`,
+                `ИНН ${op.counterpartyInn}, КПП ${op.counterpartyKpp}`,
+                'Эталонный справочник федеральных поставщиков ЕГРЮЛ ФНС',
+                'counterparty_requisites',
+                'fill_formal_requisites',
+                op.id
+              );
+            } else {
+              // 3. Deterministic valid FNS-checksum educational INN/KPP in organization's home region
+              const eduKind =
+                op.counterpartyKind === 'ИндивидуальныйПредприниматель'
+                  ? 'ИндивидуальныйПредприниматель'
+                  : 'ЮридическоеЛицо';
+              const generated = generateEducationalInnKpp(trimmedCp, eduKind, homeRegion);
+              const prevInnLabel = op.counterpartyInn || 'не заполнен';
+              op.counterpartyInn = generated.inn;
+              op.counterpartyKpp = generated.kpp;
+              op.counterpartySource = 'educational_generated';
+              op.bindings.counterparty = {
+                status: 'new_for_1c',
+                note: 'Формальный реквизит подобран автоматически (на ОСВ не влияет)',
+              };
+              formalCpRequisiteCache.set(cpCacheKey, {
+                inn: generated.inn,
+                kpp: generated.kpp,
+                source: 'educational_generated',
+              });
+              fixedCount++;
+              log.push(
+                `Сформирован формальный учебный ИНН/КПП (ФНС мод. 11, регион ${homeRegion}) для «${trimmedCp}»: ИНН ${generated.inn}${generated.kpp ? `, КПП ${generated.kpp}` : ''}`
+              );
+              recordChange(
+                `ИНН «${trimmedCp}»: ${prevInnLabel}`,
+                `ИНН ${generated.inn}${generated.kpp ? `, КПП ${generated.kpp}` : ''} (валидная контрольная цифра ФНС)`,
+                `Автозаполнение формального реквизита учебной организации по региону ${homeRegion} (на расчёт ОСВ не влияет)`,
+                'counterparty_requisites',
+                'fill_formal_requisites',
+                op.id
+              );
+            }
+          }
+        }
+
+        // Fill missing 9-digit KPP for 10-digit legal entity INN
+        const finalCleanInn = op.counterpartyInn.replace(/\D/g, '');
+        if (
+          op.counterpartyKind === 'ЮридическоеЛицо' &&
+          finalCleanInn.length === 10 &&
+          op.counterpartyKpp.replace(/\D/g, '').length !== 9
+        ) {
+          const fromDbKpp = db1C?.counterparties.find(
+            (c) =>
+              c.kpp.replace(/\D/g, '').length === 9 &&
+              (c.inn.replace(/\D/g, '') === finalCleanInn ||
+                normalizeEntityKey(c.name) === normalizeEntityKey(trimmedCp))
+          )?.kpp;
+          op.counterpartyKpp = fromDbKpp || `${finalCleanInn.slice(0, 4)}01001`;
+          fixedCount++;
+          recordChange(
+            `КПП «${trimmedCp}»: не указан`,
+            `КПП: ${op.counterpartyKpp}`,
+            'Формирование стандартного КПП головной организации по коду ИФНС (первые 4 цифры ИНН + 01001)',
+            'counterparty_requisites',
+            'fill_formal_requisites',
+            op.id
+          );
+        }
+      }
+
+      // Pass Stage 3c: Fill missing contract, warehouse, and expense item
+      if (op.bindings.contract.status === 'missing') {
+        const cpNorm = normalizeEntityKey(op.counterpartyName);
+        const fromDir = db1C?.contracts.find(
+          (c) =>
+            (op.counterpartyInn && c.counterpartyInn === op.counterpartyInn) ||
+            (cpNorm && normalizeEntityKey(c.counterpartyName) === cpNorm)
+        );
+        const fromDocs = db1C?.documents.find(
+          (d) => d.contract && cpNorm && normalizeEntityKey(d.counterparty) === cpNorm
+        );
+
+        if (fromDir) {
+          op.contractName = fromDir.name;
+          op.contractNumber = fromDir.number || op.contractNumber;
+          op.contractDate = fromDir.date || op.contractDate;
+          op.bindings.contract = {
+            status: 'matched_1c',
+            matchedName: fromDir.name,
+            matchedCode1C: fromDir.code1C,
+          };
+          fixedCount++;
+          recordChange(
+            `Договор (${op.counterpartyName}): не указан`,
+            `Договор: «${fromDir.name}»`,
+            'Справочник «ДоговорыКонтрагентов» базы 1С',
+            'directory_binding',
+            'fill_formal_requisites',
+            op.id
+          );
+        } else if (fromDocs?.contract) {
+          op.contractName = fromDocs.contract;
+          op.bindings.contract = {
+            status: 'matched_1c',
+            matchedName: fromDocs.contract,
+          };
+          fixedCount++;
+          recordChange(
+            `Договор (${op.counterpartyName}): не указан`,
+            `Договор: «${fromDocs.contract}»`,
+            'Журнал документов базы 1С',
+            'directory_binding',
+            'fill_formal_requisites',
+            op.id
+          );
+        } else {
+          op.contractName = 'Основной договор';
+          op.bindings.contract = {
+            status: 'new_for_1c',
+            note: 'Формальный реквизит (типовой договор 1С, на ОСВ не влияет)',
+          };
+          fixedCount++;
+          recordChange(
+            `Договор (${op.counterpartyName || op.docType1C}): не указан`,
+            '«Основной договор» (автосоздание при выгрузке)',
+            'Обязательность субконто «Договоры» на счетах 60/62 в 1С БП 3.0',
+            'directory_binding',
+            'fill_formal_requisites',
+            op.id
+          );
+        }
+      }
+
+      if (op.bindings.warehouse.status === 'missing') {
+        const whFromDb =
+          db1C?.warehouses[0]?.name ||
+          db1C?.documents.find((d) => Boolean(d.warehouse))?.warehouse;
+        if (whFromDb) {
+          op.warehouseName = whFromDb;
+          op.bindings.warehouse = {
+            status: 'matched_1c',
+            matchedName: whFromDb,
+            matchedCode1C: db1C?.warehouses[0]?.code1C,
+          };
+          fixedCount++;
+          recordChange(
+            'Склад МПЗ: не выбран',
+            `Склад: «${whFromDb}»`,
+            'Справочник «Склады» базы 1С',
+            'directory_binding',
+            'fill_formal_requisites',
+            op.id
+          );
+        } else {
+          op.warehouseName = 'Основной склад';
+          op.bindings.warehouse = {
+            status: 'new_for_1c',
+            note: 'Формальный реквизит (основной склад 1С, на ОСВ не влияет)',
+          };
+          fixedCount++;
+          recordChange(
+            'Склад МПЗ: не выбран',
+            'Склад: «Основной склад»',
+            'Обязательный реквизит складского учёта счетов 10 / 41 в 1С БП 3.0',
+            'directory_binding',
+            'fill_formal_requisites',
+            op.id
+          );
+        }
+      }
+
+      if (op.bindings.expenseItem.status === 'missing') {
+        const cpNorm = normalizeEntityKey(op.counterpartyName);
+        const histPosting = db1C?.postings.find(
+          (p) =>
+            ['20.01', '25', '26', '44.01'].includes(p.debit) &&
+            p.debitSubconto.length > 0 &&
+            cpNorm &&
+            normalizeEntityKey(`${p.counterpartyName ?? ''} ${p.creditSubconto.join(' ')}`).includes(cpNorm)
+        );
+        const histExpName = histPosting?.debitSubconto[0];
+        const fallbackExp = db1C?.expenseItems[0]?.name;
+
+        if (histExpName) {
+          op.expenseItemName = histExpName;
+          op.bindings.expenseItem = { status: 'matched_1c', matchedName: histExpName };
+          fixedCount++;
+          recordChange(
+            'Статья затрат: не выбрана',
+            `Статья затрат: «${histExpName}»`,
+            'Анализ предыдущих проводок по данному поставщику в базе 1С',
+            'directory_binding',
+            'fill_formal_requisites',
+            op.id
+          );
+        } else if (fallbackExp) {
+          op.expenseItemName = fallbackExp;
+          op.bindings.expenseItem = {
+            status: 'matched_1c',
+            matchedName: fallbackExp,
+            matchedCode1C: db1C?.expenseItems[0]?.code1C,
+          };
+          fixedCount++;
+          recordChange(
+            'Статья затрат: не выбрана',
+            `Статья затрат: «${fallbackExp}»`,
+            'Справочник «Статьи затрат» базы 1С',
+            'directory_binding',
+            'fill_formal_requisites',
+            op.id
+          );
+        } else {
+          op.expenseItemName = 'Прочие общехозяйственные расходы';
+          op.bindings.expenseItem = {
+            status: 'new_for_1c',
+            note: 'Формальный реквизит (типовая статья затрат 26 счёта, на ОСВ не влияет)',
+          };
+          fixedCount++;
+          recordChange(
+            'Статья затрат: не выбрана',
+            '«Прочие общехозяйственные расходы»',
+            'Стандартная аналитика счёта 26 в 1С БП 3.0',
+            'directory_binding',
+            'fill_formal_requisites',
+            op.id
+          );
+        }
+      }
+
+      // Regenerate empty entries if operation now has a valid amount
+      if (
+        op.entries.length === 0 &&
+        op.category !== 'hr_hire' &&
+        op.category !== 'writ_of_execution' &&
+        op.category !== 'contract_event' &&
+        op.category !== 'policy_event' &&
+        op.category !== 'manual' &&
+        (op.amount >= 0.01 || op.amountMode === 'calculated_by_1c')
+      ) {
+        op = bindAndGenerateOperation(
+          {
+            rowKey: op.rowKey,
+            sourceFileName: op.sourceFileName,
+            date: op.date,
+            docNumber: op.docNumber,
+            description: op.description,
+            amount: op.amount,
+            vatRate: op.vatRate,
+            vatRule: op.vatRule,
+            vatAmount: op.vatAmount,
+            hasInvoiceSF: op.hasInvoiceSF,
+            counterpartyName: op.counterpartyName,
+            counterpartyInn: op.counterpartyInn,
+            counterpartyKpp: op.counterpartyKpp,
+            counterpartyBankAccount: op.counterpartyBankAccount,
+            counterpartyBik: op.counterpartyBik,
+            counterpartyBankName: op.counterpartyBankName,
+            counterpartySource: op.counterpartySource,
+            egrulCandidates: op.egrulCandidates,
+            contractName: op.contractName,
+            nomenclatureName: op.nomenclatureName,
+            nomenclatureGroupHint: op.nomenclatureGroupName,
+            employeeName: op.employeeName,
+            monthlySalary: op.monthlySalary,
+            employeePosition: op.employeePosition,
+            usefulLifeMonths: op.usefulLifeMonths,
+            depreciationBaseAmount: op.depreciationBaseAmount,
+            alimonyRecipientName: op.alimonyRecipientName,
+            alimonyRecipientInn: op.alimonyRecipientInn,
+            alimonyRatePercent: op.alimonyRatePercent,
+            alimonyShareLabel: op.alimonyShareLabel,
+            financialNotesSummary: op.financialNotesSummary,
+            financialNotesList: op.financialNotesList,
+            disposedFinancialNoteId: op.disposedFinancialNoteId,
+            periodicPaymentAmount: op.periodicPaymentAmount,
+            interestRatePercent: op.interestRatePercent,
+            warehouseName: op.warehouseName,
+            warehouseToHint: op.warehouseToName,
+            expenseItemName: op.expenseItemName,
+            cashFlowItemName: op.cashFlowItemName,
+            costAccountHint: op.costAccount,
+            materialAccountHint: op.materialAccount,
+            docTypeHint: op.docType1C,
+            categoryHint: op.category,
+          },
+          db1C,
+          op.id,
+          {
+            priorOperations: buildChronoPriors(op),
+            reportingYear,
+            defaultBik,
+            defaultBankName: DEFAULT_SBERBANK_NAME,
+            assumeInvoiceOnVatPurchase: true,
+          }
+        );
+        fixedCount++;
+        appliedRuleSet.add('resolve_amount_and_links');
+      }
+
+      enrichedOps.push(op);
+    }
+
+    // Pass Stage 4: Full Chronological Recalculation across all enriched operations
+    let chronoSyncedOps = recalculateOperationsChronologically(enrichedOps, db1C, {
+      reportingYear,
+      defaultBik,
+    });
+
+    // Replace any remaining group accounts -> leaf subaccounts & refresh readinessStatus
+    chronoSyncedOps = chronoSyncedOps.map((opItem) => {
+      if (!opItem.includeInProcessing || opItem.autoGeneratedKind) return opItem;
+      const cpSub = [opItem.counterpartyName, opItem.contractName].filter(Boolean).join(' / ');
+      let entriesChanged = false;
+      const fixedEntries = opItem.entries.map((entry) => {
         if (
           entry.isOffBalance ||
           isOffBalanceAccountCode(entry.debit) ||
@@ -2795,28 +3226,32 @@ export function autoFixAllBy1CDb(params: {
         }
         let dt = entry.debit;
         let kt = entry.credit;
-        if (DEFAULT_SUBACCOUNT_MAP[dt]) {
+        if (DEFAULT_SUBACCOUNT_MAP[dt] || getAccountInfo(dt).isGroup) {
           const oldDt = dt;
-          dt = DEFAULT_SUBACCOUNT_MAP[dt];
+          dt = DEFAULT_SUBACCOUNT_MAP[dt] || `${dt}.01`;
+          entriesChanged = true;
           fixedCount++;
           recordChange(
             `Счёт Дт: ${oldDt} (групповой)`,
             `Счёт Дт: ${dt}`,
             'Замена группового счёта на рабочий субсчёт Плана счетов 1С БП 3.0',
             'directory_binding',
-            op.id
+            'replace_group_account',
+            opItem.id
           );
         }
-        if (DEFAULT_SUBACCOUNT_MAP[kt]) {
+        if (DEFAULT_SUBACCOUNT_MAP[kt] || getAccountInfo(kt).isGroup) {
           const oldKt = kt;
-          kt = DEFAULT_SUBACCOUNT_MAP[kt];
+          kt = DEFAULT_SUBACCOUNT_MAP[kt] || `${kt}.01`;
+          entriesChanged = true;
           fixedCount++;
           recordChange(
             `Счёт Кт: ${oldKt} (групповой)`,
             `Счёт Кт: ${kt}`,
             'Замена группового счёта на рабочий субсчёт Плана счетов 1С БП 3.0',
             'directory_binding',
-            op.id
+            'replace_group_account',
+            opItem.id
           );
         }
         return {
@@ -2828,146 +3263,282 @@ export function autoFixAllBy1CDb(params: {
             (dt.startsWith('60') || dt.startsWith('62')
               ? cpSub
               : dt === '26' || dt === '20.01'
-                ? op.expenseItemName
+                ? opItem.expenseItemName
                 : ''),
           creditSubconto:
             entry.creditSubconto ||
             (kt.startsWith('60') || kt.startsWith('62') ? cpSub : ''),
         };
       });
-    }
 
-    // Refresh mentor guide & readiness status after all enrichments
-    if (op.category === 'hr_hire' || op.category === 'writ_of_execution') {
-      op.needsAmount = undefined;
-      op.readinessStatus = 'ready';
-    } else if (op.amountMode === 'calculated_by_1c') {
-      op.needsAmount = undefined;
-      op.readinessStatus = 'calculated_1c';
-    } else {
-      const requiresCp = doesOperationRequireCounterparty(op.category);
-      const hasValidCp =
-        !requiresCp ||
-        (Boolean(op.counterpartyName.trim()) &&
-          (op.bindings.counterparty.status === 'matched_1c' ||
-            op.counterpartyKind === 'ФизическоеЛицо' ||
-            op.counterpartyInn.length === 10 ||
-            op.counterpartyInn.length === 12));
-      const hasAllAnalytics =
-        op.bindings.contract.status !== 'missing' &&
-        op.bindings.warehouse.status !== 'missing' &&
-        op.bindings.expenseItem.status !== 'missing';
+      const updatedOp: QueuedOperation = {
+        ...opItem,
+        entries: fixedEntries,
+      };
 
       if (
-        !op.needsAmount &&
-        op.amountMode !== 'required_missing' &&
-        (op.entries.length > 0 || op.category === 'closing') &&
-        hasValidCp &&
-        hasAllAnalytics &&
-        !(op.category === 'manual' && op.entries.length === 0)
+        updatedOp.category === 'hr_hire' ||
+        updatedOp.category === 'writ_of_execution' ||
+        updatedOp.category === 'contract_event' ||
+        updatedOp.category === 'policy_event'
       ) {
-        op.readinessStatus = 'ready';
-        op.readinessNote = 'Все реквизиты и проводки 1С:БП 3.0 заполнены';
+        updatedOp.needsAmount = undefined;
+        updatedOp.readinessStatus = 'ready';
+      } else if (updatedOp.amountMode === 'calculated_by_1c') {
+        updatedOp.needsAmount = undefined;
+        updatedOp.readinessStatus = 'calculated_1c';
+      } else {
+        const requiresCp = doesOperationRequireCounterparty(updatedOp.category);
+        const hasValidCp =
+          !requiresCp ||
+          (Boolean(updatedOp.counterpartyName.trim()) &&
+            (updatedOp.bindings.counterparty.status === 'matched_1c' ||
+              updatedOp.counterpartyKind === 'ФизическоеЛицо' ||
+              updatedOp.counterpartyInn.length === 10 ||
+              updatedOp.counterpartyInn.length === 12));
+        const hasAllAnalytics =
+          updatedOp.bindings.contract.status !== 'missing' &&
+          updatedOp.bindings.warehouse.status !== 'missing' &&
+          updatedOp.bindings.expenseItem.status !== 'missing';
+
+        if (
+          !updatedOp.needsAmount &&
+          updatedOp.amountMode !== 'required_missing' &&
+          (updatedOp.entries.length > 0 || updatedOp.category === 'closing') &&
+          hasValidCp &&
+          hasAllAnalytics &&
+          !(updatedOp.category === 'manual' && updatedOp.entries.length === 0)
+        ) {
+          updatedOp.readinessStatus = 'ready';
+          updatedOp.readinessNote = 'Все реквизиты и проводки 1С:БП 3.0 заполнены';
+        }
       }
-    }
-    op.mentorGuide1C = buildOperationMentorGuide1C(op, db1C);
 
-    enrichedOps.push(op);
-  }
+      if (entriesChanged) {
+        updatedOp.mentorGuide1C = buildOperationMentorGuide1C(updatedOp, db1C);
+      }
+      return updatedOp;
+    });
 
-  // 7. Reclassify red 60.01 / 62.01 balances to advance accounts 60.02 / 62.02 (scoped to red subcontos when available)
-  let intermediateOsv = calculateCurrentOsv(enrichedOps);
-  const row6001 = intermediateOsv.leafRows.find((r) => r.code === '60.01');
-  if (row6001 && row6001.hasRedEnd) {
-    const redSubs6001 = (intermediateOsv.subcontoRowsByAccount?.['60.01'] ?? []).filter(
-      (s) => s.endCredit < -0.01 || s.endDebit > 0.01
-    );
-    for (const op of enrichedOps) {
-      if (op.category === 'bank_out') {
-        for (const e of op.entries) {
-          if (e.debit === '60.01' && e.credit === '51') {
-            const subMatchesRed =
-              redSubs6001.length === 0 ||
-              redSubs6001.some((rs) => {
-                const rsKey = normalizeEntityKey(rs.subcontoLabel.split('/')[0] ?? '');
-                const eKey = normalizeEntityKey(
-                  (e.debitSubconto || op.counterpartyName || '').split('/')[0] ?? ''
+    // Pass Stage 5a: Reclassify red 60.01/60.02/62.01/62.02 balances and cover red 50.01 cash from 51
+    let intermediateOsv = calculateCurrentOsv(chronoSyncedOps);
+    const row6001 = intermediateOsv.leafRows.find((r) => r.code === '60.01');
+    if (row6001 && row6001.hasRedEnd) {
+      const redSubs6001 = (intermediateOsv.subcontoRowsByAccount?.['60.01'] ?? []).filter(
+        (s) => s.endCredit < -0.01 || s.endDebit > 0.01
+      );
+      for (const op of chronoSyncedOps) {
+        if (op.category === 'bank_out' || op.category === 'cash_out') {
+          for (const e of op.entries) {
+            if (e.debit === '60.01' && (e.credit === '51' || e.credit === '50.01')) {
+              const subMatchesRed =
+                redSubs6001.length === 0 ||
+                redSubs6001.some((rs) => {
+                  const rsKey = normalizeEntityKey(rs.subcontoLabel.split('/')[0] ?? '');
+                  const eKey = normalizeEntityKey(
+                    (e.debitSubconto || op.counterpartyName || '').split('/')[0] ?? ''
+                  );
+                  return !rsKey || !eKey || rsKey === eKey;
+                });
+              if (subMatchesRed) {
+                e.debit = '60.02';
+                e.description = 'Перечислен аванс поставщику (переклассифицировано с 60.01)';
+                fixedCount++;
+                recordChange(
+                  `Проводка оплаты «${op.counterpartyName}»: Дт 60.01 Кт ${e.credit}`,
+                  `Дт 60.02 Кт ${e.credit} (выданный аванс поставщику)`,
+                  'Устранение отрицательного сальдо по пассивному расчётному субсчёту 60.01',
+                  'advance_offset',
+                  'flip_red_settlement_subaccount',
+                  op.id
                 );
-                return !rsKey || !eKey || rsKey === eKey;
-              });
-            if (subMatchesRed) {
-              e.debit = '60.02';
-              e.description = 'Перечислен аванс поставщику (переклассифицировано с 60.01)';
+              }
+            }
+          }
+        }
+      }
+      intermediateOsv = calculateCurrentOsv(chronoSyncedOps);
+    }
+
+    const row6002 = intermediateOsv.leafRows.find((r) => r.code === '60.02');
+    if (row6002 && row6002.hasRedEnd) {
+      for (const op of chronoSyncedOps) {
+        for (const e of op.entries) {
+          if (e.credit === '60.02' && e.debit !== '60.01') {
+            e.credit = '60.01';
+            fixedCount++;
+            recordChange(
+              `Проводка Кт 60.02`,
+              `Кт 60.01 (расчёты с поставщиками)`,
+              'Устранение отрицательного сальдо по активному счёту авансов 60.02',
+              'advance_offset',
+              'flip_red_settlement_subaccount',
+              op.id
+            );
+          }
+        }
+      }
+      intermediateOsv = calculateCurrentOsv(chronoSyncedOps);
+    }
+
+    const row6201 = intermediateOsv.leafRows.find((r) => r.code === '62.01');
+    if (row6201 && row6201.hasRedEnd) {
+      for (const op of chronoSyncedOps) {
+        if (op.category === 'bank_in' || op.category === 'cash_in') {
+          for (const e of op.entries) {
+            if ((e.debit === '51' || e.debit === '50.01') && e.credit === '62.01') {
+              e.credit = '62.02';
+              e.description = 'Получен аванс от покупателя (переклассифицировано с 62.01)';
               fixedCount++;
-              log.push(
-                `Устранена краснота по 60.01: оплата «${op.counterpartyName}» перенесена на счёт авансов 60.02`
-              );
               recordChange(
-                `Проводка оплаты «${op.counterpartyName}»: Дт 60.01 Кт 51`,
-                'Дт 60.02 Кт 51 (выданный аванс поставщику)',
-                'Устранение отрицательного сальдо по пассивному расчётному субсчёту 60.01',
+                `Проводка поступления от «${op.counterpartyName}»: Дт ${e.debit} Кт 62.01`,
+                `Дт ${e.debit} Кт 62.02 (полученный аванс от покупателя)`,
+                'Устранение отрицательного сальдо по активному субсчёту 62.01',
                 'advance_offset',
+                'flip_red_settlement_subaccount',
                 op.id
               );
             }
           }
         }
       }
+      intermediateOsv = calculateCurrentOsv(chronoSyncedOps);
     }
-    intermediateOsv = calculateCurrentOsv(enrichedOps);
-  }
 
-  const row6201 = intermediateOsv.leafRows.find((r) => r.code === '62.01');
-  if (row6201 && row6201.hasRedEnd) {
-    for (const op of enrichedOps) {
-      if (op.category === 'bank_in') {
+    const row6202 = intermediateOsv.leafRows.find((r) => r.code === '62.02');
+    if (row6202 && row6202.hasRedEnd) {
+      for (const op of chronoSyncedOps) {
         for (const e of op.entries) {
-          if (e.debit === '51' && e.credit === '62.01') {
-            e.credit = '62.02';
-            e.description = 'Получен аванс от покупателя (переклассифицировано с 62.01)';
+          if (e.debit === '62.02' && e.credit !== '62.01') {
+            e.debit = '62.01';
             fixedCount++;
-            log.push(
-              `Устранена краснота по 62.01: оплата от «${op.counterpartyName}» перенесена на счёт авансов 62.02`
-            );
             recordChange(
-              `Проводка поступления от «${op.counterpartyName}»: Дт 51 Кт 62.01`,
-              'Дт 51 Кт 62.02 (полученный аванс от покупателя)',
-              'Устранение отрицательного сальдо по активному субсчёту 62.01',
+              `Проводка Дт 62.02`,
+              `Дт 62.01 (расчёты с покупателями)`,
+              'Устранение отрицательного сальдо по пассивному счёту авансов 62.02',
               'advance_offset',
+              'flip_red_settlement_subaccount',
               op.id
             );
           }
         }
       }
+      intermediateOsv = calculateCurrentOsv(chronoSyncedOps);
     }
-    intermediateOsv = calculateCurrentOsv(enrichedOps);
-  }
 
-  // 8. Generate advance offsets, advance VAT, and period closing operations
-  const { newOperations, log: closeLog, structuredChanges: closeChanges } =
-    generatePeriodClosingOperations({
+    // Cover negative 50.01 cash balance from 51 bank account if bank has sufficient funds
+    const row5001 = intermediateOsv.leafRows.find((r) => r.code === '50.01');
+    const row51 = intermediateOsv.leafRows.find((r) => r.code === '51');
+    if (
+      row5001 &&
+      row5001.hasRedEnd &&
+      row5001.endDebit < -0.01 &&
+      row51 &&
+      row51.endDebit >= Math.abs(row5001.endDebit) + 0.01
+    ) {
+      const coverAmt = round2(Math.abs(row5001.endDebit));
+      const earliestCashOutDate =
+        chronoSyncedOps
+          .filter((o) => o.includeInProcessing && o.entries.some((e) => e.credit === '50.01'))
+          .map((o) => o.date)
+          .sort()[0] ||
+        periodEndDate ||
+        new Date().toISOString().slice(0, 10);
+      const cashCoverOp = bindAndGenerateOperation(
+        {
+          sourceFileName: 'Автоисправление 1С',
+          date: earliestCashOutDate,
+          docNumber: 'ПКО-БАНК',
+          description: 'По чеку сняты наличные денежные средства с расчётного счёта в кассу для покрытия кассовых расходов',
+          amount: coverAmt,
+          categoryHint: 'cash_bank_internal',
+          docTypeHint: 'ПоступлениеНаличных',
+        },
+        db1C,
+        nextAutoFixId('op-cash-cover')
+      );
+      chronoSyncedOps = [cashCoverOp, ...chronoSyncedOps];
+      fixedCount++;
+      recordChange(
+        `Отрицательный остаток кассы 50.01: ${row5001.endDebit.toFixed(2)} ₽`,
+        `ПКО «Получение наличных в банке»: Дт 50.01 Кт 51 на ${coverAmt.toFixed(2)} ₽`,
+        'Устранение кассового разрыва 50.01 за счёт свободного остатка средств на расчётном счёте 51',
+        'amount_calc',
+        'generate_cash_withdrawal_cover',
+        cashCoverOp.id
+      );
+      intermediateOsv = calculateCurrentOsv(chronoSyncedOps);
+    }
+
+    // Pass Stage 5b: Generate advance offsets, advance VAT, and period closing operations
+    const { newOperations, log: closeLog, structuredChanges: closeChanges } =
+      generatePeriodClosingOperations({
+        db1C,
+        operations: chronoSyncedOps,
+        osv: intermediateOsv,
+        periodEndDate,
+      });
+
+    if (newOperations.length > 0) {
+      fixedCount += newOperations.length;
+      log.push(...closeLog);
+      structuredChanges.push(...closeChanges);
+      for (const genOp of newOperations) {
+        if (genOp.autoGeneratedKind === 'advance_offset') appliedRuleSet.add('offset_advances_60_62');
+        if (genOp.autoGeneratedKind === 'advance_vat') appliedRuleSet.add('accrue_advance_vat_76av');
+        if (genOp.autoGeneratedKind === 'closing_90_91') appliedRuleSet.add('close_period_accounts');
+      }
+    }
+
+    workingOperations = attachVirtualStateStep00ToOperations(
+      [...chronoSyncedOps, ...newOperations],
+      db1C
+    );
+
+    // Fixed-point convergence check: verify remaining autofixable issues
+    const passOsv = calculateCurrentOsv(workingOperations);
+    const passIssues = runAuditDiagnostics({
       db1C,
-      operations: enrichedOps,
-      osv: intermediateOsv,
-      periodEndDate,
+      operations: workingOperations,
+      osv: passOsv,
     });
-
-  if (newOperations.length > 0) {
-    fixedCount += newOperations.length;
-    log.push(...closeLog);
-    structuredChanges.push(...closeChanges);
+    const remainingFixable = passIssues.filter((i) => i.canAutoFixBy1C);
+    if (remainingFixable.length === 0) {
+      break;
+    }
   }
 
-  const finalOperationsWithStep00 = attachVirtualStateStep00ToOperations(
-    [...enrichedOps, ...newOperations],
-    db1C
-  );
+  const finalOsv = calculateCurrentOsv(workingOperations);
+  const finalIssues = runAuditDiagnostics({
+    db1C,
+    operations: workingOperations,
+    osv: finalOsv,
+  });
+  const criticalAfterCount = workingOperations.filter(
+    (o) => o.includeInProcessing && o.readinessStatus === 'critical_error'
+  ).length;
+
+  const executionSummary: AutofixExecutionSummary = {
+    passesExecuted,
+    issuesBefore: issuesBeforeCount,
+    issuesAfter: finalIssues.length,
+    autofixableBefore: autofixableBeforeCount,
+    remainingAutofixableCount: finalIssues.filter((i) => i.canAutoFixBy1C).length,
+    criticalBefore: criticalBeforeCount,
+    criticalAfter: criticalAfterCount,
+    isOsvBalanced:
+      finalOsv.totals.isStartBalanced &&
+      finalOsv.totals.isTurnoverBalanced &&
+      finalOsv.totals.isEndBalanced,
+    appliedRules: Array.from(appliedRuleSet),
+  };
 
   return {
-    operations: finalOperationsWithStep00,
+    operations: workingOperations,
     fixedCount,
     log,
     structuredChanges,
+    executionSummary,
   };
 }
 
@@ -3022,5 +3593,53 @@ export function autoFixSingleOperation(params: {
     fixedCount: Math.max(1, opChanges.length),
     structuredChanges: opChanges,
     summary,
+  };
+}
+
+/**
+ * Executes deterministic 1-click fix for any individual `AuditIssue` card in Tab 3
+ * (delegates per-operation issues to `autoFixSingleOperation` and OSV/period issues to `autoFixAllBy1CDb`).
+ */
+export function autoFixAuditIssue(params: {
+  issue: AuditIssue;
+  db1C: Database1CSnapshot | null;
+  operations: QueuedOperation[];
+  calculateCurrentOsv: (ops: QueuedOperation[]) => OsvReport;
+  periodEndDate: string;
+  reportingYear?: number;
+  defaultBik?: string;
+}): {
+  operations: QueuedOperation[];
+  fixedCount: number;
+  structuredChanges: AutoFixChangeRecord[];
+  executionSummary?: AutofixExecutionSummary;
+  summary: string;
+} {
+  if (params.issue.operationId) {
+    const single = autoFixSingleOperation({
+      operationId: params.issue.operationId,
+      db1C: params.db1C,
+      operations: params.operations,
+      calculateCurrentOsv: params.calculateCurrentOsv,
+      periodEndDate: params.periodEndDate,
+      reportingYear: params.reportingYear,
+    });
+    return single;
+  }
+
+  const all = autoFixAllBy1CDb({
+    db1C: params.db1C,
+    operations: params.operations,
+    calculateCurrentOsv: params.calculateCurrentOsv,
+    periodEndDate: params.periodEndDate,
+    reportingYear: params.reportingYear,
+    defaultBik: params.defaultBik,
+  });
+  return {
+    operations: all.operations,
+    fixedCount: all.fixedCount,
+    structuredChanges: all.structuredChanges,
+    executionSummary: all.executionSummary,
+    summary: `Исправлено замечаний: ${all.fixedCount} · Осталось автоисправляемых: ${all.executionSummary.remainingAutofixableCount}`,
   };
 }

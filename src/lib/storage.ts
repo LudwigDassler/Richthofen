@@ -65,6 +65,7 @@ export function loadWorkbenchState(): PersistedWorkbenchStateV2 | null {
       exportMode: parsed.exportMode ?? 'incremental',
       lastImportStats: parsed.lastImportStats ?? null,
       autoFixChanges: Array.isArray(parsed.autoFixChanges) ? parsed.autoFixChanges : [],
+      autoFixSummary: parsed.autoFixSummary ?? null,
     };
   } catch {
     return null;

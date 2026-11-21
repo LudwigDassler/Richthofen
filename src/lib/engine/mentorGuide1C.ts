@@ -5,6 +5,8 @@ import {
   OperationCategory,
   OperationMentorGuide1C,
   QueuedOperation,
+  Step01CalculationBreakdown1C,
+  Step02AccountingLogic1C,
 } from '@/types/accounting';
 
 export const DOC_TYPE_LABELS_1C: Record<DocType1CBP30, string> = {
@@ -35,9 +37,12 @@ export const DOC_TYPE_LABELS_1C: Record<DocType1CBP30, string> = {
 };
 
 const INTERNAL_NO_COUNTERPARTY_CATEGORIES = new Set<OperationCategory>([
+  'contract_event',
+  'policy_event',
   'materials_writeoff',
   'workwear_issue',
   'os_commissioning',
+  'os_disposal',
   'production_output',
   'warehouse_transfer',
   'cash_bank_internal',
@@ -46,8 +51,13 @@ const INTERNAL_NO_COUNTERPARTY_CATEGORIES = new Set<OperationCategory>([
   'accountable_return',
   'loan_received',
   'loan_repaid',
+  'loan_issued',
+  'loan_interest_accrual',
   'founder_contribution',
   'financial_investment',
+  'financial_interest_accrual',
+  'financial_disposal',
+  'vat_deduction',
   'depreciation_accrual',
   'insurance_accrual',
   'hr_hire',
@@ -126,6 +136,8 @@ export function getOperationCardProfile(
 
   if (
     op.category === 'os_commissioning' ||
+    op.category === 'os_disposal' ||
+    op.category === 'policy_event' ||
     op.category === 'depreciation_accrual' ||
     op.category === 'closing' ||
     op.docType1C === 'ПринятиеКУчетуОС' ||
@@ -140,14 +152,19 @@ export function getOperationCardProfile(
 
   if (
     op.category === 'tax_payment' ||
+    op.category === 'vat_deduction' ||
     op.category === 'bank_fee' ||
     op.category === 'founder_contribution' ||
     op.category === 'alimony_payout' ||
     op.category === 'financial_investment' ||
+    op.category === 'financial_interest_accrual' ||
+    op.category === 'financial_disposal' ||
     op.docType1C === 'ФинансовыеВложения' ||
     op.category === 'cash_bank_internal' ||
     op.category === 'loan_received' ||
-    op.category === 'loan_repaid'
+    op.category === 'loan_repaid' ||
+    op.category === 'loan_issued' ||
+    op.category === 'loan_interest_accrual'
   ) {
     return 'taxes_bank_founders';
   }
@@ -165,6 +182,12 @@ export function getOperationStatusBadgeText(
   if (op.readinessStatus === 'critical_error' || op.needsAmount) {
     return 'Требует проверки';
   }
+  if (op.category === 'contract_event') {
+    return 'Договор / счёт 1С (без проводок)';
+  }
+  if (op.category === 'policy_event') {
+    return 'Учётная политика / лимит 1С';
+  }
   if (op.category === 'manual' && op.readinessStatus === 'needs_clarification') {
     return 'Уточните счёт Дт/Кт';
   }
@@ -174,8 +197,27 @@ export function getOperationStatusBadgeText(
   if (op.category === 'alimony_payout') {
     return 'Уплата алиментов 76.41';
   }
-  if (op.category === 'financial_investment' || op.docType1C === 'ФинансовыеВложения') {
+  if (
+    op.category === 'financial_investment' ||
+    op.category === 'financial_interest_accrual' ||
+    op.category === 'financial_disposal' ||
+    op.docType1C === 'ФинансовыеВложения'
+  ) {
+    if (op.category === 'financial_interest_accrual') return 'Проценты по ЦБ 76.09 / 91.01';
+    if (op.category === 'financial_disposal') return 'Выбытие ЦБ / векселя 58.02';
     return 'Учёт ценных бумаг 58.02';
+  }
+  if (op.category === 'loan_issued') {
+    return 'Выданный заём 58.03';
+  }
+  if (op.category === 'loan_interest_accrual') {
+    return 'Проценты по займу 66/67';
+  }
+  if (op.category === 'os_disposal') {
+    return 'Выбытие ОС 01.09';
+  }
+  if (op.category === 'vat_deduction') {
+    return 'Вычет НДС 68.02 / 19';
   }
   if (profile === 'accountable_71') {
     if (op.category === 'expense_report') return 'Авансовый отчёт 71.01';
@@ -249,19 +291,15 @@ export function mapDocTypeToDefaultCategory(
       }
       return 'purchase_goods';
     case 'СписаниеСРасчетногоСчета':
-      if (
-        [
-          'tax_payment',
-          'bank_fee',
-          'payroll_payout',
-          'accountable_issue',
-          'loan_repaid',
-          'alimony_payout',
-        ].includes(prevCategory)
-      ) {
-        return prevCategory;
-      }
-      return 'bank_out';
+      return prevCategory === 'tax_payment' ||
+        prevCategory === 'bank_fee' ||
+        prevCategory === 'payroll_payout' ||
+        prevCategory === 'accountable_issue' ||
+        prevCategory === 'loan_repaid' ||
+        prevCategory === 'loan_issued' ||
+        prevCategory === 'alimony_payout'
+        ? prevCategory
+        : 'bank_out';
     case 'ПоступлениеНаРасчетныйСчет':
       if (['founder_contribution', 'loan_received'].includes(prevCategory)) {
         return prevCategory;
@@ -279,8 +317,19 @@ export function mapDocTypeToDefaultCategory(
       return 'cash_out';
     case 'АвансовыйОтчет':
       return 'expense_report';
+    case 'СчетФактураПолученный':
+      return 'vat_deduction';
     case 'ОперацияБух':
-      return prevCategory === 'penalty_claim' || prevCategory === 'financial_investment'
+      return [
+        'penalty_claim',
+        'financial_investment',
+        'financial_interest_accrual',
+        'financial_disposal',
+        'loan_interest_accrual',
+        'os_disposal',
+        'contract_event',
+        'policy_event',
+      ].includes(prevCategory)
         ? prevCategory
         : 'manual';
     default:
@@ -301,7 +350,203 @@ function formatMoneyRu(n: number): string {
   })} ₽`;
 }
 
+function buildStep01Fallback(op: QueuedOperation): Step01CalculationBreakdown1C {
+  if (op.resolverTrace) {
+    return op.resolverTrace;
+  }
+  const nonPostingCategories: OperationCategory[] = [
+    'contract_event',
+    'policy_event',
+    'hr_hire',
+    'writ_of_execution',
+  ];
+  if (nonPostingCategories.includes(op.category)) {
+    return {
+      resolverLevel: 6,
+      resolverLevelName: 'Уровень 6 — Регистр сведений 1С:БП 3.0 (управленческое / кадровое событие без проводок)',
+      summaryFormula: op.calculationProvenance || '0,00 ₽ по регистру бухгалтерии (запись параметров в регистр сведений 1С)',
+      steps: [
+        op.calculationProvenance ||
+          `Операция «${op.description}» регистрирует нормативные условия в базе 1С без изменения сальдо счетов в этот день.`,
+      ],
+      sourceLinks: [],
+    };
+  }
+
+  const lines: string[] = [];
+  if (op.calculationProvenance) {
+    lines.push(op.calculationProvenance);
+  } else if (op.amount >= 0.01) {
+    lines.push(`Итоговая сумма документа: ${formatMoneyRu(op.amount)}.`);
+  }
+  if (op.vatAmount > 0) {
+    const net = Math.max(0, op.amount - op.vatAmount);
+    lines.push(
+      `Расчёт НДС (${op.vatRate}%): база без НДС = ${formatMoneyRu(net)}, сумма НДС = ${formatMoneyRu(op.vatAmount)}, всего с НДС = ${formatMoneyRu(op.amount)}.`
+    );
+  }
+  if (op.entries.length > 0) {
+    for (const e of op.entries) {
+      if (e.amount >= 0.01) {
+        lines.push(`Дт ${e.debit || '—'} Кт ${e.credit || '—'}: ${formatMoneyRu(e.amount)} (${e.description}).`);
+      }
+    }
+  }
+
+  return {
+    resolverLevel: op.needsAmount ? 8 : op.amountMode === 'explicit' ? 1 : 6,
+    resolverLevelName: op.needsAmount
+      ? 'Уровень 8 — Требуется уточнение внешней суммы (проверены все 7 источников контура)'
+      : op.amountMode === 'explicit'
+        ? 'Уровень 1 — Явная сумма из колонки / условия задания'
+        : 'Уровень 6 — Автоматический расчёт по живой модели 1С:БП 3.0',
+    summaryFormula:
+      op.calculationProvenance ||
+      (op.amount >= 0.01
+        ? `Сумма операции = ${formatMoneyRu(op.amount)}${op.vatAmount > 0 ? ` (в т.ч. НДС ${formatMoneyRu(op.vatAmount)})` : ' (Без НДС)'}`
+        : 'Рассчитывается 1С при проведении документа'),
+    steps: lines.length > 0 ? lines : ['Сумма рассчитана по правилам бухгалтерского учёта 1С:БП 3.0.'],
+    sourceLinks: [],
+  };
+}
+
+function buildStep02Logic(
+  op: QueuedOperation,
+  guide: Pick<OperationMentorGuide1C, 'accountingMeaning' | 'whyAmountOrVatRule'>
+): Step02AccountingLogic1C {
+  const norms: string[] = [];
+  switch (op.category) {
+    case 'contract_event':
+    case 'policy_event':
+      norms.push(
+        'ПБУ 1/2008 «Учётная политика организации»',
+        'Ст. 9 Федерального закона № 402-ФЗ (факт хозяйственной жизни vs заключение рамочного договора / выставление счёта)'
+      );
+      break;
+    case 'hr_hire':
+      norms.push('Ст. 68 ТК РФ (оформление приёма на работу)', 'План счетов 1С:БП 3.0 (регистры плановых начислений)');
+      break;
+    case 'writ_of_execution':
+    case 'alimony_payout':
+      norms.push(
+        'Ст. 99 Федерального закона № 229-ФЗ «Об исполнительном производстве» (расчёт удержаний после вычета НДФЛ)',
+        'Ст. 109 СК РФ (обязанность работодателя удерживать алименты — счёт 76.41)'
+      );
+      break;
+    case 'payroll_accrual':
+    case 'insurance_accrual':
+    case 'payroll_payout':
+      norms.push(
+        'Гл. 23 НК РФ (ст. 224, 226 НК РФ — удержание НДФЛ 13% налоговым агентом)',
+        'Гл. 34 НК РФ (ст. 425 НК РФ — единый тариф страховых взносов 30%) + ФЗ № 125-ФЗ (взносы от НС и ПЗ)'
+      );
+      break;
+    case 'materials_writeoff':
+    case 'workwear_issue':
+    case 'purchase_materials':
+    case 'purchase_goods':
+    case 'production_output':
+    case 'warehouse_transfer':
+      norms.push(
+        'ФСБУ 5/2019 «Запасы» (оценка при признании без возмещаемых налогов и списание по средней / ФИФО)',
+        ...(op.vatAmount > 0 ? ['Ст. 171, 172 НК РФ (вычет входного НДС по счёту-фактуре / УПД)'] : [])
+      );
+      break;
+    case 'purchase_equipment':
+    case 'os_commissioning':
+    case 'depreciation_accrual':
+    case 'os_disposal':
+      norms.push(
+        'ФСБУ 26/2020 «Капитальные вложения» (формирование первоначальной стоимости на счёте 08.04.1)',
+        'ФСБУ 6/2020 «Основные средства» (принятие к учёту на счёт 01.01, линейная амортизация на 02.01, списание через 01.09)',
+        'Ст. 256–259.1 НК РФ (амортизируемое имущество в налоговом учёте)'
+      );
+      break;
+    case 'financial_investment':
+    case 'financial_interest_accrual':
+    case 'financial_disposal':
+    case 'loan_issued':
+      norms.push(
+        'ПБУ 19/02 «Учёт финансовых вложений» (счета 58.02 «Долговые ценные бумаги», 58.03 «Предоставленные займы»)',
+        'ПБУ 9/99 и ПБУ 10/99 (признание процентного дохода и выбытия ценных бумаг через счёт 91)',
+        'Пп. 12, 15 п. 2 ст. 149 НК РФ (операции с ценными бумагами и займами не облагаются НДС)'
+      );
+      break;
+    case 'loan_received':
+    case 'loan_repaid':
+    case 'loan_interest_accrual':
+      norms.push(
+        'ПБУ 15/2008 «Учёт расходов по займам и кредитам» (основной долг 66.03/67.03, проценты отдельно на 66.04/67.04 в корреспонденции с 91.02)',
+        'Ст. 269 НК РФ (признание процентов по долговым обязательствам во внереализационных расходах)'
+      );
+      break;
+    case 'sale_goods':
+    case 'sale_services':
+      norms.push(
+        'ПБУ 9/99 «Доходы организации» (признание выручки на счёте 90.01.1)',
+        'ПБУ 10/99 «Расходы организации» (списание себестоимости продаж в дебет 90.02.1)',
+        'Ст. 146, 164, 168 НК РФ (начисление НДС при реализации — Дт 90.03 Кт 68.02)'
+      );
+      break;
+    case 'vat_deduction':
+      norms.push('Ст. 171, 172 НК РФ (принятие входного НДС к вычету со счёта 19 в дебет 68.02)');
+      break;
+    case 'founder_contribution':
+      norms.push('Пп. 4 п. 3 ст. 39, пп. 1 п. 2 ст. 146 НК РФ (вклады в уставный капитал не признаются реализацией и не облагаются НДС)');
+      break;
+    case 'closing':
+      norms.push(
+        'ПБУ 9/99, ПБУ 10/99, ПБУ 18/02 (закрытие счетов 20, 25, 26, 44 и определение финансового результата на счёте 99.01.1)',
+        'Ст. 284 НК РФ (ставка налога на прибыль организаций — 20%)'
+      );
+      break;
+    default:
+      norms.push(
+        'План счетов бухгалтерского учёта (Приказ Минфина РФ № 94н)',
+        op.vatAmount > 0 ? 'Гл. 21 НК РФ (учёт НДС на ОСНО)' : 'Ст. 149 / 146 НК РФ (операция без НДС)'
+      );
+      break;
+  }
+
+  const subcontoArchitecture =
+    op.entries.length > 0
+      ? op.entries
+          .map(
+            (e) =>
+              `Дт ${e.debit || '—'} (${e.debitSubconto || 'без аналитики'})${
+                e.isOffBalance ? '' : ` → Кт ${e.credit || '—'} (${e.creditSubconto || 'без аналитики'})`
+              }`
+          )
+          .join(' · ')
+      : 'Аналитика сохраняется в регистрах сведений 1С:БП 3.0 (Контрагенты / Договоры / Кадровый учёт / Учётная политика) и подставляется в проводки последующих документов.';
+
+  return {
+    plainExplanation: `${guide.accountingMeaning} ${guide.whyAmountOrVatRule}`.trim(),
+    regulatoryNorms: norms,
+    subcontoArchitecture,
+  };
+}
+
+function enrichMentorGuideForDefense(
+  guide: OperationMentorGuide1C,
+  op: QueuedOperation
+): OperationMentorGuide1C {
+  return {
+    ...guide,
+    step01CalculationBreakdown: guide.step01CalculationBreakdown ?? buildStep01Fallback(op),
+    step02AccountingLogic: guide.step02AccountingLogic ?? buildStep02Logic(op, guide),
+  };
+}
+
 export function buildOperationMentorGuide1C(
+  op: QueuedOperation,
+  db1C: Database1CSnapshot | null
+): OperationMentorGuide1C {
+  const rawGuide = buildOperationMentorGuideCore(op, db1C);
+  return enrichMentorGuideForDefense(rawGuide, op);
+}
+
+function buildOperationMentorGuideCore(
   op: QueuedOperation,
   db1C: Database1CSnapshot | null
 ): OperationMentorGuide1C {
@@ -896,6 +1141,229 @@ export function buildOperationMentorGuide1C(
         'Ошибочное оформление покупки векселей документом «Поступление товаров» на счёт 41.01 с выделением НДС 20%.',
         'Потеря суммы в Excel, когда номиналы векселей написаны текстом внутри описания операции («один на 280 000..., второй - 540 000»).',
       ],
+    };
+  }
+
+  // 8e. Заключение договора / получение счёта на оплату (без бухгалтерских проводок в день подписания)
+  if (op.category === 'contract_event') {
+    return {
+      accountingMeaning: `Управленческое / договорное событие («${op.description}»). Подписание рамочного договора или получение счёта на оплату фиксирует условия будущих расчётов с контрагентом «${cp}», но само по себе ещё НЕ меняет активы или обязательства организации — поэтому в день заключения договора бухгалтерские проводки Дт/Кт НЕ формируются (0 проводок).`,
+      whyAmountOrVatRule:
+        'Бухгалтерские проводки возникнут позже в момент реального факта хозяйственной жизни: при перечислении оплаты (Дт 60 Кт 51) или подписании акта / накладной (Дт 10/20/26/41 Кт 60.01). При этом периодическая ставка из договора сохраняется в модели 1С и автоматически подставляется в последующие ежемесячные акты и платежи!',
+      navigationPath1C:
+        'Раздел «Справочники» → «Контрагенты» → карточка контрагента → вкладка «Договоры» → кнопка «Создать» (либо «Покупки → Счета от поставщиков»)',
+      documentOperationKind1C: 'Регистрация договора контрагента / Счёта на оплату (без проводок Дт/Кт)',
+      headerFieldsSteps: [
+        { field: 'Контрагент', value: cp },
+        { field: 'Договор', value: ctr, hint: `Дата договора: ${dateRu}` },
+      ],
+      tabularAndTabsSteps: [
+        {
+          tabName: 'Карточка договора в 1С:БП 3.0',
+          instruction: `Запишите реквизиты договора «${ctr}» (вид договора: С поставщиком / С покупателем). Проводки по регистру бухгалтерии создавать НЕ нужно.`,
+        },
+      ],
+      referencePostings: [
+        {
+          debit: '— (Справочник «Договоры»)',
+          credit: '— (Без проводок в день подписания)',
+          amountRule: op.calculationProvenance || 'Фиксация условий для будущих актов и оплат',
+          purpose: op.description,
+        },
+      ],
+      selfCheckOsv: [
+        'Убедитесь, что в день подписания договора или выставления счёта в ОСВ не появилось преждевременной задолженности на счёте 60 или 62.',
+      ],
+      commonStudentMistakes: [
+        'Ошибочное проведение счёта на оплату или подписанного договора аренды как готового «Поступления услуг» в день подписания договора.',
+      ],
+    };
+  }
+
+  // 8f. Учётная политика / кассовая дисциплина (без бухгалтерских проводок)
+  if (op.category === 'policy_event') {
+    return {
+      accountingMeaning: `Организационно-распорядительное событие («${op.description}»). Настройка учётной политики или утверждение лимита остатка кассы задаёт правила работы алгоритмов 1С:БП 3.0 (способ оценки МПЗ, метод директ-костинга для счёта 26, контроль кассового лимита), но бухгалтерских проводок Дт/Кт не формирует.`,
+      whyAmountOrVatRule: 'Нормативный приказ руководителя не является хозяйственной операцией по движению активов — сумма проводки 0,00 ₽.',
+      navigationPath1C: 'Раздел «Главное» → «Настройки» → «Учётная политика» (или «Налоги и отчёты»)',
+      documentOperationKind1C: 'Настройка параметров учёта и учётной политики 1С:БП 3.0',
+      headerFieldsSteps: [
+        { field: 'Применяется с', value: dateRu },
+        { field: 'Организация', value: orgName },
+      ],
+      tabularAndTabsSteps: [
+        {
+          tabName: 'Параметры учётной политики',
+          instruction: 'Проверьте способ оценки МПЗ (По средней / ФИФО), порядок закрытия счёта 26 («Директ-костинг» на 90.08.1) и сохраните настройки.',
+        },
+      ],
+      referencePostings: [
+        {
+          debit: '— (Регистр сведений «Учётная политика»)',
+          credit: '— (Без проводок Дт/Кт)',
+          amountRule: 'Нормативная настройка 1С',
+          purpose: op.description,
+        },
+      ],
+      selfCheckOsv: ['В ОСВ данная строка оборотов не даёт — она управляет автоматическим расчётом последующих документов и «Закрытия месяца».'],
+      commonStudentMistakes: ['Попытка ввести приказ об учётной политике или лимите кассы ручной проводкой.'],
+    };
+  }
+
+  // 8g. Начисление процентного дохода по векселям / ценным бумагам / выданным займам (Дт 76.09 Кт 91.01)
+  if (op.category === 'financial_interest_accrual') {
+    return {
+      accountingMeaning: `Начисление причитающегося процентного дохода (дисконта) по активным финансовым вложениям — процентным векселям, облигациям или предоставленным займам (Дт 76.09 Кт 91.01, ПБУ 19/02 и ПБУ 9/99).`,
+      whyAmountOrVatRule: `Процентный доход по ценным бумагам и займам НЕ облагается НДС (пп. 12, 15 п. 2 ст. 149 НК РФ). В расчёт включаются ТОЛЬКО те ценные бумаги, которые на дату ${dateRu} числятся на балансе (счёт 58.02) и ещё не были погашены или переданы!`,
+      navigationPath1C: 'Раздел «Операции» → «Операции, введённые вручную» → «Создать: Операция»',
+      documentOperationKind1C: 'Операция, введённая вручную (начисление процентов по ценным бумагам)',
+      headerFieldsSteps: [
+        { field: 'От (Дата)', value: dateRu },
+        { field: 'Организация', value: orgName },
+        { field: 'Сумма операции', value: formatMoneyRu(op.amount) },
+      ],
+      tabularAndTabsSteps: [
+        {
+          tabName: 'Табличная часть проводок',
+          instruction: `Укажите Дт 76.09 (Контрагент / Вексель) — Кт 91.01 (Субконто «Прочие доходы и расходы»: Проценты к получению) на сумму ${formatMoneyRu(op.amount)}.`,
+        },
+      ],
+      referencePostings: buildRefPostingsFromEntries(formatMoneyRu(op.amount)),
+      selfCheckOsv: [
+        'Проверьте ОСВ по счёту 76.09 (дебетовое сальдо начисленных процентов) и ОСВ по счёту 91.01 (кредитовый оборот прочих доходов).',
+      ],
+      commonStudentMistakes: [
+        'Ошибочное начисление процентов по уже выбывшему (переданному по индоссаменту или погашенному) векселю.',
+        'Увеличение номинала на счёте 58.02 вместо отражения процентов на счёте 76.09.',
+      ],
+    };
+  }
+
+  // 8h. Выбытие / погашение / передача векселя (индоссамент в оплату поставщику или предъявление к платежу)
+  if (op.category === 'financial_disposal') {
+    return {
+      accountingMeaning: `Выбытие долговой ценной бумаги (векселя третьего лица) со счёта 58.02 (ПБУ 19/02): отражается доход от передачи/погашения векселя (Дт 76.09 Кт 91.01), списывается учётная балансовая стоимость самого векселя (Дт 91.02 Кт 58.02) и закрываются расчёты (взаимозачёт с поставщиком Дт 60.01 Кт 76.09 при индоссаменте либо поступление денег Дт 51 Кт 76.09 при погашении).`,
+      whyAmountOrVatRule: `Реализация и передача векселей третьих лиц в счёт оплаты товаров/работ НЕ облагается НДС (пп. 12 п. 2 ст. 149 НК РФ). После проведения этой операции данный вексель снимается с учёта на счёте 58.02, и по нему прекращается дальнейшее начисление процентов!`,
+      navigationPath1C: 'Раздел «Операции» → «Операции, введённые вручную» → «Создать: Операция»',
+      documentOperationKind1C: 'Операция, введённая вручную (выбытие / индоссамент / погашение векселя)',
+      headerFieldsSteps: [
+        { field: 'От (Дата)', value: dateRu },
+        { field: 'Организация', value: orgName },
+        { field: 'Содержание', value: op.description },
+      ],
+      tabularAndTabsSteps: [
+        {
+          tabName: 'Проводки выбытия ценной бумаги через счёт 91',
+          instruction:
+            'Отразите: 1) Дт 76.09 Кт 91.01 — договорная стоимость передачи/погашения; 2) Дт 91.02 Кт 58.02 — списание первоначальной стоимости конкретного векселя; 3) Дт 60.01 Кт 76.09 (зачёт долга перед поставщиком при индоссаменте) либо Дт 51 Кт 76.09 (поступление денег при погашении).',
+        },
+      ],
+      referencePostings: buildRefPostingsFromEntries(formatMoneyRu(op.amount)),
+      selfCheckOsv: [
+        'Откройте «ОСВ по счёту 58.02»: остаток должен уменьшиться ровно на учётную стоимость выбывшего векселя, а оставшиеся ценные бумаги продолжают числиться на балансе.',
+      ],
+      commonStudentMistakes: [
+        'Прямая проводка Дт 60.01 Кт 58.02 мимо счёта 91 «Прочие доходы и расходы» (по ПБУ 19/02 выбытие векселя третьего лица всегда проходит через счёт 91!).',
+      ],
+    };
+  }
+
+  // 8i. Выдача займа контрагенту (58.03 — 51) и начисление процентов по кредитам/займам (91.02 — 66.04 / 67.04)
+  if (op.category === 'loan_issued' || op.category === 'loan_interest_accrual') {
+    const isIssued = op.category === 'loan_issued';
+    return {
+      accountingMeaning: isIssued
+        ? `Перечисление с расчётного счёта процентного займа заёмщику «${cp}»: формируется финансовое вложение на счёте 58.03 «Предоставленные займы» (Дт 58.03 Кт 51).`
+        : `Начисление процентов к уплате по полученному кредиту или займу (Дт 91.02 Кт 66.04 / 66.02 / 67.04, ПБУ 15/2008).`,
+      whyAmountOrVatRule: 'Выдача тела займа и начисление процентов по займам/кредитам НДС не облагаются (пп. 15 п. 3 ст. 149 НК РФ).',
+      navigationPath1C: isIssued
+        ? 'Раздел «Банк и касса» → «Банковские выписки» → кнопка «Списание» (Вид операции: Выдача займа контрагенту)'
+        : 'Раздел «Операции» → «Операции, введённые вручную» → «Создать: Операция»',
+      documentOperationKind1C: isIssued
+        ? 'Списание с расчётного счёта — Вид операции: «Выдача займа контрагенту» (счёт 58.03)'
+        : 'Операция, введённая вручную (начисление процентов по кредиту/займу)',
+      headerFieldsSteps: [
+        { field: 'От (Дата)', value: dateRu },
+        { field: 'Контрагент', value: cp },
+        { field: 'Сумма', value: formatMoneyRu(op.amount) },
+      ],
+      tabularAndTabsSteps: [
+        {
+          tabName: isIssued ? 'Реквизиты договора займа' : 'Корреспонденция счетов по ПБУ 15/2008',
+          instruction: isIssued
+            ? 'Проверьте Счёт расчётов = 58.03, Договор с видом «Прочее» и флаг «Подтверждено выпиской банка».'
+            : 'Укажите Дт 91.02 (Проценты к уплате) — Кт 66.04 (или 66.02 для банковского кредита). Проценты всегда учитываются обособленно от основного долга!',
+        },
+      ],
+      referencePostings: buildRefPostingsFromEntries(formatMoneyRu(op.amount)),
+      selfCheckOsv: [
+        isIssued
+          ? 'Проверьте ОСВ по счёту 58.03: отражено дебетовое сальдо выданного займа.'
+          : 'Проверьте ОСВ по счёту 66 (субсчёт процентов 66.02 / 66.04 отдельно от тела долга 66.01 / 66.03).',
+      ],
+      commonStudentMistakes: [
+        isIssued
+          ? 'Отражение выданного займа как «Оплаты поставщику» на счёт 60.02 вместо счёта 58.03.'
+          : 'Начисление процентов на тот же субсчёт 66.03, где учитывается основной долг.',
+      ],
+    };
+  }
+
+  // 8j. Выбытие / списание / продажа основного средства через счёт 01.09
+  if (op.category === 'os_disposal') {
+    return {
+      accountingMeaning: `Выбытие (ликвидация или реализация) объекта основных средств «${nom}» через специальный субсчёт 01.09 «Выбытие основных средств» (ФСБУ 6/2020): списывается первоначальная стоимость (Дт 01.09 Кт 01.01), закрывается накопленная амортизация (Дт 02.01 Кт 01.09), а остаточная стоимость переносится в прочие расходы (Дт 91.02 Кт 01.09).`,
+      whyAmountOrVatRule:
+        op.vatAmount > 0
+          ? `При продаже объекта ОС покупателю признаётся прочий доход с НДС (Дт 62.01 Кт 91.01 на ${formatMoneyRu(op.amount)}) и начисляется НДС ${op.vatRate}% (Дт 91.02 Кт 68.02 на ${formatMoneyRu(op.vatAmount)}). Списание самого ОС при ликвидации НДС не облагается.`
+          : 'При ликвидации ОС вследствие износа остаточная стоимость списывается в прочие расходы (Дт 91.02 Кт 01.09) без начисления НДС.',
+      navigationPath1C:
+        op.vatAmount > 0
+          ? 'Раздел «ОС и НМА» → «Выбытие основных средств» → «Передача ОС»'
+          : 'Раздел «ОС и НМА» → «Выбытие основных средств» → «Списание ОС»',
+      documentOperationKind1C: op.vatAmount > 0 ? 'Передача ОС (реализация объекта ОС)' : 'Списание ОС (ликвидация объекта ОС)',
+      headerFieldsSteps: [
+        { field: 'От (Дата)', value: dateRu },
+        { field: 'Основное средство', value: nom },
+        ...(op.vatAmount > 0 ? [{ field: 'Покупатель', value: cp }] : []),
+      ],
+      tabularAndTabsSteps: [
+        {
+          tabName: 'Табличная часть «Основные средства»',
+          instruction: `Выберите инвентарный объект «${nom}» и проведите документ — 1С автоматически рассчитает накопленную амортизацию и закроет субсчёт 01.09 в ноль.`,
+        },
+      ],
+      referencePostings: buildRefPostingsFromEntries(formatMoneyRu(op.amount)),
+      selfCheckOsv: [
+        'Откройте «ОСВ по счёту 01»: конечное сальдо на вспомогательном субсчёте 01.09 обязано стать строго 0,00 ₽!',
+      ],
+      commonStudentMistakes: [
+        'Списание полной первоначальной стоимости напрямую в Дт 91.02 Кт 01.01 без закрытия накопленной амортизации со счёта 02.01 через субсчёт 01.09.',
+      ],
+    };
+  }
+
+  // 8k. Регистрация вычета НДС (Счёт-фактура полученный / Формирование записей книги покупок: Дт 68.02 Кт 19)
+  if (op.category === 'vat_deduction' || op.docType1C === 'СчетФактураПолученный') {
+    return {
+      accountingMeaning: `Принятие к вычету ранее учтённого входного НДС со счёта 19 в уменьшение задолженности перед бюджетом по НДС (Дт 68.02 Кт 19.03 / 19.04 / 19.01, ст. 171–172 НК РФ).`,
+      whyAmountOrVatRule: `Сумма вычета (${formatMoneyRu(op.amount)}) переносится со счёта 19 в дебет 68.02 на основании зарегистрированного счёта-фактуры поставщика «${cp}».`,
+      navigationPath1C: 'Раздел «Операции» → «Регламентные операции НДС» → «Формирование записей книги покупок» (или регистрация СФ в документе поступления)',
+      documentOperationKind1C: 'Счёт-фактура полученный / Формирование записей книги покупок',
+      headerFieldsSteps: [
+        { field: 'От (Дата)', value: dateRu },
+        { field: 'Контрагент', value: cp },
+        { field: 'Сумма НДС к вычету', value: formatMoneyRu(op.amount) },
+      ],
+      tabularAndTabsSteps: [
+        {
+          tabName: 'Книга покупок',
+          instruction: 'Нажмите «Заполнить документ» (или установите флаг «Отразить вычет НДС в книге покупок датой получения» в СФ) и проведите.',
+        },
+      ],
+      referencePostings: buildRefPostingsFromEntries(formatMoneyRu(op.amount)),
+      selfCheckOsv: ['Откройте «ОСВ по счёту 19»: дебетовый остаток по данному поступлению закрылся в 0,00 ₽.'],
+      commonStudentMistakes: ['Повторное принятие к вычету НДС, который уже был списан галочкой в самом документе Поступления.'],
     };
   }
 

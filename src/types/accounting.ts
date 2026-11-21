@@ -267,6 +267,8 @@ export type DocType1CBP30 =
   | 'ВводОстатков';
 
 export type OperationCategory =
+  | 'contract_event'
+  | 'policy_event'
   | 'bank_out'
   | 'bank_in'
   | 'purchase_goods'
@@ -278,6 +280,7 @@ export type OperationCategory =
   | 'materials_writeoff'
   | 'workwear_issue'
   | 'os_commissioning'
+  | 'os_disposal'
   | 'production_output'
   | 'warehouse_transfer'
   | 'cash_bank_internal'
@@ -286,6 +289,8 @@ export type OperationCategory =
   | 'accountable_return'
   | 'loan_received'
   | 'loan_repaid'
+  | 'loan_issued'
+  | 'loan_interest_accrual'
   | 'depreciation_accrual'
   | 'insurance_accrual'
   | 'cash_out'
@@ -299,6 +304,9 @@ export type OperationCategory =
   | 'bank_fee'
   | 'founder_contribution'
   | 'financial_investment'
+  | 'financial_interest_accrual'
+  | 'financial_disposal'
+  | 'vat_deduction'
   | 'penalty_claim'
   | 'advance_offset'
   | 'advance_vat'
@@ -353,7 +361,31 @@ export interface DirectoryPrepStep1C {
     field: string;
     value: string;
   }>;
+  isFormalAutoFilled?: boolean;
+  formalAutoFillNote?: string;
   note?: string;
+}
+
+export interface ResolverSourceLink1C {
+  opId?: string;
+  opNumber?: number;
+  date?: string;
+  label: string;
+}
+
+export interface Step01CalculationBreakdown1C {
+  resolverLevel: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+  resolverLevelName: string;
+  summaryFormula: string;
+  steps: string[];
+  sourceLinks: ResolverSourceLink1C[];
+  checkedSourcesWhenMissing?: string[];
+}
+
+export interface Step02AccountingLogic1C {
+  plainExplanation: string;
+  regulatoryNorms: string[];
+  subcontoArchitecture: string;
 }
 
 export interface OperationMentorGuide1C {
@@ -363,6 +395,8 @@ export interface OperationMentorGuide1C {
   documentOperationKind1C: string;
   directoryPrepSteps?: DirectoryPrepStep1C[];
   step00Prep?: DirectoryPrepStep1C[];
+  step01CalculationBreakdown?: Step01CalculationBreakdown1C;
+  step02AccountingLogic?: Step02AccountingLogic1C;
   headerFieldsSteps: Array<{
     field: string;
     value: string;
@@ -433,6 +467,13 @@ export type CounterpartyResolutionSource =
   | 'manual'
   | 'unresolved';
 
+export interface ParsedFinancialNoteItem1C {
+  index: number;
+  label?: string;
+  principal: number;
+  ratePercent: number;
+}
+
 export interface QueuedOperation {
   id: string;
   rowKey?: string;
@@ -468,6 +509,11 @@ export interface QueuedOperation {
   alimonyRatePercent?: number;
   alimonyShareLabel?: string;
   financialNotesSummary?: string;
+  financialNotesList?: ParsedFinancialNoteItem1C[];
+  disposedFinancialNoteId?: string;
+  periodicPaymentAmount?: number;
+  interestRatePercent?: number;
+  resolverTrace?: Step01CalculationBreakdown1C;
   linkedSourceOpIds?: string[];
   usefulLifeMonths?: number;
   depreciationBaseAmount?: number;
@@ -539,6 +585,7 @@ export interface VirtualCounterparty1C {
   bik: string;
   bankName: string;
   bankAccount: string;
+  isFormalAutoFilled?: boolean;
   source: VirtualEntityOriginSource1C;
   firstSeenOpId?: string;
   firstSeenOpNumber?: number;
@@ -553,6 +600,12 @@ export interface VirtualContract1C {
   date: string;
   counterpartyName: string;
   contractKind: 'СПоставщиком' | 'СПокупателем' | 'Прочее';
+  periodicAmount?: number;
+  periodicity?: 'monthly' | 'quarterly' | 'once';
+  subjectSummary?: string;
+  keywordStems?: string[];
+  vatRule?: 'included' | 'on_top' | 'none';
+  vatRate?: number;
   source: VirtualEntityOriginSource1C;
   firstSeenOpId?: string;
   firstSeenOpNumber?: number;
@@ -601,11 +654,16 @@ export interface VirtualFixedAsset1C {
   key: string;
   name: string;
   initialCost: number;
-  status: 'На счёте 08.04.1 (к вводу)' | 'Введено в эксплуатацию (счёт 01.01)';
+  accumulatedDepreciation?: number;
+  status:
+    | 'На счёте 08.04.1 (к вводу)'
+    | 'Введено в эксплуатацию (счёт 01.01)'
+    | 'Выбыло / списано (счёт 01.09)';
   usefulLifeMonths: number;
   monthlyDepreciation: number;
   receiptDate?: string;
   commissioningDate?: string;
+  disposalDate?: string;
   source: VirtualEntityOriginSource1C;
   firstSeenOpId?: string;
   firstSeenOpNumber?: number;
@@ -636,9 +694,17 @@ export interface VirtualFinancialInvestment1C {
   key: string;
   name: string;
   account: string;
+  paperIndex?: number;
+  principalAmount?: number;
   totalAmount: number;
   notesBreakdown: string;
   interestRatePercent?: number;
+  status?: 'active' | 'disposed';
+  accruedInterestAmount?: number;
+  lastInterestDate?: string;
+  disposedDate?: string;
+  disposedOpId?: string;
+  disposedOpNumber?: number;
   counterpartyName?: string;
   acquisitionDate: string;
   source: VirtualEntityOriginSource1C;
@@ -744,6 +810,31 @@ export interface AutoFixChangeRecord {
     | 'directory_binding'
     | 'duplicate_guard';
   operationId?: string;
+}
+
+export type AutofixRuleId =
+  | 'normalize_date_year'
+  | 'disable_duplicate_doc'
+  | 'reclassify_legacy_doc'
+  | 'resolve_amount_and_links'
+  | 'fill_formal_requisites'
+  | 'replace_group_account'
+  | 'flip_red_settlement_subaccount'
+  | 'generate_cash_withdrawal_cover'
+  | 'offset_advances_60_62'
+  | 'accrue_advance_vat_76av'
+  | 'close_period_accounts';
+
+export interface AutofixExecutionSummary {
+  passesExecuted: number;
+  issuesBefore: number;
+  issuesAfter: number;
+  autofixableBefore: number;
+  remainingAutofixableCount: number;
+  criticalBefore: number;
+  criticalAfter: number;
+  isOsvBalanced: boolean;
+  appliedRules: AutofixRuleId[];
 }
 
 export interface AuditGuide1CBP30 {
@@ -901,6 +992,7 @@ export interface AuditIssue {
   guide1C?: AuditGuide1CBP30;
   accountCode?: string;
   operationId?: string;
+  fixId?: AutofixRuleId;
   canAutoFixBy1C: boolean;
   autoFixActionLabel?: string;
   inlineTarget?: InlineFieldTarget;
@@ -933,5 +1025,6 @@ export interface PersistedWorkbenchStateV2 {
   exportMode: ExportMode1C;
   lastImportStats?: BatchImportCompletenessStats | null;
   autoFixChanges?: AutoFixChangeRecord[];
+  autoFixSummary?: AutofixExecutionSummary | null;
 }
 

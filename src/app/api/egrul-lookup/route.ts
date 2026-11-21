@@ -13,11 +13,27 @@ interface BatchQueryItem {
   inn?: string;
 }
 
+function deriveRegionHint(rawRegion?: string, orgInn?: string, orgBik?: string): string {
+  const cleanReg = (rawRegion ?? '').replace(/\D/g, '');
+  if (cleanReg.length === 2) return cleanReg;
+  const cleanInn = (orgInn ?? '').replace(/\D/g, '');
+  if (cleanInn.length >= 10) return cleanInn.slice(0, 2);
+  const cleanBik = (orgBik ?? '').replace(/\D/g, '');
+  if (cleanBik.startsWith('0440')) return '78';
+  if (cleanBik.startsWith('0445')) return '77';
+  if (cleanBik.startsWith('0465')) return '66';
+  return '78';
+}
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const query = (searchParams.get('query') ?? searchParams.get('name') ?? '').trim();
   const inn = (searchParams.get('inn') ?? '').trim();
-  const regionHint = (searchParams.get('region') ?? '78').trim();
+  const regionHint = deriveRegionHint(
+    searchParams.get('region') ?? undefined,
+    searchParams.get('organizationInn') ?? undefined,
+    searchParams.get('organizationBik') ?? undefined
+  );
 
   if (!query && !inn) {
     return NextResponse.json(
@@ -39,10 +55,16 @@ export async function POST(req: NextRequest) {
       name?: string;
       inn?: string;
       regionHint?: string;
+      organizationInn?: string;
+      organizationBik?: string;
       queries?: BatchQueryItem[];
     };
 
-    const regionHint = (body.regionHint ?? '78').trim();
+    const regionHint = deriveRegionHint(
+      body.regionHint,
+      body.organizationInn,
+      body.organizationBik
+    );
 
     if (Array.isArray(body.queries)) {
       const uniqueItems = body.queries.slice(0, 30);
@@ -67,6 +89,7 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json({
         ok: true,
+        regionHint,
         results,
       });
     }

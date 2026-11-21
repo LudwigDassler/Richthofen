@@ -44,12 +44,14 @@ export function Tab3AuditAutofix() {
     accompanyingActions,
     autoFixLogs,
     autoFixChanges,
+    autoFixSummary,
     isLookingUpEgrul,
     egrulProgress,
     operations,
     db1C,
     reportingYear,
     runSmartAutoFixAll,
+    runAuditIssueAutoFix,
     runClosingAndOffsetsOnly,
     lookupCounterpartiesInEgrul,
     fillAllCounterpartiesAutomatically,
@@ -383,12 +385,8 @@ export function Tab3AuditAutofix() {
             <button
               type="button"
               onClick={runSmartAutoFixAll}
-              disabled={isLookingUpEgrul}
-              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-60 text-white text-xs sm:text-sm font-semibold whitespace-nowrap transition-colors"
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs sm:text-sm font-semibold whitespace-nowrap shrink-0 transition-colors"
             >
-              {isLookingUpEgrul && (
-                <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.6} />
-              )}
               <span>Исправить всё автоматически</span>
               {autoFixableCount > 0 && (
                 <span className="tabular-nums text-xs opacity-95">
@@ -455,6 +453,56 @@ export function Tab3AuditAutofix() {
             </button>
           </div>
         </div>
+
+        {/* Before → After Pipeline Convergence Summary */}
+        {autoFixSummary && (
+          <div className="mt-3.5 pt-3.5 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs tabular-nums text-slate-600 dark:text-slate-300">
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+              <span className="font-semibold text-slate-900 dark:text-slate-100">
+                Сводка конвейера автоисправления (До → После):
+              </span>
+              <span>Проходов: {autoFixSummary.passesExecuted}</span>
+              <span aria-hidden="true">·</span>
+              <span>
+                Замечаний: {autoFixSummary.issuesBefore} →{' '}
+                <strong className="text-emerald-700 dark:text-emerald-400">
+                  {autoFixSummary.issuesAfter}
+                </strong>
+              </span>
+              <span aria-hidden="true">·</span>
+              <span>
+                Критических: {autoFixSummary.criticalBefore} →{' '}
+                <strong className="text-emerald-700 dark:text-emerald-400">
+                  {autoFixSummary.criticalAfter}
+                </strong>
+              </span>
+              <span aria-hidden="true">·</span>
+              <span>
+                Осталось автоисправляемых:{' '}
+                <strong
+                  className={
+                    autoFixSummary.remainingAutofixableCount === 0
+                      ? 'text-emerald-700 dark:text-emerald-400'
+                      : 'text-amber-700 dark:text-amber-400'
+                  }
+                >
+                  {autoFixSummary.remainingAutofixableCount}
+                </strong>
+              </span>
+            </div>
+            <span
+              className={
+                autoFixSummary.isOsvBalanced
+                  ? 'font-medium text-emerald-700 dark:text-emerald-400'
+                  : 'font-medium text-rose-600 dark:text-rose-400'
+              }
+            >
+              {autoFixSummary.isOsvBalanced
+                ? 'Баланс ОСВ (Σ Дт = Σ Кт): сходится'
+                : 'Проверьте баланс ОСВ'}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* One-Click INN/KPP Center & Manual Requisites Block */}
@@ -1079,6 +1127,15 @@ export function Tab3AuditAutofix() {
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2 shrink-0 pl-6 lg:pl-0">
+                      {issue.canAutoFixBy1C && (
+                        <button
+                          type="button"
+                          onClick={() => runAuditIssueAutoFix(issue)}
+                          className="inline-flex items-center justify-center px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium whitespace-nowrap shrink-0 transition-colors"
+                        >
+                          {issue.autoFixActionLabel || 'Исправить'}
+                        </button>
+                      )}
                       {diagTarget && (
                         <>
                           <input
@@ -1093,7 +1150,7 @@ export function Tab3AuditAutofix() {
                               }
                             }}
                             placeholder={diagTarget.placeholder}
-                            className="w-44 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 tabular-nums text-xs focus:outline-none focus:border-amber-600"
+                            className="w-44 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 tabular-nums text-xs focus:outline-none focus:border-amber-600"
                           />
                           <button
                             type="button"
@@ -1101,7 +1158,7 @@ export function Tab3AuditAutofix() {
                             onClick={() =>
                               commitTargetValue(diagKey, diagTarget, diagTarget.currentValue)
                             }
-                            className="px-3 py-1.5 rounded-xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-950 disabled:opacity-40 text-xs font-medium"
+                            className="px-3 py-1.5 rounded-xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-950 disabled:opacity-40 text-xs font-medium whitespace-nowrap shrink-0"
                           >
                             Сохранить
                           </button>
@@ -1111,7 +1168,7 @@ export function Tab3AuditAutofix() {
                         <button
                           type="button"
                           onClick={() => jumpToOperation(issue.operationId!)}
-                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 whitespace-nowrap transition-colors"
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 whitespace-nowrap shrink-0 transition-colors"
                         >
                           К операции
                           <ExternalLink className="w-3 h-3" strokeWidth={1.6} />

@@ -116,7 +116,9 @@ function deriveReadinessStatus(op: QueuedOperation): OperationReadinessStatus {
     op.category === 'hr_hire' ||
     op.docType1C === 'ПриемНаРаботу' ||
     op.category === 'writ_of_execution' ||
-    op.docType1C === 'ИсполнительныйЛист'
+    op.docType1C === 'ИсполнительныйЛист' ||
+    op.category === 'contract_event' ||
+    op.category === 'policy_event'
   ) {
     return 'ready';
   }
@@ -871,6 +873,8 @@ function OperationEditorCard({
   const isHireOrder = op.category === 'hr_hire' || op.docType1C === 'ПриемНаРаботу';
   const isWritOfExecution =
     op.category === 'writ_of_execution' || op.docType1C === 'ИсполнительныйЛист';
+  const isContractEvent = op.category === 'contract_event';
+  const isPolicyEvent = op.category === 'policy_event';
   const isPayrollAccrual =
     op.category === 'payroll_accrual' ||
     op.category === 'insurance_accrual' ||
@@ -883,6 +887,8 @@ function OperationEditorCard({
   const isCriticalMissingAmount =
     !isHireOrder &&
     !isWritOfExecution &&
+    !isContractEvent &&
+    !isPolicyEvent &&
     !isPayrollAccrual &&
     (op.amountMode === 'required_missing' ||
       (Boolean(op.needsAmount) && op.amountMode !== 'calculated_by_1c'));
@@ -932,6 +938,14 @@ function OperationEditorCard({
     if (isWritOfExecution) {
       return `Исп. лист · ${op.alimonyShareLabel || `${op.alimonyRatePercent ?? 25}%`}`;
     }
+    if (isContractEvent) {
+      return op.periodicPaymentAmount && op.periodicPaymentAmount > 0
+        ? `Договор · ${formatMoney(op.periodicPaymentAmount, true)} ₽`
+        : 'Регистрация договора';
+    }
+    if (isPolicyEvent) {
+      return 'Управленческое событие';
+    }
     if (op.entries.length === 0) return '0 проводок';
     const first = op.entries[0];
     const base = first.isOffBalance
@@ -941,10 +955,13 @@ function OperationEditorCard({
   }, [
     op.entries,
     op.monthlySalary,
+    op.periodicPaymentAmount,
     op.alimonyShareLabel,
     op.alimonyRatePercent,
     isHireOrder,
     isWritOfExecution,
+    isContractEvent,
+    isPolicyEvent,
   ]);
 
   const entityDisplaySummary = useMemo(() => {
@@ -1119,11 +1136,17 @@ function OperationEditorCard({
                 : 'приказ'
               : isWritOfExecution
                 ? op.alimonyShareLabel || `${op.alimonyRatePercent ?? 25}%`
-                : op.amount >= 0.01
-                  ? `${formatMoney(op.amount, true)} ₽`
-                  : op.amountMode === 'calculated_by_1c'
-                    ? 'авто 1С'
-                    : '0,00 ₽'}
+                : isContractEvent
+                  ? op.periodicPaymentAmount
+                    ? `${formatMoney(op.periodicPaymentAmount, true)} ₽/пер`
+                    : 'договор'
+                  : isPolicyEvent
+                    ? 'без проводок'
+                    : op.amount >= 0.01
+                      ? `${formatMoney(op.amount, true)} ₽`
+                      : op.amountMode === 'calculated_by_1c'
+                        ? 'авто 1С'
+                        : '0,00 ₽'}
           </span>
 
           {/* Soft rounded-full status pill */}
@@ -3053,19 +3076,19 @@ function OperationEditorCard({
             </button>
 
             {isGuideOpen && (
-              <div className="px-4 py-4 border-t border-slate-100 dark:border-slate-800/80 bg-slate-50/50 dark:bg-slate-950/40 rounded-b-2xl space-y-3.5 text-xs">
-                {/* STEP 00: CHRONOLOGICAL 1C DIRECTORY PREPARATION */}
-                {mentorGuide.step00Prep && mentorGuide.step00Prep.length > 0 && (
-                  <div className="pb-3.5 border-b border-slate-200/70 dark:border-slate-800 space-y-2">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="text-[11px] font-semibold text-slate-700 dark:text-slate-200">
-                        00. Подготовка справочников (кнопка «Создать» в 1С:БП 3.0)
-                      </div>
-                      <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                        Проверено по хронологическому сгустку данных до операции #{index}
-                      </span>
+              <div className="px-4 py-4 border-t border-slate-100 dark:border-slate-800/80 bg-slate-50/50 dark:bg-slate-950/40 rounded-b-2xl space-y-4 text-xs">
+                {/* 00. Подготовка справочников (кнопка «Создать» в 1С:БП 3.0) */}
+                <div className="pb-3.5 border-b border-slate-200/70 dark:border-slate-800 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-[11px] font-semibold text-slate-800 dark:text-slate-100">
+                      00. Подготовка справочников (кнопка «Создать» в 1С:БП 3.0)
                     </div>
+                    <span className="text-[11px] tabular-nums text-slate-500 dark:text-slate-400">
+                      Хронологический контур базы 1С до операции #{index}
+                    </span>
+                  </div>
 
+                  {mentorGuide.step00Prep && mentorGuide.step00Prep.length > 0 ? (
                     <div className="divide-y divide-slate-200/80 dark:divide-slate-800 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
                       {mentorGuide.step00Prep.map((step) => {
                         const isCreateNew = step.status === 'create_new';
@@ -3097,12 +3120,19 @@ function OperationEditorCard({
                                 <button
                                   type="button"
                                   onClick={() => onJumpToOperation(step.firstSeenOpId!)}
-                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-[11px] font-medium tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap transition-colors"
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-[11px] font-medium tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap shrink-0 transition-colors"
                                 >
-                                  Операция #{step.firstSeenOpNumber ?? 1} →
+                                  #{step.firstSeenOpNumber ?? 1} →
                                 </button>
                               )}
                             </div>
+
+                            {step.isFormalAutoFilled && (
+                              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                                {step.formalAutoFillNote ||
+                                  'Формальный реквизит, подобран автоматически (на ОСВ не влияет)'}
+                              </div>
+                            )}
 
                             {isCreateNew ? (
                               <div className="space-y-1.5">
@@ -3137,149 +3167,260 @@ function OperationEditorCard({
                               </div>
                             ) : (
                               <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                                Повторно нажимать «Создать» не нужно — выберите существующий элемент в поле документа из справочника ({step.menuPath1C}).
+                                Повторно нажимать «Создать» не нужно — выберите существующий элемент из справочника ({step.menuPath1C}).
                               </div>
                             )}
                           </div>
                         );
                       })}
                     </div>
-                  </div>
-                )}
-
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 pb-3 border-b border-slate-200/70 dark:border-slate-800">
-                  <div className="lg:col-span-7 space-y-1.5">
-                    <div className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
-                      01. Бухгалтерский смысл операции (РСБУ / ФСБУ)
+                  ) : (
+                    <div className="rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-2 text-[11px] text-slate-600 dark:text-slate-400">
+                      Новые элементы справочников создавать не требуется — используются системные счета и аналитика существующей базы 1С.
                     </div>
+                  )}
+                </div>
+
+                {/* 01. Откуда взялась каждая цифра (разбор для защиты) */}
+                <div className="pb-3.5 border-b border-slate-200/70 dark:border-slate-800 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-[11px] font-semibold text-slate-800 dark:text-slate-100">
+                      01. Откуда взялась каждая цифра (разбор для защиты)
+                    </div>
+                    {mentorGuide.step01CalculationBreakdown && (
+                      <span className="text-[11px] tabular-nums text-slate-500 dark:text-slate-400">
+                        Уровень вывода L{mentorGuide.step01CalculationBreakdown.resolverLevel}:{' '}
+                        {mentorGuide.step01CalculationBreakdown.resolverLevelName}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 space-y-2">
+                    {mentorGuide.step01CalculationBreakdown ? (
+                      <>
+                        <div className="font-semibold tabular-nums text-slate-900 dark:text-slate-100">
+                          {mentorGuide.step01CalculationBreakdown.summaryFormula}
+                        </div>
+
+                        {mentorGuide.step01CalculationBreakdown.steps.length > 0 && (
+                          <ul className="space-y-1 text-[11px] tabular-nums text-slate-700 dark:text-slate-300">
+                            {mentorGuide.step01CalculationBreakdown.steps.map((line, sIdx) => (
+                              <li key={sIdx} className="leading-relaxed">
+                                — {line}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+
+                        {mentorGuide.step01CalculationBreakdown.sourceLinks.length > 0 && (
+                          <div className="pt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
+                            <span className="text-slate-500 dark:text-slate-400">
+                              Источники расчёта:
+                            </span>
+                            {mentorGuide.step01CalculationBreakdown.sourceLinks.map(
+                              (lnk, lIdx) =>
+                                lnk.opId ? (
+                                  <button
+                                    key={`${lnk.opId}-${lIdx}`}
+                                    type="button"
+                                    onClick={() => onJumpToOperation(lnk.opId!)}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 font-medium tabular-nums text-slate-800 dark:text-slate-200 whitespace-nowrap shrink-0 transition-colors"
+                                  >
+                                    #{lnk.opNumber ?? '•'} · {lnk.label} →
+                                  </button>
+                                ) : (
+                                  <span
+                                    key={lIdx}
+                                    className="tabular-nums text-slate-600 dark:text-slate-300"
+                                  >
+                                    {lIdx > 0 ? '· ' : ''}
+                                    {lnk.label}
+                                  </span>
+                                )
+                            )}
+                          </div>
+                        )}
+
+                        {mentorGuide.step01CalculationBreakdown.checkedSourcesWhenMissing &&
+                          mentorGuide.step01CalculationBreakdown.checkedSourcesWhenMissing.length >
+                            0 && (
+                            <div className="pt-1.5 border-t border-slate-100 dark:border-slate-800 space-y-1 text-[11px] text-slate-600 dark:text-slate-400">
+                              <div className="font-medium text-slate-700 dark:text-slate-300">
+                                Проверенные источники контура задания (1–7):
+                              </div>
+                              <ul className="space-y-0.5">
+                                {mentorGuide.step01CalculationBreakdown.checkedSourcesWhenMissing.map(
+                                  (src, idx) => (
+                                    <li key={idx}>— {src}</li>
+                                  )
+                                )}
+                              </ul>
+                            </div>
+                          )}
+                      </>
+                    ) : (
+                      <div className="text-[11px] tabular-nums text-slate-700 dark:text-slate-300">
+                        {provenanceText || mentorGuide.whyAmountOrVatRule}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* 02. Бухгалтерская и налоговая логика (РСБУ / НК РФ) */}
+                <div className="pb-3.5 border-b border-slate-200/70 dark:border-slate-800 space-y-2">
+                  <div className="text-[11px] font-semibold text-slate-800 dark:text-slate-100">
+                    02. Бухгалтерская и налоговая логика (РСБУ / НК РФ)
+                  </div>
+                  <div className="rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 space-y-2">
                     <p className="text-slate-900 dark:text-slate-100 leading-relaxed">
-                      {mentorGuide.accountingMeaning}
+                      {mentorGuide.step02AccountingLogic?.plainExplanation ||
+                        mentorGuide.accountingMeaning}
                     </p>
                     <p className="text-sky-800 dark:text-sky-300 leading-relaxed">
                       <strong className="font-semibold">Правило суммы и НДС: </strong>
                       {mentorGuide.whyAmountOrVatRule}
                     </p>
-                  </div>
-
-                  <div className="lg:col-span-5 space-y-1.5">
-                    <div className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
-                      02. Где создать документ в 1С:БП 3.0
-                    </div>
-                    <div className="rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 space-y-1.5">
-                      <div>
-                        <span className="text-slate-500 dark:text-slate-400">Путь в меню: </span>
-                        <span className="font-semibold text-slate-900 dark:text-slate-100">
-                          {mentorGuide.navigationPath1C}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-slate-500 dark:text-slate-400">Документ: </span>
-                        <span className="text-amber-800 dark:text-amber-300 font-medium">
-                          {mentorGuide.documentOperationKind1C}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5 pb-3 border-b border-slate-200/70 dark:border-slate-800">
-                  <div className="space-y-1.5">
-                    <div className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
-                      03. Заполнение шапки документа
-                    </div>
-                    <div className="divide-y divide-slate-200/70 dark:divide-slate-800 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900">
-                      {mentorGuide.headerFieldsSteps.map((hf, idx) => (
-                        <div
-                          key={idx}
-                          className="px-3 py-2 flex flex-col sm:flex-row sm:items-baseline justify-between gap-1"
-                        >
-                          <span className="text-slate-500 dark:text-slate-400 shrink-0">
-                            {hf.field}
+                    {mentorGuide.step02AccountingLogic && (
+                      <div className="pt-1.5 border-t border-slate-100 dark:border-slate-800 grid grid-cols-1 lg:grid-cols-2 gap-2 text-[11px]">
+                        <div>
+                          <span className="text-slate-500 dark:text-slate-400">
+                            Нормативная база:{' '}
                           </span>
-                          <div className="sm:text-right min-w-0">
-                            <span className="font-medium tabular-nums text-slate-900 dark:text-slate-100">
-                              {hf.value}
-                            </span>
-                            {hf.hint && (
-                              <div className="text-[10px] text-slate-500 dark:text-slate-400">
-                                {hf.hint}
-                              </div>
-                            )}
-                          </div>
+                          <span className="font-medium text-slate-800 dark:text-slate-200">
+                            {mentorGuide.step02AccountingLogic.regulatoryNorms.join(' · ')}
+                          </span>
                         </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <div className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
-                      04. Табличные части и вкладки
-                    </div>
-                    <div className="divide-y divide-slate-200/70 dark:divide-slate-800 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900">
-                      {mentorGuide.tabularAndTabsSteps.map((tf, idx) => (
-                        <div key={idx} className="px-3 py-2 space-y-0.5">
-                          <div className="text-[11px] font-semibold text-amber-800 dark:text-amber-300">
-                            {tf.tabName}
-                          </div>
-                          <div className="text-slate-700 dark:text-slate-300 leading-snug">
-                            {tf.instruction}
-                          </div>
+                        <div>
+                          <span className="text-slate-500 dark:text-slate-400">
+                            Субконто и регистры:{' '}
+                          </span>
+                          <span className="text-slate-700 dark:text-slate-300">
+                            {mentorGuide.step02AccountingLogic.subcontoArchitecture}
+                          </span>
                         </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5">
-                  <div className="lg:col-span-6 space-y-1.5">
-                    <div className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
-                      05. Эталонные проводки по кнопке «Дт/Кт»
-                    </div>
-                    <div className="divide-y divide-slate-200/70 dark:divide-slate-800 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900">
-                      {mentorGuide.referencePostings.map((rp, i) => (
-                        <div key={i} className="px-3 py-2 space-y-0.5">
-                          <div className="flex flex-wrap items-center justify-between gap-2 tabular-nums text-[11px]">
-                            <span className="font-semibold text-slate-900 dark:text-slate-100">
-                              Дт {rp.debit}{' '}
-                              {rp.isOffBalance ? '· забаланс' : `→ Кт ${rp.credit}`}
-                            </span>
-                            <span className="text-emerald-700 dark:text-emerald-400">
-                              {rp.amountRule}
-                            </span>
-                          </div>
-                          <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                            {rp.purpose}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="lg:col-span-6 space-y-1.5">
-                    <div className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
-                      06. Самопроверка по ОСВ и частые ошибки на защите
-                    </div>
-                    <ul className="space-y-1 text-[11px] text-emerald-800 dark:text-emerald-300">
-                      {mentorGuide.selfCheckOsv.map((chk, i) => (
-                        <li key={i} className="leading-snug">
-                          — {chk}
-                        </li>
-                      ))}
-                    </ul>
-                    {mentorGuide.commonStudentMistakes.length > 0 && (
-                      <div className="pt-1 space-y-0.5 text-[11px] text-slate-600 dark:text-slate-400">
-                        <div className="font-semibold text-slate-700 dark:text-slate-300">
-                          Частые ошибки студентов:
-                        </div>
-                        <ul className="space-y-0.5">
-                          {mentorGuide.commonStudentMistakes.map((warn, i) => (
-                            <li key={i} className="leading-snug">
-                              — {warn}
-                            </li>
-                          ))}
-                        </ul>
                       </div>
                     )}
+                  </div>
+                </div>
+
+                {/* 03. Пошаговое заполнение в 1С:БП 3.0 */}
+                <div className="pb-3.5 border-b border-slate-200/70 dark:border-slate-800 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-[11px] font-semibold text-slate-800 dark:text-slate-100">
+                      03. Пошаговое заполнение в 1С:БП 3.0
+                    </div>
+                    <div className="text-[11px] text-slate-600 dark:text-slate-300">
+                      <span className="text-slate-500 dark:text-slate-400">Меню: </span>
+                      <span className="font-semibold text-slate-900 dark:text-slate-100">
+                        {mentorGuide.navigationPath1C}
+                      </span>
+                      <span aria-hidden="true"> · </span>
+                      <span className="text-amber-800 dark:text-amber-300 font-medium">
+                        {mentorGuide.documentOperationKind1C}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5">
+                    <div className="space-y-1">
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                        Реквизиты шапки документа
+                      </div>
+                      <div className="divide-y divide-slate-200/70 dark:divide-slate-800 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900">
+                        {mentorGuide.headerFieldsSteps.map((hf, idx) => (
+                          <div
+                            key={idx}
+                            className="px-3 py-2 flex flex-col sm:flex-row sm:items-baseline justify-between gap-1"
+                          >
+                            <span className="text-slate-500 dark:text-slate-400 shrink-0">
+                              {hf.field}
+                            </span>
+                            <div className="sm:text-right min-w-0">
+                              <span className="font-medium tabular-nums text-slate-900 dark:text-slate-100">
+                                {hf.value}
+                              </span>
+                              {hf.hint && (
+                                <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                                  {hf.hint}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                        Табличные части, счета учёта и проведение
+                      </div>
+                      <div className="divide-y divide-slate-200/70 dark:divide-slate-800 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900">
+                        {mentorGuide.tabularAndTabsSteps.map((tf, idx) => (
+                          <div key={idx} className="px-3 py-2 space-y-0.5">
+                            <div className="text-[11px] font-semibold text-amber-800 dark:text-amber-300">
+                              {tf.tabName}
+                            </div>
+                            <div className="text-slate-700 dark:text-slate-300 leading-snug">
+                              {tf.instruction}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 04. Эталонные проводки (Дт/Кт) и проверка по ОСВ */}
+                <div className="space-y-2">
+                  <div className="text-[11px] font-semibold text-slate-800 dark:text-slate-100">
+                    04. Эталонные проводки (Дт/Кт) и проверка по ОСВ
+                  </div>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5">
+                    <div className="lg:col-span-6">
+                      <div className="divide-y divide-slate-200/70 dark:divide-slate-800 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900">
+                        {mentorGuide.referencePostings.map((rp, i) => (
+                          <div key={i} className="px-3 py-2 space-y-0.5">
+                            <div className="flex flex-wrap items-center justify-between gap-2 tabular-nums text-[11px]">
+                              <span className="font-semibold text-slate-900 dark:text-slate-100">
+                                Дт {rp.debit}{' '}
+                                {rp.isOffBalance ? '· забаланс' : `→ Кт ${rp.credit}`}
+                              </span>
+                              <span className="text-emerald-700 dark:text-emerald-400">
+                                {rp.amountRule}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                              {rp.purpose}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="lg:col-span-6 space-y-2">
+                      <ul className="space-y-1 text-[11px] text-emerald-800 dark:text-emerald-300">
+                        {mentorGuide.selfCheckOsv.map((chk, i) => (
+                          <li key={i} className="leading-snug">
+                            — {chk}
+                          </li>
+                        ))}
+                      </ul>
+                      {mentorGuide.commonStudentMistakes.length > 0 && (
+                        <div className="pt-1 space-y-0.5 text-[11px] text-slate-600 dark:text-slate-400">
+                          <div className="font-semibold text-slate-700 dark:text-slate-300">
+                            Частые вопросы на защите и типовые ошибки:
+                          </div>
+                          <ul className="space-y-0.5">
+                            {mentorGuide.commonStudentMistakes.map((warn, i) => (
+                              <li key={i} className="leading-snug">
+                                — {warn}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>

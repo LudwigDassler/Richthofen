@@ -3,6 +3,7 @@ import {
   DEFAULT_SBERBANK_BIK,
   DEFAULT_SBERBANK_NAME,
   DirectoryPrepStep1C,
+  ParsedFinancialNoteItem1C,
   QueuedOperation,
   Virtual1CStateSnapshot,
   VirtualContract1C,
@@ -256,13 +257,147 @@ export function extractKeywordStems1C(text: string): string[] {
   return Array.from(stems);
 }
 
-function stemsMatch(stemA: string, stemB: string): boolean {
+export function stemsMatch1C(stemA: string, stemB: string): boolean {
   if (stemA === stemB) return true;
   const minLen = Math.min(stemA.length, stemB.length);
   if (minLen >= 4 && (stemA.startsWith(stemB) || stemB.startsWith(stemA))) {
     return true;
   }
   return false;
+}
+
+const stemsMatch = stemsMatch1C;
+
+function parseFlexRuNumber(raw: string): number {
+  const cleaned = raw.replace(/[\s\u00A0\u202F]/g, '').replace(',', '.');
+  const val = Number(cleaned);
+  return Number.isFinite(val) ? round2(val) : 0;
+}
+
+/**
+ * Extracts multiple securities / promissory notes from a single row description:
+ * e.g. "Куплены ценные бумаги: первый вексель стоимостью 280 000 руб. под 13% годовых, второй — 540 000 руб. под 11% годовых"
+ */
+export function extractFinancialNotesFromText1C(text: string): ParsedFinancialNoteItem1C[] {
+  const clean = (text ?? '').replace(/\u00A0/g, ' ');
+  if (!/вексел|облигац|ценн\p{L}*\s+бумаг/iu.test(clean)) return [];
+
+  const notes: ParsedFinancialNoteItem1C[] = [];
+  // Match pair patterns: "<amount> (руб)? ... под/по ставке <rate>%"
+  const pairRe =
+    /((?:\d{1,3}(?:[\s\u202F]\d{3})+|\d{4,})(?:[.,]\d{1,2})?)\s*(?:руб\.?|₽|р\.?)?[^%.;\n]{0,45}?(?:под|ставк\p{L}*|доходност\p{L}*)\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*%/giu;
+  let m: RegExpExecArray | null;
+  while ((m = pairRe.exec(clean)) !== null) {
+    const principal = parseFlexRuNumber(m[1]);
+    const ratePercent = parseFlexRuNumber(m[2]);
+    if (principal >= 1000 && ratePercent > 0 && ratePercent <= 100) {
+      notes.push({
+        index: notes.length + 1,
+        label: `Вексель №${notes.length + 1}`,
+        principal,
+        ratePercent,
+      });
+    }
+  }
+
+  if (notes.length > 0) return notes;
+
+  // Fallback: single amount + single rate in note/bond text
+  const rateMatch = clean.match(/(?:под|ставк\p{L}*)\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*%/iu);
+  const amtMatches = Array.from(
+    clean.matchAll(/((?:\d{1,3}(?:[\s\u202F]\d{3})+|\d{4,})(?:[.,]\d{1,2})?)\s*(?:руб\.?|₽|р\.?)/giu)
+  );
+  if (amtMatches.length >= 1) {
+    const rate = rateMatch ? parseFlexRuNumber(rateMatch[1]) : 0;
+    amtMatches.forEach((am, idx) => {
+      const principal = parseFlexRuNumber(am[1]);
+      if (principal >= 1000) {
+        notes.push({
+          index: idx + 1,
+          label: `Вексель №${idx + 1}`,
+          principal,
+          ratePercent: rate,
+        });
+      }
+    });
+  }
+
+  return notes;
+}
+
+/**
+ * Extracts recurring periodic fee from a contract signing / management row:
+ * e.g. "Заключен договор аренды с ООО БизнесЦентр с ежемесячной платой 60 000 руб., в т.ч. НДС 20%"
+ */
+export function extractRecurringContractTerms1C(text: string): {
+  periodicAmount: number;
+  periodicity: 'monthly' | 'quarterly' | 'once';
+  vatRule: 'included' | 'on_top' | 'none';
+  vatRate: number;
+} | null {
+  const clean = (text ?? '').replace(/\u00A0/g, ' ');
+  const m = clean.match(
+    /(?:ежемесячн\p{L}*|абонентск\p{L}*|арендн\p{L}*\s+плат\p{L}*|в\s+месяц|ежеквартальн\p{L}*)[^0-9]{0,35}?((?:\d{1,3}(?:[\s\u202F]\d{3})+|\d{3,})(?:[.,]\d{1,2})?)\s*(?:руб\.?|₽|р\.?)?/iu
+  );
+  const fallbackM = !m
+    ? clean.match(
+        /(?:плат\p{L}*|сумм\p{L}*|стоимост\p{L}*)[^0-9]{0,25}?((?:\d{1,3}(?:[\s\u202F]\d{3})+|\d{4,})(?:[.,]\d{1,2})?)\s*(?:руб\.?|₽|р\.?)/iu
+      )
+    : null;
+  const chosen = m || fallbackM;
+  if (!chosen) return null;
+  const amt = parseFlexRuNumber(chosen[1]);
+  if (amt < 100) return null;
+
+  const isQuarterly = /ежеквартальн|в\s+квартал/iu.test(clean);
+  const isNoVat = /без\s+ндс|ндс\s+не\s+облаг/iu.test(clean);
+  const isOnTop = /(?:плюс|\+)\s*ндс|по\s+цене\s+без\s+ндс|сверх\p{L}*\s+ндс/iu.test(clean);
+  return {
+    periodicAmount: amt,
+    periodicity: isQuarterly ? 'quarterly' : 'monthly',
+    vatRule: isNoVat ? 'none' : isOnTop ? 'on_top' : 'included',
+    vatRate: isNoVat ? 0 : 20,
+  };
+}
+
+/**
+ * Finds which active promissory note is being disposed/endorsed/redeemed in `text`.
+ */
+export function matchTargetActiveFinancialNote1C(
+  state: Virtual1CStateSnapshot,
+  text: string
+): VirtualFinancialInvestment1C | null {
+  const activeNotes = state.financialInvestments.filter(
+    (f) => f.account === '58.02' && f.status !== 'disposed' && (f.principalAmount ?? f.totalAmount) >= 0.01
+  );
+  if (activeNotes.length === 0) return null;
+
+  const lower = (text ?? '').toLowerCase().replace(/ё/g, 'е');
+  if (/перв\p{L}*\s+вексел|вексел\p{L}*\s*№?\s*1\b/iu.test(lower)) {
+    return activeNotes.find((n) => n.paperIndex === 1) || activeNotes[0];
+  }
+  if (/втор\p{L}*\s+вексел|вексел\p{L}*\s*№?\s*2\b/iu.test(lower)) {
+    return activeNotes.find((n) => n.paperIndex === 2) || activeNotes[1] || activeNotes[0];
+  }
+  if (/трет\p{L}*\s+вексел|вексел\p{L}*\s*№?\s*3\b/iu.test(lower)) {
+    return activeNotes.find((n) => n.paperIndex === 3) || activeNotes[2] || activeNotes[0];
+  }
+
+  // Match by nominal amount or rate mentioned in text
+  for (const note of activeNotes) {
+    const nominal = note.principalAmount ?? note.totalAmount;
+    const rate = note.interestRatePercent ?? 0;
+    const nominalSpaced = Math.round(nominal).toLocaleString('ru-RU').replace(/\u00A0/g, ' ');
+    if (
+      lower.includes(String(Math.round(nominal))) ||
+      lower.includes(nominalSpaced) ||
+      (rate > 0 && new RegExp(`\\b${rate}\\s*%`).test(lower))
+    ) {
+      return note;
+    }
+  }
+
+  return activeNotes[0];
 }
 
 function addUsageRef(
@@ -392,7 +527,11 @@ export function inferNomenclatureCatalogMeta1C(
 export function cloneVirtual1CState(state: Virtual1CStateSnapshot): Virtual1CStateSnapshot {
   return {
     counterparties: state.counterparties.map((c) => ({ ...c, usages: [...c.usages] })),
-    contracts: state.contracts.map((c) => ({ ...c, usages: [...c.usages] })),
+    contracts: state.contracts.map((c) => ({
+      ...c,
+      keywordStems: c.keywordStems ? [...c.keywordStems] : undefined,
+      usages: [...c.usages],
+    })),
     nomenclature: state.nomenclature.map((n) => ({ ...n, usages: [...n.usages] })),
     employees: state.employees.map((e) => ({ ...e, usages: [...e.usages] })),
     fixedAssets: state.fixedAssets.map((a) => ({ ...a, usages: [...a.usages] })),
@@ -559,7 +698,12 @@ export function createInitialVirtual1CState(
           key,
           name: label,
           account: acc === '58' ? '58.02' : acc,
+          paperIndex: state.financialInvestments.length + 1,
+          principalAmount: debitBal,
           totalAmount: debitBal,
+          status: 'active',
+          accruedInterestAmount: 0,
+          lastInterestDate: db1C.periodStart || '',
           notesBreakdown: `${label}: ${debitBal.toLocaleString('ru-RU')} ₽`,
           acquisitionDate: db1C.periodStart || '',
           source: 'from_1c_base',
@@ -568,20 +712,40 @@ export function createInitialVirtual1CState(
       }
     }
 
-    if (acc === '60.01' && creditBal >= 0.01 && sub) {
+    if ((acc === '60.01' || acc === '62.02') && creditBal >= 0.01 && sub) {
       const matchedCp = state.counterparties.find(
         (c) => normalizeCounterpartyKey1C(c.name) === normalizeCounterpartyKey1C(sub)
       );
       state.openSettlements.push({
-        id: `db-6001-${state.openSettlements.length + 1}`,
-        account: '60.01',
+        id: `db-${acc}-${state.openSettlements.length + 1}`,
+        account: acc,
         counterpartyName: matchedCp?.name || sub,
         counterpartyInn: matchedCp?.inn || '',
         counterpartyKpp: matchedCp?.kpp || '',
         contractName: 'Основной договор',
         originalAmount: creditBal,
         remainingAmount: creditBal,
-        subjectSummary: `Входящий остаток 60.01 из базы 1С (${sub})`,
+        subjectSummary: `Входящий остаток ${acc} из базы 1С (${sub})`,
+        keywordStems: extractKeywordStems1C(sub),
+        source: 'from_1c_base',
+        originDate: db1C.periodStart || '',
+      });
+    }
+
+    if ((acc === '60.02' || acc === '62.01') && debitBal >= 0.01 && sub) {
+      const matchedCp = state.counterparties.find(
+        (c) => normalizeCounterpartyKey1C(c.name) === normalizeCounterpartyKey1C(sub)
+      );
+      state.openSettlements.push({
+        id: `db-${acc}-${state.openSettlements.length + 1}`,
+        account: acc,
+        counterpartyName: matchedCp?.name || sub,
+        counterpartyInn: matchedCp?.inn || '',
+        counterpartyKpp: matchedCp?.kpp || '',
+        contractName: 'Основной договор',
+        originalAmount: debitBal,
+        remainingAmount: debitBal,
+        subjectSummary: `Входящий остаток ${acc} из базы 1С (${sub})`,
         keywordStems: extractKeywordStems1C(sub),
         source: 'from_1c_base',
         originDate: db1C.periodStart || '',
@@ -1001,6 +1165,9 @@ export function advanceVirtual1CStateWithOperation(
           existingCp.bankAccount = op.counterpartyBankAccount;
         }
         if (!existingCp.roleHint) existingCp.roleHint = roleHint;
+        if (op.counterpartySource === 'educational_generated') {
+          existingCp.isFormalAutoFilled = true;
+        }
         existingCp.usages = addUsageRef(existingCp.usages, usageRef);
       } else {
         state.counterparties.push({
@@ -1014,6 +1181,7 @@ export function advanceVirtual1CStateWithOperation(
           bik: op.counterpartyBik || DEFAULT_SBERBANK_BIK,
           bankName: op.counterpartyBankName || DEFAULT_SBERBANK_NAME,
           bankAccount: isMultiCp ? '' : op.counterpartyBankAccount || '',
+          isFormalAutoFilled: op.counterpartySource === 'educational_generated',
           source: 'created_in_operation',
           firstSeenOpId: op.id,
           firstSeenOpNumber: opNumber,
@@ -1026,46 +1194,68 @@ export function advanceVirtual1CStateWithOperation(
     const cpNorm = normalizeCounterpartyKey1C(cpParts[0] || op.counterpartyName.trim());
     const cpName = cpParts[0] || op.counterpartyName.trim();
 
-    // 2. Register / update Contract for commercial counterparty
+    // 2. Register / update Contract for commercial counterparty (including contract_event recurring terms!)
     if (
-      op.contractName &&
-      op.contractName.trim() &&
-      ![
-        'founder_contribution',
-        'tax_payment',
-        'bank_fee',
-        'cash_bank_internal',
-        'accountable_issue',
-        'expense_report',
-        'accountable_return',
-      ].includes(op.category)
+      (op.contractName && op.contractName.trim()) ||
+      op.category === 'contract_event'
     ) {
-      const ctrKind: VirtualContract1C['contractKind'] =
-        op.category.startsWith('sale_') || op.category === 'bank_in'
-          ? 'СПокупателем'
-          : op.category.startsWith('purchase_') || op.category === 'bank_out'
-          ? 'СПоставщиком'
-          : 'Прочее';
-      const ctrName = op.contractName.trim();
-      const ctrKey = `ctr:${cpNorm}:${ctrKind}:${normalizeSimpleEntityKey1C(ctrName)}`;
-      const existingCtr = state.contracts.find((c) => c.key === ctrKey);
-      if (existingCtr) {
-        if (op.contractNumber && !existingCtr.number) existingCtr.number = op.contractNumber;
-        existingCtr.usages = addUsageRef(existingCtr.usages, usageRef);
-      } else {
-        state.contracts.push({
-          key: ctrKey,
-          name: ctrName,
-          number: op.contractNumber || '',
-          date: op.contractDate || op.date,
-          counterpartyName: cpName,
-          contractKind: ctrKind,
-          source: 'created_in_operation',
-          firstSeenOpId: op.id,
-          firstSeenOpNumber: opNumber,
-          firstSeenDate: op.date,
-          usages: [usageRef],
-        });
+      if (
+        ![
+          'founder_contribution',
+          'tax_payment',
+          'bank_fee',
+          'cash_bank_internal',
+          'accountable_issue',
+          'expense_report',
+          'accountable_return',
+        ].includes(op.category)
+      ) {
+        const ctrKind: VirtualContract1C['contractKind'] =
+          op.category.startsWith('sale_') ||
+          op.category === 'bank_in' ||
+          (op.category === 'contract_event' && /покупател|заказчик/iu.test(op.description))
+            ? 'СПокупателем'
+            : op.category.startsWith('purchase_') ||
+                op.category === 'bank_out' ||
+                op.category === 'contract_event'
+              ? 'СПоставщиком'
+              : 'Прочее';
+        const ctrName = (op.contractName || 'Основной договор').trim();
+        const ctrKey = `ctr:${cpNorm}:${ctrKind}:${normalizeSimpleEntityKey1C(ctrName)}`;
+        const recurring =
+          op.category === 'contract_event' || op.periodicPaymentAmount
+            ? extractRecurringContractTerms1C(op.description)
+            : null;
+        const periodicAmt = op.periodicPaymentAmount || recurring?.periodicAmount;
+        const existingCtr = state.contracts.find((c) => c.key === ctrKey);
+        if (existingCtr) {
+          if (op.contractNumber && !existingCtr.number) existingCtr.number = op.contractNumber;
+          if (periodicAmt && periodicAmt > 0) existingCtr.periodicAmount = periodicAmt;
+          if (recurring?.periodicity) existingCtr.periodicity = recurring.periodicity;
+          if (recurring?.vatRule) existingCtr.vatRule = recurring.vatRule;
+          if (recurring?.vatRate !== undefined) existingCtr.vatRate = recurring.vatRate;
+          existingCtr.usages = addUsageRef(existingCtr.usages, usageRef);
+        } else {
+          state.contracts.push({
+            key: ctrKey,
+            name: ctrName,
+            number: op.contractNumber || '',
+            date: op.contractDate || op.date,
+            counterpartyName: cpName,
+            contractKind: ctrKind,
+            periodicAmount: periodicAmt && periodicAmt > 0 ? periodicAmt : undefined,
+            periodicity: recurring?.periodicity,
+            subjectSummary: op.description,
+            keywordStems: extractKeywordStems1C(op.description),
+            vatRule: recurring?.vatRule ?? op.vatRule,
+            vatRate: recurring?.vatRate ?? op.vatRate,
+            source: 'created_in_operation',
+            firstSeenOpId: op.id,
+            firstSeenOpNumber: opNumber,
+            firstSeenDate: op.date,
+            usages: [usageRef],
+          });
+        }
       }
     }
   }
@@ -1167,12 +1357,26 @@ export function advanceVirtual1CStateWithOperation(
     }
   }
 
-  // 5. Register / update Fixed Assets (08.04.1 -> 01.01)
-  if (op.category === 'purchase_equipment' && op.nomenclatureName) {
-    const osName = op.nomenclatureName.trim();
+  // 5. Register / update Fixed Assets (08.04.1 -> 01.01 -> 01.09)
+  if (op.category === 'purchase_equipment') {
+    const osName = (op.nomenclatureName || 'Объект основных средств').trim();
     const osKey = `os:${normalizeSimpleEntityKey1C(osName)}`;
+    const targetStems = extractKeywordStems1C(`${osName} ${op.description}`);
     const netCost = round2(Math.max(0, op.amount - (op.vatAmount || 0)));
-    const existingOs = state.fixedAssets.find((a) => a.key === osKey);
+    // Check if this is additional delivery/mounting cost for an existing object on 08.04.1
+    const pendingOn08 = state.fixedAssets.filter(
+      (a) => a.status === 'На счёте 08.04.1 (к вводу)'
+    );
+    const existingOs =
+      state.fixedAssets.find((a) => a.key === osKey) ||
+      pendingOn08.find((a) => {
+        const aStems = extractKeywordStems1C(a.name);
+        return targetStems.some((ts) => aStems.some((as) => stemsMatch(ts, as)));
+      }) ||
+      (/доставк|монтаж|пусконалад|сборк/iu.test(op.description) && pendingOn08.length === 1
+        ? pendingOn08[0]
+        : undefined);
+
     if (existingOs) {
       if (netCost > 0) existingOs.initialCost = round2(existingOs.initialCost + netCost);
       existingOs.usages = addUsageRef(existingOs.usages, usageRef);
@@ -1181,6 +1385,7 @@ export function advanceVirtual1CStateWithOperation(
         key: osKey,
         name: osName,
         initialCost: netCost,
+        accumulatedDepreciation: 0,
         status: 'На счёте 08.04.1 (к вводу)',
         usefulLifeMonths: op.usefulLifeMonths || 0,
         monthlyDepreciation: 0,
@@ -1203,7 +1408,8 @@ export function advanceVirtual1CStateWithOperation(
       state.fixedAssets.find((a) => {
         const aStems = extractKeywordStems1C(a.name);
         return targetStems.some((ts) => aStems.some((as) => stemsMatch(ts, as)));
-      });
+      }) ||
+      state.fixedAssets.find((a) => a.status === 'На счёте 08.04.1 (к вводу)');
 
     const spi = op.usefulLifeMonths && op.usefulLifeMonths > 0 ? op.usefulLifeMonths : 37;
     const cost = op.amount > 0 ? op.amount : existingOs?.initialCost || 0;
@@ -1221,6 +1427,7 @@ export function advanceVirtual1CStateWithOperation(
         key: osKey,
         name: osName,
         initialCost: cost,
+        accumulatedDepreciation: 0,
         status: 'Введено в эксплуатацию (счёт 01.01)',
         usefulLifeMonths: spi,
         monthlyDepreciation: monthlyDep,
@@ -1231,6 +1438,50 @@ export function advanceVirtual1CStateWithOperation(
         firstSeenDate: op.date,
         usages: [usageRef],
       });
+    }
+  }
+
+  if (op.category === 'depreciation_accrual') {
+    const depAmt = round2(
+      op.entries
+        .filter((e) => e.credit === '02.01')
+        .reduce((s, e) => s + e.amount, 0) || op.amount
+    );
+    const activeOs = state.fixedAssets.filter(
+      (a) => a.status === 'Введено в эксплуатацию (счёт 01.01)'
+    );
+    if (activeOs.length === 1 && depAmt > 0) {
+      activeOs[0].accumulatedDepreciation = round2(
+        (activeOs[0].accumulatedDepreciation || 0) + depAmt
+      );
+      activeOs[0].usages = addUsageRef(activeOs[0].usages, usageRef);
+    } else if (activeOs.length > 1) {
+      for (const a of activeOs) {
+        if (a.monthlyDepreciation > 0) {
+          a.accumulatedDepreciation = round2(
+            (a.accumulatedDepreciation || 0) + a.monthlyDepreciation
+          );
+          a.usages = addUsageRef(a.usages, usageRef);
+        }
+      }
+    }
+  }
+
+  if (op.category === 'os_disposal') {
+    const targetStems = extractKeywordStems1C(`${op.nomenclatureName || ''} ${op.description}`);
+    const targetOs =
+      state.fixedAssets.find(
+        (a) =>
+          a.status === 'Введено в эксплуатацию (счёт 01.01)' &&
+          targetStems.some((ts) =>
+            extractKeywordStems1C(a.name).some((as) => stemsMatch(ts, as))
+          )
+      ) ||
+      state.fixedAssets.find((a) => a.status === 'Введено в эксплуатацию (счёт 01.01)');
+    if (targetOs) {
+      targetOs.status = 'Выбыло / списано (счёт 01.09)';
+      targetOs.disposalDate = op.date;
+      targetOs.usages = addUsageRef(targetOs.usages, usageRef);
     }
   }
 
@@ -1270,23 +1521,89 @@ export function advanceVirtual1CStateWithOperation(
     }
   }
 
-  // 7. Register Financial Investments (58.02 / 58.03)
+  // 7. Register Financial Investments (58.02 individual promissory notes & 58.03 loans issued)
   if (op.category === 'financial_investment' || op.docType1C === 'ФинансовыеВложения') {
-    const finName = (
-      op.nomenclatureName ||
-      op.financialNotesSummary ||
-      'Векселя (долговые ценные бумаги)'
-    ).trim();
-    const finKey = `fin:${op.id}`;
+    const parsedNotes =
+      op.financialNotesList && op.financialNotesList.length > 0
+        ? op.financialNotesList
+        : extractFinancialNotesFromText1C(op.description);
+
+    if (parsedNotes.length > 0) {
+      const existing5802Count = state.financialInvestments.filter(
+        (f) => f.account === '58.02'
+      ).length;
+      parsedNotes.forEach((n, idx) => {
+        const paperIdx = existing5802Count + idx + 1;
+        state.financialInvestments.push({
+          key: `fin:${op.id}:${paperIdx}`,
+          name: n.label || `Вексель №${paperIdx} (${n.principal.toLocaleString('ru-RU')} ₽ под ${n.ratePercent}%)`,
+          account: '58.02',
+          paperIndex: paperIdx,
+          principalAmount: n.principal,
+          totalAmount: n.principal,
+          notesBreakdown: `${n.principal.toLocaleString('ru-RU')} ₽ под ${n.ratePercent}% годовых`,
+          interestRatePercent: n.ratePercent,
+          status: 'active',
+          accruedInterestAmount: 0,
+          lastInterestDate: op.date,
+          counterpartyName: op.counterpartyName || undefined,
+          acquisitionDate: op.date,
+          source: 'created_in_operation',
+          firstSeenOpId: op.id,
+          firstSeenOpNumber: opNumber,
+          firstSeenDate: op.date,
+          usages: [usageRef],
+        });
+      });
+    } else {
+      const finName = (
+        op.nomenclatureName ||
+        op.financialNotesSummary ||
+        'Векселя (долговые ценные бумаги)'
+      ).trim();
+      const finKey = `fin:${op.id}`;
+      const pctMatch = op.description.match(/(\d+(?:[.,]\d+)?)\s*%/);
+      const pct = pctMatch ? Number(pctMatch[1].replace(',', '.')) : undefined;
+      const paperIdx = state.financialInvestments.filter((f) => f.account === '58.02').length + 1;
+      state.financialInvestments.push({
+        key: finKey,
+        name: finName,
+        account: '58.02',
+        paperIndex: paperIdx,
+        principalAmount: op.amount,
+        totalAmount: op.amount,
+        notesBreakdown: op.financialNotesSummary || op.description,
+        interestRatePercent: Number.isFinite(pct) ? pct : undefined,
+        status: 'active',
+        accruedInterestAmount: 0,
+        lastInterestDate: op.date,
+        counterpartyName: op.counterpartyName || undefined,
+        acquisitionDate: op.date,
+        source: 'created_in_operation',
+        firstSeenOpId: op.id,
+        firstSeenOpNumber: opNumber,
+        firstSeenDate: op.date,
+        usages: [usageRef],
+      });
+    }
+  }
+
+  if (op.category === 'loan_issued') {
     const pctMatch = op.description.match(/(\d+(?:[.,]\d+)?)\s*%/);
-    const pct = pctMatch ? Number(pctMatch[1].replace(',', '.')) : undefined;
+    const pct =
+      op.interestRatePercent ??
+      (pctMatch ? Number(pctMatch[1].replace(',', '.')) : undefined);
     state.financialInvestments.push({
-      key: finKey,
-      name: finName,
-      account: '58.02',
+      key: `loan5803:${op.id}`,
+      name: `Выданный заём (${op.counterpartyName || 'заёмщик'})`,
+      account: '58.03',
+      principalAmount: op.amount,
       totalAmount: op.amount,
-      notesBreakdown: op.financialNotesSummary || op.description,
+      notesBreakdown: op.description,
       interestRatePercent: Number.isFinite(pct) ? pct : undefined,
+      status: 'active',
+      accruedInterestAmount: 0,
+      lastInterestDate: op.date,
       counterpartyName: op.counterpartyName || undefined,
       acquisitionDate: op.date,
       source: 'created_in_operation',
@@ -1297,29 +1614,62 @@ export function advanceVirtual1CStateWithOperation(
     });
   }
 
+  if (op.category === 'financial_interest_accrual') {
+    const activeNotes = state.financialInvestments.filter(
+      (f) => f.status !== 'disposed' && (f.interestRatePercent ?? 0) > 0
+    );
+    const totalWeight = activeNotes.reduce(
+      (s, n) => s + (n.principalAmount ?? n.totalAmount) * ((n.interestRatePercent ?? 0) / 100),
+      0
+    );
+    for (const note of activeNotes) {
+      const weight =
+        (note.principalAmount ?? note.totalAmount) * ((note.interestRatePercent ?? 0) / 100);
+      const share =
+        totalWeight > 0 ? round2((op.amount * weight) / totalWeight) : 0;
+      note.accruedInterestAmount = round2((note.accruedInterestAmount || 0) + share);
+      note.lastInterestDate = op.date;
+      note.usages = addUsageRef(note.usages, usageRef);
+    }
+  }
+
+  if (op.category === 'financial_disposal') {
+    const targetNote = matchTargetActiveFinancialNote1C(state, op.description);
+    if (targetNote) {
+      targetNote.status = 'disposed';
+      targetNote.disposedDate = op.date;
+      targetNote.disposedOpId = op.id;
+      targetNote.disposedOpNumber = opNumber;
+      targetNote.usages = addUsageRef(targetNote.usages, usageRef);
+    }
+  }
+
   // 8. Update Open Settlements (60.01, 60.02, 62.01, 62.02, 76.41) from generated entries
   for (const entry of op.entries) {
     if (entry.isOffBalance || entry.amount < 0.01) continue;
 
-    // Credit 60.01 -> new unpaid supplier receipt!
-    if (entry.credit === '60.01') {
+    const pushOpenSettlement = (
+      account: VirtualOpenSettlement1C['account'],
+      amountVal: number,
+      cpOverride?: string
+    ) => {
       const existingSameOp = state.openSettlements.find(
-        (s) => s.originOpId === op.id && s.account === '60.01'
+        (s) => s.originOpId === op.id && s.account === account
       );
       if (existingSameOp) {
-        existingSameOp.originalAmount = round2(existingSameOp.originalAmount + entry.amount);
-        existingSameOp.remainingAmount = round2(existingSameOp.remainingAmount + entry.amount);
+        existingSameOp.originalAmount = round2(existingSameOp.originalAmount + amountVal);
+        existingSameOp.remainingAmount = round2(existingSameOp.remainingAmount + amountVal);
       } else {
         const subjectText = `${op.nomenclatureName || ''} ${op.description || ''}`.trim();
         state.openSettlements.push({
-          id: `op-6001-${op.id}`,
-          account: '60.01',
-          counterpartyName: op.counterpartyName || '',
+          id: `op-${account}-${op.id}`,
+          account,
+          counterpartyName: cpOverride || op.counterpartyName || '',
           counterpartyInn: op.counterpartyInn || '',
           counterpartyKpp: op.counterpartyKpp || '',
           contractName: op.contractName || 'Основной договор',
-          originalAmount: entry.amount,
-          remainingAmount: entry.amount,
+          originalAmount: amountVal,
+          remainingAmount: amountVal,
           subjectSummary: op.nomenclatureName || op.description,
           keywordStems: extractKeywordStems1C(subjectText),
           source: 'created_in_operation',
@@ -1328,19 +1678,26 @@ export function advanceVirtual1CStateWithOperation(
           originDate: op.date,
         });
       }
-    }
+    };
 
-    // Debit 60.01 -> pay down open 60.01 supplier settlements!
-    if (entry.debit === '60.01') {
-      let toPay = entry.amount;
-      const entryCpRaw = (entry.debitSubconto || '').split('/')[0].trim();
+    const paydownOpenSettlement = (
+      account: VirtualOpenSettlement1C['account'],
+      amountVal: number,
+      subcontoRaw: string
+    ) => {
+      let toPay = amountVal;
+      const entryCpRaw = (subcontoRaw || '').split('/')[0].trim();
       const cpNorm = normalizeCounterpartyKey1C(entryCpRaw || op.counterpartyName || '');
       const payStems = extractKeywordStems1C(op.description);
 
-      // Prioritize matching supplier + matching stems, then matching supplier FIFO
       const candidates = state.openSettlements
-        .filter((s) => s.account === '60.01' && s.remainingAmount >= 0.01)
-        .filter((s) => !cpNorm || !s.counterpartyName || normalizeCounterpartyKey1C(s.counterpartyName) === cpNorm)
+        .filter((s) => s.account === account && s.remainingAmount >= 0.01)
+        .filter(
+          (s) =>
+            !cpNorm ||
+            !s.counterpartyName ||
+            normalizeCounterpartyKey1C(s.counterpartyName) === cpNorm
+        )
         .sort((a, b) => {
           const aStemHit = a.keywordStems.some((ks) =>
             payStems.some((ps) => stemsMatch(ks, ps))
@@ -1358,7 +1715,25 @@ export function advanceVirtual1CStateWithOperation(
         s.remainingAmount = round2(s.remainingAmount - used);
         toPay = round2(toPay - used);
       }
+    };
+
+    // 60.01 (passive): Credit increases unpaid supplier debt; Debit pays it down
+    if (entry.credit === '60.01') pushOpenSettlement('60.01', entry.amount);
+    if (entry.debit === '60.01') paydownOpenSettlement('60.01', entry.amount, entry.debitSubconto);
+
+    // 60.02 (active): Debit increases supplier advance; Credit offsets it
+    if (entry.debit === '60.02') pushOpenSettlement('60.02', entry.amount);
+    if (entry.credit === '60.02') paydownOpenSettlement('60.02', entry.amount, entry.creditSubconto);
+
+    // 62.01 (active): Debit increases unpaid buyer receivable; Credit pays it down
+    if (entry.debit === '62.01' && entry.credit !== '62.02') {
+      pushOpenSettlement('62.01', entry.amount);
     }
+    if (entry.credit === '62.01') paydownOpenSettlement('62.01', entry.amount, entry.creditSubconto);
+
+    // 62.02 (passive): Credit increases buyer advance; Debit offsets it
+    if (entry.credit === '62.02') pushOpenSettlement('62.02', entry.amount);
+    if (entry.debit === '62.02') paydownOpenSettlement('62.02', entry.amount, entry.debitSubconto);
 
     // Credit 76.41 -> alimony accrued in payroll!
     if (entry.credit === '76.41') {
@@ -1563,6 +1938,9 @@ export function buildStep00DirectoryPrepSteps(
           (cpNorm && normalizeCounterpartyKey1C(c.name) === cpNorm)
       );
 
+      const isFormalAutoCp =
+        op.counterpartySource === 'educational_generated' || Boolean(existingCp?.isFormalAutoFilled);
+
       steps.push({
         id: `prep-cp-${op.id}-${cIdx}`,
         entityKind: 'counterparty',
@@ -1575,6 +1953,10 @@ export function buildStep00DirectoryPrepSteps(
         firstSeenOpNumber: existingCp?.firstSeenOpNumber,
         firstSeenOpId: existingCp?.firstSeenOpId,
         firstSeenDate: existingCp?.firstSeenDate,
+        isFormalAutoFilled: isFormalAutoCp,
+        formalAutoFillNote: isFormalAutoCp
+          ? 'Формальный реквизит, подобран автоматически (на ОСВ не влияет)'
+          : undefined,
         menuPath1C:
           'Раздел «Справочники» → «Покупки и продажи» → «Контрагенты» → кнопка «Создать»',
         fieldsToFill: [
@@ -1591,7 +1973,7 @@ export function buildStep00DirectoryPrepSteps(
           {
             field: 'ИНН / КПП',
             value: cpInn
-              ? `${cpInn}${op.counterpartyKpp ? ` / ${op.counterpartyKpp}` : ''}`
+              ? `${cpInn}${op.counterpartyKpp ? ` / ${op.counterpartyKpp}` : ''}${isFormalAutoCp ? ' (учебные реквизиты — авто)' : ''}`
               : 'Заполните по кнопке «Заполнить» по ИНН или учебным реквизитам',
           },
           {
@@ -1606,8 +1988,7 @@ export function buildStep00DirectoryPrepSteps(
     const cpNorm = normalizeCounterpartyKey1C(cpName);
 
     if (
-      op.contractName &&
-      op.contractName.trim() &&
+      ((op.contractName && op.contractName.trim()) || op.category === 'contract_event') &&
       ![
         'founder_contribution',
         'tax_payment',
@@ -1616,14 +1997,19 @@ export function buildStep00DirectoryPrepSteps(
       ].includes(op.category)
     ) {
       const ctrKind: VirtualContract1C['contractKind'] =
-        op.category.startsWith('sale_') || op.category === 'bank_in'
+        op.category.startsWith('sale_') ||
+        op.category === 'bank_in' ||
+        (op.category === 'contract_event' && /покупател|заказчик/iu.test(op.description))
           ? 'СПокупателем'
-          : op.category.startsWith('purchase_') || op.category === 'bank_out'
-          ? 'СПоставщиком'
-          : 'Прочее';
-      const ctrName = op.contractName.trim();
+          : op.category.startsWith('purchase_') ||
+              op.category === 'bank_out' ||
+              op.category === 'contract_event'
+            ? 'СПоставщиком'
+            : 'Прочее';
+      const ctrName = (op.contractName || 'Основной договор').trim();
       const ctrKey = `ctr:${cpNorm}:${ctrKind}:${normalizeSimpleEntityKey1C(ctrName)}`;
       const existingCtr = stateBefore.contracts.find((c) => c.key === ctrKey);
+      const isDefaultAutoCtr = ctrName === 'Основной договор' && !op.contractNumber;
 
       steps.push({
         id: `prep-ctr-${op.id}`,
@@ -1637,6 +2023,10 @@ export function buildStep00DirectoryPrepSteps(
         firstSeenOpNumber: existingCtr?.firstSeenOpNumber,
         firstSeenOpId: existingCtr?.firstSeenOpId,
         firstSeenDate: existingCtr?.firstSeenDate,
+        isFormalAutoFilled: isDefaultAutoCtr,
+        formalAutoFillNote: isDefaultAutoCtr
+          ? 'Формальный реквизит, подобран автоматически (на ОСВ не влияет)'
+          : undefined,
         menuPath1C: `Карточка «${cpName}» → ссылка «Договоры» → кнопка «Создать»`,
         fieldsToFill: [
           {
@@ -1645,11 +2035,19 @@ export function buildStep00DirectoryPrepSteps(
               ctrKind === 'СПокупателем'
                 ? 'С покупателем'
                 : ctrKind === 'СПоставщиком'
-                ? 'С поставщиком'
-                : 'Прочее',
+                  ? 'С поставщиком'
+                  : 'Прочее',
           },
           { field: 'Наименование / №', value: ctrName },
           { field: 'Дата договора', value: formatRuDateShort(op.contractDate || op.date) },
+          ...(op.periodicPaymentAmount && op.periodicPaymentAmount > 0
+            ? [
+                {
+                  field: 'Периодический платёж по договору',
+                  value: `${op.periodicPaymentAmount.toLocaleString('ru-RU')} ₽ / мес.`,
+                },
+              ]
+            : []),
         ],
       });
     }

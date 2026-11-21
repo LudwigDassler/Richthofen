@@ -356,7 +356,8 @@ test('Stage 5 & 6: Audit detects unclosed accounts/advances, Auto-Fix closes per
   assert.ok(preIssues.some((i) => i.id === 'unoffset-advance-62'));
   assert.ok(preIssues.some((i) => i.id === 'unclosed-26'));
   assert.ok(preIssues.some((i) => i.id === 'unclosed-90'));
-  assert.ok(preIssues.some((i) => i.id.startsWith('missing-inn-')));
+  const preInnIssue = preIssues.find((i) => i.id.startsWith('missing-inn-'));
+  assert.ok(preInnIssue?.inlineTarget);
 
   // Execute 1-click AutoFix
   const fixed = autoFixAllBy1CDb({
@@ -367,6 +368,7 @@ test('Stage 5 & 6: Audit detects unclosed accounts/advances, Auto-Fix closes per
   });
 
   assert.ok(fixed.fixedCount >= 4);
+  assert.equal(fixed.executionSummary.remainingAutofixableCount, 0);
 
   const postOsv = calcOsv(fixed.operations);
   assert.equal(postOsv.totals.isStartBalanced, true);
@@ -380,14 +382,17 @@ test('Stage 5 & 6: Audit detects unclosed accounts/advances, Auto-Fix closes per
   assert.equal(group90After?.endDebit ?? 0, 0);
   assert.equal(group90After?.endCredit ?? 0, 0);
 
-  // Remaining issue for brand-new ООО «ВекторНедвижимость» has inlineTarget for INN!
+  // Brand-new fictional ООО «ВекторНедвижимость» receives formal valid FNS INN/KPP during 1-click AutoFix
   const postIssues = runAuditDiagnostics({
     db1C: snapshot,
     operations: fixed.operations,
     osv: postOsv,
   });
-  const innIssue = postIssues.find((i) => i.id.startsWith('missing-inn-'));
-  assert.ok(innIssue?.inlineTarget);
+  assert.equal(postIssues.filter((i) => i.canAutoFixBy1C).length, 0);
+  assert.equal(postIssues.some((i) => i.id.startsWith('missing-inn-')), false);
+  const fixedRentOp = fixed.operations.find((o) => o.counterpartyName.includes('ВекторНедвижимость'));
+  assert.equal(fixedRentOp?.counterpartyInn.length, 10);
+  assert.equal(fixedRentOp?.counterpartyKpp.length, 9);
 
   // Test Export Mode A (Incremental) & Mode B (Clean DB) + XML roundtrip
   const bundleA = buildExportBundle({

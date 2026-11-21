@@ -12,7 +12,9 @@ import {
   OperationAmountMode,
   OperationCategory,
   OperationReadinessStatus,
+  ParsedFinancialNoteItem1C,
   QueuedOperation,
+  Step01CalculationBreakdown1C,
   Virtual1CStateSnapshot,
 } from '@/types/accounting';
 import {
@@ -25,12 +27,22 @@ import {
   buildStep00DirectoryPrepSteps,
   buildVirtual1CStateTimeline,
   createInitialVirtual1CState,
+  extractFinancialNotesFromText1C,
+  extractRecurringContractTerms1C,
+  matchTargetActiveFinancialNote1C,
   normalizePersonIdentityKey1C,
   resolveActiveWritsOfExecution1C,
   resolveAlimonyPayable7641,
   resolveUnpaidSupplier6001ByKeywords,
+  stemsMatch1C,
+  extractKeywordStems1C,
   UnpaidSupplierResolution1C,
 } from '@/lib/engine/virtual1CState';
+import { resolveOperationAmountAndLinks } from '@/lib/engine/amountAndLinkResolver';
+import {
+  inferOrganizationRegionCode,
+  selectBestEgrulCandidate,
+} from '@/lib/egrul/egrulLookup';
 
 function round2(n: number): number {
   const r = Math.round((n + Number.EPSILON) * 100) / 100;
@@ -80,7 +92,7 @@ export function inferCounterpartyKind(
 }
 
 export function isFounderContributionText(text: string): boolean {
-  return /поступлен\p{L}*\s+(?:на\s+расч[её]тн\p{L}+\s+сч[её]т\s+|на\s+р\/с\s+)?доли(?=$|[^\p{L}])|оплат\p{L}*\s+доли(?=$|[^\p{L}])|внесени\p{L}*\s+доли(?=$|[^\p{L}])|взнос\p{L}*\s+(?:(?:от\s+)?(?:учредител\p{L}*|участник\p{L}*)\s+.*)?в\s+уставн\p{L}+\s+капитал|вклад\p{L}*\s+(?:(?:от\s+)?(?:учредител\p{L}*|участник\p{L}*)\s+.*)?в\s+уставн\p{L}+\s+капитал|поступил\p{L}*.*вклад\p{L}*\s+учредител|формирован\p{L}*\s+уставн\p{L}+\s+капитал|взнос\p{L}*\s+учредител/iu.test(
+  return /поступлен\p{L}*\s+(?:на\s+расч[её]тн\p{L}+\s+сч[её]т\s+|на\s+р\/с\s+)?доли(?=$|[^\p{L}])|оплат\p{L}*\s+доли(?=$|[^\p{L}])|внесени\p{L}*\s+доли(?=$|[^\p{L}])|взнос\p{L}*\s+(?:(?:от\s+)?(?:учредител\p{L}*|участник\p{L}*)\s+.*)?в\s+уставн\p{L}+\s+капитал|вклад\p{L}*\s+(?:(?:от\s+)?(?:учредител\p{L}*|участник\p{L}*)\s+.*)?в\s+уставн\p{L}+\s+капитал|(?:внесен|поступил|получен|перечислен)\p{L}*.*(?:вклад|взнос)\p{L}*\s+(?:от\s+)?(?:учредител|участник)|вклад\p{L}*\s+(?:от\s+)?учредител|формирован\p{L}*\s+уставн\p{L}+\s+капитал|взнос\p{L}*\s+(?:от\s+)?учредител/iu.test(
     text
   );
 }
@@ -539,6 +551,10 @@ export interface RawDraftOperationInput {
   alimonyRatePercent?: number;
   alimonyShareLabel?: string;
   financialNotesSummary?: string;
+  financialNotesList?: ParsedFinancialNoteItem1C[];
+  disposedFinancialNoteId?: string;
+  periodicPaymentAmount?: number;
+  interestRatePercent?: number;
   costAccountHint?: string;
   materialAccountHint?: string;
   directionHint?: 'in' | 'out';
@@ -734,6 +750,91 @@ export function detectOperationClassification(
   const fullText = `${itemAndDescText} ${draft.counterpartyName ?? ''}`
     .toLowerCase()
     .replace(/ё/g, 'е');
+
+  // 0a. Organizational / Accounting Policy / Cash Limit Event (0 postings)
+  if (
+    /(?:утвержден|принят|установлен|издан)\p{L}*.*(?:учетн\p{L}*\s+политик|лимит\s+(?:остатка\s+)?касс|штатн\p{L}*\s+расписан|приказ\s+об\s+учетн)/iu.test(
+      itemAndDescText
+    )
+  ) {
+    return {
+      category: 'policy_event',
+      docType1C: 'ОперацияБух',
+      documentSubKind1C: 'Учётная политика / кассовая дисциплина (без проводок)',
+    };
+  }
+
+  // 0b. Framework Contract Signing / Invoice Issued or Received (0 postings, records terms for L4 resolver)
+  if (
+    !/трудовой\s+договор.*оклад/iu.test(itemAndDescText) &&
+    /(?:заключен|подписан|пролонгирован)\p{L}*\s+договор|(?:выставлен|получен|поступил)\p{L}*\s+счет\s+на\s+оплат/iu.test(
+      itemAndDescText
+    ) &&
+    !/оплачен|перечислен|списан\p{L}*\s+с\s+р\/с|поступил\p{L}*\s+(?:товар|материал|оборудован|деньг|денежн|аванс|оплат)|оказан\p{L}*\s+услуг|выполнен\p{L}*\s+работ|акт\s+(?:оказанных|выполненных)|товарн\p{L}*\s+накладн|торг-12|(?:^|[^\p{L}])упд(?=$|[^\p{L}])/iu.test(
+      itemAndDescText
+    )
+  ) {
+    return {
+      category: 'contract_event',
+      docType1C: 'ОперацияБух',
+      documentSubKind1C: 'Регистрация договора / счёта на оплату (без проводок)',
+    };
+  }
+
+  // 0c. Promissory Notes & Securities Interest Accrual (76.09 — 91.01) & Disposal / Endorsement / Redemption (58.02 -> 91.02)
+  if (
+    /начислен\p{L}*.*(?:процент\p{L}*|доход\p{L}*|дисконт).*(?:по\s+)?(?:оставш\p{L}*\s+|приобретенн\p{L}*\s+|процентн\p{L}*\s+)?(?:вексел|облигац|ценн\p{L}*\s+бумаг)/iu.test(
+      itemAndDescText
+    )
+  ) {
+    return {
+      category: 'financial_interest_accrual',
+      docType1C: 'ОперацияБух',
+      documentSubKind1C: 'Начисление процентного дохода по ценным бумагам (Дт 76.09 Кт 91.01)',
+    };
+  }
+
+  if (
+    /(?:передан|индоссирован|предъявлен|погашен|продан|реализован|выбыл|списан)\p{L}*.*(?:перв\p{L}*\s+|втор\p{L}*\s+|трет\p{L}*\s+)?(?:вексел|облигац|ценн\p{L}*\s+бумаг)|в\s+счет\s+(?:оплат\p{L}*|погашен\p{L}*).*вексел/iu.test(
+      itemAndDescText
+    )
+  ) {
+    return {
+      category: 'financial_disposal',
+      docType1C: 'ОперацияБух',
+      documentSubKind1C: 'Выбытие / индоссамент / погашение ценной бумаги (счёт 58.02 через 91)',
+    };
+  }
+
+  // 0d. Fixed Asset Disposal / Write-off / Sale (счёт 01.09)
+  if (
+    draft.explicitDebit === '01.09' ||
+    draft.explicitCredit === '01.09' ||
+    /(?:списан|ликвидирован|демонтирован|выбыл|продан|реализован)\p{L}*.*(?:вследствие\s+износ|по\s+причине\s+износ|объект\p{L}*\s+ос(?=$|[^\p{L}])|объект\p{L}*\s+основн\p{L}*\s+средств|основн\p{L}*\s+средств\p{L}*|инвентарн\p{L}*\s+объект|со\s+счета\s+01)|(?:списан|ликвидирован)\p{L}*.*(?:станок|бетоносмесител|оборудован).*(?:износ|непригодн|амортиз|ликвидац)/iu.test(
+      itemAndDescText
+    )
+  ) {
+    return {
+      category: 'os_disposal',
+      docType1C: 'ОперацияБух',
+      documentSubKind1C: 'Выбытие / списание объекта основных средств (счёт 01.09)',
+    };
+  }
+
+  // 0e. Standalone VAT Deduction from Account 19 (Дт 68.02 Кт 19.*)
+  if (
+    (draft.explicitDebit === '68.02' && draft.explicitCredit?.startsWith('19')) ||
+    (/(?:принят\p{L}*\s+к\s+вычету|отражен\p{L}*\s+вычет|предъявлен\p{L}*\s+к\s+вычету)\s+(?:входн\p{L}*\s+)?ндс|формирован\p{L}*\s+запис\p{L}*\s+книг\p{L}*\s+покупок/iu.test(
+      itemAndDescText
+    ) &&
+      !/поступил\p{L}*\s+(?:товар|материал|оборудован)|оказан\p{L}*\s+услуг/iu.test(itemAndDescText))
+  ) {
+    return {
+      category: 'vat_deduction',
+      docType1C: 'СчетФактураПолученный',
+      documentSubKind1C: 'Принятие входного НДС к вычету (Дт 68.02 Кт 19)',
+    };
+  }
 
   // 1. Month-End Closing
   if (
@@ -984,7 +1085,41 @@ export function detectOperationClassification(
     };
   }
 
-  // 10c. Loans & Credits (66.03 / 67.03)
+  // 10c. Loans Issued (58.03), Loan Interest Accrual (66.02/66.04/67.02/67.04), and Loans Received / Repaid (66.03 / 67.03)
+  if (
+    draft.explicitCredit === '66.02' ||
+    draft.explicitCredit === '66.04' ||
+    draft.explicitCredit === '67.02' ||
+    draft.explicitCredit === '67.04' ||
+    /начислен\p{L}*.*процент\p{L}*.*по\s+(?:выданн\p{L}*\s+|предоставленн\p{L}*\s+|полученн\p{L}*\s+|краткосрочн\p{L}*\s+|долгосрочн\p{L}*\s+|банковск\p{L}*\s+|процентн\p{L}*\s+)?(?:кредит|займ)/iu.test(
+      itemAndDescText
+    )
+  ) {
+    const isIssuedInterest =
+      /выданн\p{L}*\s+займ|предоставленн\p{L}*\s+займ/iu.test(itemAndDescText) &&
+      !/полученн\p{L}*\s+(?:займ|кредит)/iu.test(itemAndDescText);
+    return {
+      category: 'loan_interest_accrual',
+      docType1C: 'ОперацияБух',
+      documentSubKind1C: isIssuedInterest
+        ? 'Начисление процентов по выданному займу (Дт 76.09 Кт 91.01)'
+        : 'Начисление процентов по полученному кредиту / займу (Дт 91.02 Кт 66.04)',
+    };
+  }
+
+  if (
+    draft.explicitDebit === '58.03' ||
+    /(?:выдан|предоставлен|перечислен)\p{L}*.*(?:процентн\p{L}*\s+|краткосрочн\p{L}*\s+|долгосрочн\p{L}*\s+|денежн\p{L}*\s+)?за[её]м(?:\s+контрагент|\s+организац|\s+заемщик|\s+ооо|\s+ао|\s+пао|\s+зао|\s+ип|\s+под\s+\d)/iu.test(
+      itemAndDescText
+    )
+  ) {
+    return {
+      category: 'loan_issued',
+      docType1C: 'СписаниеСРасчетногоСчета',
+      documentSubKind1C: 'Выдача займа контрагенту (счёт 58.03)',
+    };
+  }
+
   if (
     draft.explicitCredit?.startsWith('66') ||
     draft.explicitCredit?.startsWith('67') ||
@@ -1185,10 +1320,16 @@ export function detectOperationClassification(
     };
   }
 
-  // 20. Purchases: Equipment (08.04.1) -> Goods (41.01) -> Materials (10.*) -> Services (20/26/44)
+  // 20. Purchases: Equipment & Capex Delivery/Mounting on 08.04.1 -> Goods (41.01) -> Materials (10.*) -> Services (20/26/44)
+  const isCapexEquipmentDeliveryOrMounting =
+    !/оплачен|перечислен|списан\p{L}*\s+с\s+р\/с/iu.test(itemAndDescText) &&
+    /(?:доставк|монтаж|пусконалад|сборк|установк)\p{L}*.*(?:приобретенн\p{L}*\s+|поступивш\p{L}*\s+|купленн\p{L}*\s+)?(?:оборудован|станок|станк|бетоносмесител|бетономешалк|компрессор|генератор|трансформатор|погрузчик|экскаватор|производственн\p{L}*\s+лини|объект\p{L}*\s+ос(?=$|[^\p{L}]))/iu.test(
+      itemAndDescText
+    );
   if (
     matchedNomKind === 'Оборудование' ||
     matchedNomKind === 'ОС' ||
+    isCapexEquipmentDeliveryOrMounting ||
     (!/ремонт|обслуживан|аренд|доставк/iu.test(itemAndDescText) &&
       /(?:поступил|приобретен|оприходован|получен|купил|закуплен)\p{L}*.*(?:оборудован|станок|станк|бетоносмесител|бетономешалк|компрессор|генератор|трансформатор|погрузчик|экскаватор|производственн\p{L}*\s+лини|объект\s+основн\p{L}*\s+средств|объект\s+ос(?=$|[^\p{L}]))/iu.test(
         itemAndDescText
@@ -1197,7 +1338,9 @@ export function detectOperationClassification(
     return {
       category: 'purchase_equipment',
       docType1C: 'ПоступлениеТоваровУслуг',
-      documentSubKind1C: 'Оборудование (счёт 08.04.1)',
+      documentSubKind1C: isCapexEquipmentDeliveryOrMounting
+        ? 'Доп. расходы по приобретению оборудования (счёт 08.04.1)'
+        : 'Оборудование (счёт 08.04.1)',
     };
   }
 
@@ -1576,6 +1719,7 @@ export function bindAndGenerateOperation(
   }
 
   const isStrictlyInternalNoCpOp = [
+    'policy_event',
     'materials_writeoff',
     'workwear_issue',
     'os_commissioning',
@@ -1762,7 +1906,10 @@ export function bindAndGenerateOperation(
         cpSource = 'excel_explicit';
       }
       if (draft.egrulCandidates && draft.egrulCandidates.length > 0 && !hadExplicitInnFromExcel) {
-        const best = draft.egrulCandidates[0];
+        const homeRegion = inferOrganizationRegionCode(db1C, orgDefaultBik);
+        const best =
+          selectBestEgrulCandidate(draft.egrulCandidates, cpName, homeRegion) ??
+          draft.egrulCandidates[0];
         cpInn = best.inn;
         cpKpp = cpKpp || best.kpp;
         cpOgrn = cpOgrn || best.ogrn;
@@ -2053,12 +2200,17 @@ export function bindAndGenerateOperation(
   }
 
   // --- 5. Bind Warehouse, ExpenseItem, CashFlowItem ---
+  const isCapexServiceExpense =
+    category === 'purchase_equipment' &&
+    /(?:доставк|транспорт|перевозк|монтаж|пусконалад|сборк|установк)/iu.test(draft.description);
+
   const internalDefaultWarehouseCategories: OperationCategory[] = [
     'materials_writeoff',
     'workwear_issue',
     'os_commissioning',
     'production_output',
     'warehouse_transfer',
+    ...(isCapexServiceExpense ? (['purchase_equipment'] as OperationCategory[]) : []),
   ];
   const needsWarehouse = [
     'purchase_goods',
@@ -2176,6 +2328,7 @@ export function bindAndGenerateOperation(
     'accountable_return',
     'loan_received',
     'loan_repaid',
+    'loan_issued',
   ].includes(category);
   let cashFlowBinding: EntityBindingStatus = { status: 'not_required' };
   if (needsCashFlow) {
@@ -2195,7 +2348,7 @@ export function bindAndGenerateOperation(
           ? /вклад\p{L}*\s+собственник|уставн\p{L}+\s+капитал|учредител/iu
           : category === 'accountable_issue' || category === 'accountable_return'
             ? /подотчет/iu
-            : category === 'loan_received' || category === 'loan_repaid'
+            : category === 'loan_received' || category === 'loan_repaid' || category === 'loan_issued'
               ? /кредит|за[её]м/iu
               : category === 'bank_in' || category === 'cash_in'
                 ? /поступление от продажи|оплата от покупател/i
@@ -2222,13 +2375,15 @@ export function bindAndGenerateOperation(
                     ? 'Получение кредитов и займов'
                     : category === 'loan_repaid'
                       ? 'Погашение кредитов и займов'
-                      : category === 'bank_in' || category === 'cash_in'
-                        ? 'Поступление от продажи продукции и товаров, выполнения работ, оказания услуг'
-                        : category === 'tax_payment'
-                          ? 'Прочие налоги и сборы'
-                          : category === 'payroll_payout' || category === 'alimony_payout'
-                            ? 'Оплата труда'
-                            : 'Оплата товаров, работ, услуг, сырья и иных оборотных активов';
+                      : category === 'loan_issued'
+                        ? 'Предоставление займов контрагентам'
+                        : category === 'bank_in' || category === 'cash_in'
+                          ? 'Поступление от продажи продукции и товаров, выполнения работ, оказания услуг'
+                          : category === 'tax_payment'
+                            ? 'Прочие налоги и сборы'
+                            : category === 'payroll_payout' || category === 'alimony_payout'
+                              ? 'Оплата труда'
+                              : 'Оплата товаров, работ, услуг, сырья и иных оборотных активов';
         cashFlowBinding = {
           status: db1C ? 'new_for_1c' : 'not_required',
           note: 'Типовая статья ДДС 1С БП 3.0',
@@ -2251,20 +2406,50 @@ export function bindAndGenerateOperation(
       });
       return st;
     })();
-  const hadExplicitInputAmount =
-    category === 'hr_hire' || category === 'writ_of_execution'
-      ? false
-      : Math.abs(draft.amount) >= 0.01;
-  let effectiveDraftAmount =
-    category === 'hr_hire' || category === 'writ_of_execution'
-      ? 0
-      : round2(Math.abs(draft.amount));
+  const isNonPostingEventCategory =
+    category === 'hr_hire' ||
+    category === 'writ_of_execution' ||
+    category === 'contract_event' ||
+    category === 'policy_event';
+
+  const hadExplicitInputAmount = isNonPostingEventCategory
+    ? false
+    : Math.abs(draft.amount) >= 0.01;
+  let effectiveDraftAmount = isNonPostingEventCategory
+    ? 0
+    : round2(Math.abs(draft.amount));
   let resolvedMonthlySalary =
     category === 'hr_hire'
       ? round2(Math.abs(draft.monthlySalary ?? draft.amount ?? 0))
       : draft.monthlySalary && draft.monthlySalary > 0
         ? round2(draft.monthlySalary)
         : undefined;
+  let resolvedPeriodicPaymentAmount =
+    draft.periodicPaymentAmount && draft.periodicPaymentAmount > 0
+      ? round2(draft.periodicPaymentAmount)
+      : undefined;
+  let resolvedInterestRatePercent =
+    draft.interestRatePercent !== undefined && draft.interestRatePercent >= 0
+      ? draft.interestRatePercent
+      : undefined;
+  let resolvedFinancialNotesList: ParsedFinancialNoteItem1C[] | undefined =
+    draft.financialNotesList && draft.financialNotesList.length > 0
+      ? draft.financialNotesList
+      : undefined;
+  let resolvedDisposedNoteId: string | undefined = draft.disposedFinancialNoteId;
+  let resolverStep01Trace: Step01CalculationBreakdown1C | undefined;
+
+  if (!resolvedInterestRatePercent) {
+    const rateMatch = draft.description.match(/под\s*(\d+(?:[.,]\d+)?)\s*%/iu) ||
+      draft.description.match(/ставк\p{L}*\s*(\d+(?:[.,]\d+)?)\s*%/iu);
+    if (rateMatch?.[1]) {
+      const parsedRate = Number(rateMatch[1].replace(',', '.'));
+      if (Number.isFinite(parsedRate) && parsedRate > 0) {
+        resolvedInterestRatePercent = parsedRate;
+      }
+    }
+  }
+
   const resolvedEmployeePosition = draft.employeePosition?.trim() || undefined;
   const resolvedInjuryRate =
     draft.injuryInsuranceRate !== undefined && draft.injuryInsuranceRate >= 0
@@ -2281,16 +2466,37 @@ export function bindAndGenerateOperation(
       inlineSpiMonths = Number(spiM[1]);
     }
   }
-  if (!nomName && category === 'os_commissioning') {
+  if (!nomName && (category === 'os_commissioning' || category === 'os_disposal')) {
     const mOsMiddle = draft.description.match(
       /введен[аоы]?\s+(.+?)\s+в\s+эксплуатац/iu
     );
     const mOsAfter = draft.description.match(
       /в\s+эксплуатац\p{L}*\s+([^\n(,;]+)/iu
     );
-    const rawOsName = (mOsMiddle?.[1] || mOsAfter?.[1] || '').trim();
+    const mOsDisp = draft.description.match(
+      /(?:ликвидирован[аоы]?|списан[аоы]?|демонтирован[аоы]?|выбыл[аои]?)\s+(?:объект\s+ос\s+)?([^\n(,;]+)/iu
+    );
+    const rawOsName = (mOsMiddle?.[1] || mOsAfter?.[1] || mOsDisp?.[1] || '').trim();
     if (rawOsName.length >= 2) {
       nomName = rawOsName.charAt(0).toUpperCase() + rawOsName.slice(1);
+    }
+  }
+  // Link equipment capex delivery/mounting expense on 08.04.1 to the uncommissioned fixed asset so 08.04.1 accumulates cleanly
+  if (isCapexServiceExpense) {
+    const capexAssets = Object.values(priorVirtualState.fixedAssets).filter(
+      (fa) => fa.status === 'На счёте 08.04.1 (к вводу)'
+    );
+    const reqStems = extractKeywordStems1C(draft.description);
+    const matchedCapex =
+      capexAssets.find((fa) =>
+        extractKeywordStems1C(fa.name).some((fs) => reqStems.some((rs) => stemsMatch1C(rs, fs)))
+      ) ?? (capexAssets.length === 1 ? capexAssets[0] : undefined);
+    if (matchedCapex && matchedCapex.name) {
+      nomName = matchedCapex.name;
+      nomBinding = {
+        status: 'new_for_1c',
+        note: `Доп. расходы включены в первоначальную стоимость объекта «${matchedCapex.name}» на счёте 08.04.1 (ФСБУ 26/2020)`,
+      };
     }
   }
   if (!nomName && category === 'purchase_materials') {
@@ -2365,6 +2571,41 @@ export function bindAndGenerateOperation(
         ? `${resolvedMonthlySalary.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽/мес.`
         : 'по штатному расписанию';
     calculationProvenance = `Кадровый приказ: ${employeeName || 'Сотрудник'}${resolvedEmployeePosition ? ` (${resolvedEmployeePosition})` : ''}, оклад ${salLabel} — используется для автозаполнения «Начисление зарплаты»`;
+    amountCalculationNote = calculationProvenance;
+  }
+
+  // 6a-0a. Management Contract Event ('contract_event') & Accounting Policy Event ('policy_event'): 0 postings on signing
+  if (category === 'contract_event') {
+    const terms = extractRecurringContractTerms1C(draft.description);
+    if (!resolvedPeriodicPaymentAmount && terms?.periodicAmount && terms.periodicAmount >= 0.01) {
+      resolvedPeriodicPaymentAmount = terms.periodicAmount;
+    }
+    if (terms?.vatRule && inheritedVatRule === undefined) {
+      inheritedVatRule = terms.vatRule;
+    }
+    if (terms?.vatRate !== undefined && inheritedVatRate === undefined) {
+      inheritedVatRate = terms.vatRate;
+    }
+    if (!contractName) {
+      contractName = /аренд/iu.test(draft.description)
+        ? 'Договор аренды'
+        : /связ|интернет/iu.test(draft.description)
+          ? 'Договор услуг связи'
+          : 'Основной договор';
+      contractBinding = { status: 'new_for_1c', note: 'Договор зарегистрирован в справочнике 1С' };
+    }
+    amountMode = 'calculated_by_1c';
+    const perStr = resolvedPeriodicPaymentAmount
+      ? ` (ставка ${resolvedPeriodicPaymentAmount.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽/период)`
+      : '';
+    calculationProvenance = `Управленческое событие: заключение договора${cpName ? ` с «${cpName}»` : ''}${perStr} — сохранено в карточке «Договоры контрагентов» для последующих актов и оплат (0 проводок при подписании)`;
+    amountCalculationNote = calculationProvenance;
+  }
+
+  if (category === 'policy_event') {
+    amountMode = 'calculated_by_1c';
+    calculationProvenance =
+      'Управленческое событие: настройка параметров учётной политики организации в 1С:БП 3.0 (0 бухгалтерских проводок)';
     amountCalculationNote = calculationProvenance;
   }
 
@@ -2485,30 +2726,25 @@ export function bindAndGenerateOperation(
 
   // 6a-0d. Financial Investments ('financial_investment' / 58.02): multi-note principal sum (e.g. 280 000 + 540 000 = 820 000)
   if (category === 'financial_investment') {
-    const noteMatches = Array.from(
-      draft.description.matchAll(
-        /(?:один|первый|второй|третий|четвертый|\d+-й)?\s*(?:на(?:\s+сумму)?\s+|[—–-]\s*)?(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\d{4,}(?:[.,]\d{1,2})?)\s*(?:руб\.?|₽)?\s*под\s*(\d+(?:[.,]\d+)?)\s*%/giu
-      )
-    );
-    if (noteMatches.length >= 1) {
-      const parsedNotes = noteMatches.map((m, idx) => {
-        const val = Number(m[1].replace(/[\s\u00A0]/g, '').replace(',', '.'));
-        const rate = m[2].replace('.', ',');
-        return { index: idx + 1, val: round2(val), rate };
-      }).filter((n) => Number.isFinite(n.val) && n.val > 0);
-      const sumNotes = round2(parsedNotes.reduce((acc, n) => acc + n.val, 0));
-      if (!resolvedFinancialNotesSummary && parsedNotes.length > 0) {
-        resolvedFinancialNotesSummary = parsedNotes
+    const parsedNotesList =
+      resolvedFinancialNotesList && resolvedFinancialNotesList.length > 0
+        ? resolvedFinancialNotesList
+        : extractFinancialNotesFromText1C(draft.description);
+    if (parsedNotesList.length >= 1) {
+      resolvedFinancialNotesList = parsedNotesList;
+      const sumNotes = round2(parsedNotesList.reduce((acc, n) => acc + n.principal, 0));
+      if (!resolvedFinancialNotesSummary) {
+        resolvedFinancialNotesSummary = parsedNotesList
           .map(
             (n) =>
-              `Вексель №${n.index}: ${n.val.toLocaleString('ru-RU')} ₽ (${n.rate}% годовых)`
+              `${n.label || `Вексель №${n.index}`}: ${n.principal.toLocaleString('ru-RU')} ₽ (${n.ratePercent}% годовых)`
           )
           .join('; ');
       }
       if (effectiveDraftAmount < 0.01 && sumNotes >= 0.01) {
         effectiveDraftAmount = sumNotes;
         amountMode = 'explicit';
-        calculationProvenance = `Суммарная стоимость векселей (счёт 58.02, без НДС по ст. 149 НК РФ): ${parsedNotes.map((n) => `${n.val.toLocaleString('ru-RU')} ₽`).join(' + ')} = ${sumNotes.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽`;
+        calculationProvenance = `Суммарная стоимость векселей (счёт 58.02, без НДС по ст. 149 НК РФ): ${parsedNotesList.map((n) => `${n.principal.toLocaleString('ru-RU')} ₽`).join(' + ')} = ${sumNotes.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽`;
         amountCalculationNote = calculationProvenance;
       }
     }
@@ -3021,14 +3257,115 @@ export function bindAndGenerateOperation(
     calculationProvenance = amountCalculationNote;
   }
 
+  // --- 6f. Universal 8-Level Amount & Link Resolver («Замкнутый контур учебного задания») ---
+  const universalResolved = resolveOperationAmountAndLinks({
+    opId,
+    date: draft.date,
+    description: draft.description,
+    category,
+    explicitColumnAmount: hadExplicitInputAmount ? round2(Math.abs(draft.amount)) : 0,
+    textDerivedAmount:
+      !hadExplicitInputAmount && effectiveDraftAmount >= 0.01 ? effectiveDraftAmount : undefined,
+    quantity: effectiveQty,
+    unitPrice: effectiveUnitPrice,
+    vatRate: inheritedVatRate !== undefined ? inheritedVatRate : isOsno ? policyVatRate : 0,
+    vatRule: inheritedVatRule ?? 'included',
+    counterpartyName: cpName,
+    counterpartyInn: cpInn,
+    counterpartyKpp: cpKpp,
+    contractName,
+    nomenclatureName: nomName,
+    employeeName,
+    usefulLifeMonths: resolvedUsefulLifeMonths,
+    db1C,
+    priorOperations: priorOps,
+    virtualStateBefore: priorVirtualState,
+  });
+  resolverStep01Trace = universalResolved.step01Breakdown;
+
+  if (category === 'financial_disposal' && universalResolved.disposedNote) {
+    resolvedDisposedNoteId = universalResolved.disposedNote.key;
+  }
+
+  if (
+    !isNonPostingEventCategory &&
+    effectiveDraftAmount < 0.01 &&
+    universalResolved.resolvedAmount >= 0.01
+  ) {
+    effectiveDraftAmount = universalResolved.resolvedAmount;
+    amountMode = universalResolved.amountMode;
+    calculationProvenance = universalResolved.step01Breakdown.summaryFormula;
+    amountCalculationNote = universalResolved.step01Breakdown.summaryFormula;
+    if (universalResolved.vatRule !== undefined && inheritedVatRule === undefined) {
+      inheritedVatRule = universalResolved.vatRule;
+    }
+    if (universalResolved.vatRate !== undefined && inheritedVatRate === undefined) {
+      inheritedVatRate = universalResolved.vatRate;
+    }
+  }
+
+  if (
+    !cpName &&
+    universalResolved.counterpartyName &&
+    (needsCounterparty ||
+      category === 'financial_disposal' ||
+      category === 'loan_issued' ||
+      category === 'loan_interest_accrual')
+  ) {
+    cpName = universalResolved.counterpartyName;
+    cpInn = universalResolved.counterpartyInn || cpInn;
+    cpKpp = universalResolved.counterpartyKpp || cpKpp;
+    if (!contractName && universalResolved.contractName) {
+      contractName = universalResolved.contractName;
+    }
+    const m1c = matchPersonOrCounterpartyIn1C(cpName, cpInn, db1C);
+    if (m1c) {
+      cpName = m1c.name;
+      cpInn = cpInn || m1c.inn;
+      cpKpp = cpKpp || m1c.kpp;
+      cpSource = 'db_1c';
+      cpBinding = {
+        status: 'matched_1c',
+        matchedName: m1c.name,
+        matchedCode1C: m1c.code1C,
+        matchedInn: cpInn,
+        note: universalResolved.step01Breakdown.summaryFormula,
+      };
+    } else {
+      cpSource = cpInn.length === 10 || cpInn.length === 12 ? 'excel_explicit' : 'unresolved';
+      cpBinding = {
+        status: 'new_for_1c',
+        note: universalResolved.step01Breakdown.summaryFormula,
+      };
+    }
+    if (contractName && contractBinding.status === 'missing') {
+      contractBinding = {
+        status: cpBinding.status === 'matched_1c' ? 'matched_1c' : 'new_for_1c',
+        matchedName: cpBinding.status === 'matched_1c' ? contractName : undefined,
+        note: 'Договор связан из хронологического контекста',
+      };
+    }
+  }
+
+  const isOsSaleDisposal =
+    category === 'os_disposal' && /продан|реализ/iu.test(descLower) && hadExplicitInputAmount;
+
   const nonVatCategories: OperationCategory[] = [
     'tax_payment',
     'bank_fee',
     'founder_contribution',
     'hr_hire',
     'writ_of_execution',
+    'contract_event',
+    'policy_event',
     'alimony_payout',
     'financial_investment',
+    'financial_interest_accrual',
+    'financial_disposal',
+    'loan_issued',
+    'loan_interest_accrual',
+    'vat_deduction',
+    ...(!isOsSaleDisposal ? (['os_disposal'] as OperationCategory[]) : []),
     'payroll_accrual',
     'insurance_accrual',
     'payroll_payout',
@@ -3785,8 +4122,10 @@ export function bindAndGenerateOperation(
       }
 
       case 'hr_hire':
-      case 'writ_of_execution': {
-        // HR employment order (ПриемНаРаботу) & Writ of Execution (ИсполнительныйЛист) register rules for payroll_accrual without balance-sheet entries
+      case 'writ_of_execution':
+      case 'contract_event':
+      case 'policy_event': {
+        // Non-posting directory/policy/HR registration events (0 balance-sheet entries)
         break;
       }
 
@@ -3826,6 +4165,250 @@ export function bindAndGenerateOperation(
           finDtSub,
           finKtSub,
           draft.description || 'Приобретение долговых ценных бумаг (векселей) — счёт 58.02'
+        );
+        break;
+      }
+
+      case 'financial_interest_accrual': {
+        const noteItems = universalResolved.noteInterestItems ?? [];
+        if (noteItems.length > 0 && !hadExplicitInputAmount) {
+          for (const item of noteItems) {
+            pushEntry(
+              '76.09',
+              '91.01',
+              item.interestAmount,
+              item.note.name,
+              'Проценты к получению по ценным бумагам (векселям)',
+              `Начислены проценты по ${item.note.name}: ${item.formulaLabel}`,
+              { amountRuleNote: item.formulaLabel }
+            );
+          }
+        } else {
+          pushEntry(
+            '76.09',
+            '91.01',
+            totalWithVat,
+            cpSubconto || cpName || nomName || 'Эмитент векселя (проценты)',
+            'Проценты к получению по ценным бумагам (векселям)',
+            draft.description || 'Начислены проценты по долговым ценным бумагам (векселям)'
+          );
+        }
+        break;
+      }
+
+      case 'financial_disposal': {
+        const targetNote =
+          universalResolved.disposedNote ??
+          matchTargetActiveFinancialNote1C(priorVirtualState, draft.description);
+        if (targetNote && !resolvedDisposedNoteId) {
+          resolvedDisposedNoteId = targetNote.key;
+        }
+        const bookCost = round2(targetNote?.principalAmount ?? totalWithVat);
+        const prevAccrued = round2(targetNote?.accruedInterestAmount ?? 0);
+        const remInterest = round2(universalResolved.disposedRemainingInterest ?? 0);
+        const transferValue =
+          hadExplicitInputAmount && totalWithVat >= 0.01
+            ? totalWithVat
+            : round2(bookCost + prevAccrued + remInterest);
+        const proceeds9101 = round2(transferValue - prevAccrued);
+        const noteSub = targetNote?.name || resolvedFinancialNotesSummary || nomName || 'Вексель третьего лица';
+        const settlementSub = cpSubconto || cpName || noteSub;
+
+        if (proceeds9101 >= 0.01) {
+          pushEntry(
+            '76.09',
+            '91.01',
+            proceeds9101,
+            settlementSub,
+            'Выбытие (передача/погашение) ценных бумаг',
+            `Отражён прочий доход от выбытия ${noteSub} (номинал + доначисленные %)`
+          );
+        } else if (proceeds9101 <= -0.01) {
+          pushEntry(
+            '91.02',
+            '76.09',
+            Math.abs(proceeds9101),
+            'Прочие расходы при выбытии ценных бумаг',
+            settlementSub,
+            `Списана разница при выбытии ${noteSub}`
+          );
+        }
+
+        if (bookCost >= 0.01) {
+          pushEntry(
+            '91.02',
+            '58.02',
+            bookCost,
+            'Списание балансовой стоимости ценных бумаг',
+            noteSub,
+            `Списана балансовая стоимость выбывшего ${noteSub} (ПБУ 19/02)`
+          );
+        }
+
+        const isEndorsedToSupplier =
+          /поставщик|подрядчик|в\s+сч[её]т\s+(?:оплат|погашен|задолженност|долг|расчет)|передан\p{L}*\s+вексел|индоссам/iu.test(
+            descLower
+          ) ||
+          (Boolean(cpName) &&
+            !/погашен\p{L}*\s+(?:банк|эмитент)|на\s+р\/с|на\s+расчетн/iu.test(descLower));
+
+        if (transferValue >= 0.01) {
+          if (isEndorsedToSupplier) {
+            pushEntry(
+              '60.01',
+              '76.09',
+              transferValue,
+              cpSubconto || cpName || 'Поставщик',
+              settlementSub,
+              `Зачтена стоимость переданного ${noteSub} в счёт оплаты поставщику`
+            );
+          } else {
+            pushEntry(
+              '51',
+              '76.09',
+              transferValue,
+              bankSubconto,
+              settlementSub,
+              `Поступили денежные средства при погашении ${noteSub}`
+            );
+          }
+        }
+        break;
+      }
+
+      case 'loan_issued': {
+        pushEntry(
+          '58.03',
+          '51',
+          totalWithVat,
+          cpSubconto || cpName || 'Заёмщик (процентный заём)',
+          bankSubconto,
+          draft.description || 'Предоставлен процентный заём контрагенту (счёт 58.03)'
+        );
+        break;
+      }
+
+      case 'loan_interest_accrual': {
+        const isReceivedLoanInterest =
+          /по\s+полученн\p{L}*\s+(?:займ|кредит)|кредит\p{L}*\s+банк|заимодавц/iu.test(descLower) &&
+          !/выданн\p{L}*\s+займ/iu.test(descLower);
+        if (isReceivedLoanInterest) {
+          pushEntry(
+            '91.02',
+            '66.04',
+            totalWithVat,
+            'Проценты к уплате по займам и кредитам',
+            cpSubconto || cpName || 'Заимодавец',
+            draft.description || 'Начислены проценты по полученному займу (кредиту)'
+          );
+        } else {
+          pushEntry(
+            '76.09',
+            '91.01',
+            totalWithVat,
+            cpSubconto || cpName || 'Заёмщик (проценты по выданному займу)',
+            'Проценты к получению по предоставленным займам',
+            draft.description || 'Начислены проценты к получению по выданному займу'
+          );
+        }
+        break;
+      }
+
+      case 'os_disposal': {
+        const commissionedAssets = Object.values(priorVirtualState.fixedAssets).filter(
+          (fa) => fa.status === 'Введено в эксплуатацию (счёт 01.01)'
+        );
+        const reqStems = extractKeywordStems1C(`${nomName} ${draft.description}`);
+        const matchedOs =
+          commissionedAssets.find((fa) =>
+            extractKeywordStems1C(fa.name).some((fs) => reqStems.some((rs) => stemsMatch1C(rs, fs)))
+          ) ?? (commissionedAssets.length === 1 ? commissionedAssets[0] : undefined);
+        const initialCost = round2(matchedOs?.initialCost ?? totalWithVat);
+        const accumDepr = round2(matchedOs?.accumulatedDepreciation ?? 0);
+        const residualValue = round2(Math.max(0, initialCost - accumDepr));
+        const assetSub = matchedOs?.name || nomName || 'Объект основных средств';
+
+        if (initialCost >= 0.01) {
+          pushEntry(
+            '01.09',
+            '01.01',
+            initialCost,
+            assetSub,
+            assetSub,
+            `Списана первоначальная стоимость выбывающего ОС «${assetSub}» на субсчёт 01.09`
+          );
+        }
+        if (accumDepr >= 0.01) {
+          pushEntry(
+            '02.01',
+            '01.09',
+            Math.min(initialCost, accumDepr),
+            assetSub,
+            assetSub,
+            `Списана накопленная амортизация ОС «${assetSub}» в Кт 01.09`
+          );
+        }
+        if (residualValue >= 0.01) {
+          pushEntry(
+            '91.02',
+            '01.09',
+            residualValue,
+            'Списание основных средств (ФСБУ 6/2020)',
+            assetSub,
+            `Списана остаточная стоимость выбывшего ОС «${assetSub}» в прочие расходы`
+          );
+        }
+        if (isOsSaleDisposal && totalWithVat >= 0.01) {
+          pushEntry(
+            '62.01',
+            '91.01',
+            totalWithVat,
+            cpSubconto || cpName || 'Покупатель ОС',
+            'Реализация основных средств',
+            `Отражена выручка от продажи ОС «${assetSub}»`
+          );
+          if (vatAmount > 0) {
+            pushEntry(
+              '91.02',
+              '68.02',
+              vatAmount,
+              'Реализация основных средств',
+              'Налог (взносы): начислено / уплачено',
+              'Начислен НДС при реализации основного средства'
+            );
+          }
+        }
+        break;
+      }
+
+      case 'vat_deduction': {
+        let vatSubAcc = '19.03';
+        if (/ос|основн\p{L}*\s+средств|оборудован|внеоборотн|08\.04|19\.01/iu.test(descLower)) {
+          vatSubAcc = '19.01';
+        } else if (/услуг|работ|аренд|связ|доставк|19\.04/iu.test(descLower)) {
+          vatSubAcc = '19.04';
+        } else {
+          const runningOsv19 = calculateOsvReport({
+            db1C,
+            operations: priorOps,
+            dateTo: draft.date || undefined,
+            reportingYear: batchContext?.reportingYear,
+            includeQueuedOperations: true,
+          });
+          const open19 = runningOsv19.leafRows
+            .filter((r) => r.code.startsWith('19.') && r.endDebit >= 0.01)
+            .sort((a, b) => b.endDebit - a.endDebit)[0];
+          if (open19) {
+            vatSubAcc = open19.code;
+          }
+        }
+        pushEntry(
+          '68.02',
+          vatSubAcc,
+          totalWithVat,
+          'Налог (взносы): начислено / уплачено',
+          cpName || 'Счета-фактуры полученные',
+          draft.description || 'Принят к вычету входной НДС в книгу покупок (ст. 171–172 НК РФ)'
         );
         break;
       }
@@ -4122,7 +4705,7 @@ export function bindAndGenerateOperation(
                 (e) =>
                   (e.monthlySalary ?? 0) > 0 &&
                   (e.key === `emp:${writPersonKey}` ||
-                    e.name.toLowerCase().replace(/ё/g, 'е').split(/\s+/)[0] === writSurname)
+                    e.fullName.toLowerCase().replace(/ё/g, 'е').split(/\s+/)[0] === writSurname)
               );
 
             const debtorGross =
@@ -4419,7 +5002,19 @@ export function bindAndGenerateOperation(
   const finalOpAmount =
     category === 'closing' && entries.length > 0
       ? round2(entries.reduce((s, e) => s + e.amount, 0))
-      : totalWithVat;
+      : category === 'financial_disposal' && totalWithVat < 0.01 && entries.length > 0
+        ? round2(
+            entries.find((e) => e.credit === '76.09')?.amount ??
+              entries.find((e) => e.credit === '58.02')?.amount ??
+              0
+          )
+        : category === 'os_disposal' && totalWithVat < 0.01 && entries.length > 0
+          ? round2(
+              entries.find((e) => e.debit === '91.02' && e.credit === '01.09')?.amount ??
+                entries.find((e) => e.debit === '01.09')?.amount ??
+                0
+            )
+          : totalWithVat;
 
   // --- 8. Deduplication check against 1C DB (never deduplicates between imported Excel rows!) ---
   const dupCheck = checkDuplicateIn1CDb(
@@ -4451,6 +5046,14 @@ export function bindAndGenerateOperation(
   } else if (category === 'writ_of_execution') {
     readinessStatus = 'ready';
     readinessNote = `Исполнительный лист учтён (${resolvedAlimonyShareLabel || '1/4 (25%)'} с ${employeeName || 'сотрудника'} в пользу ${resolvedAlimonyRecipientName || 'получателя'})`;
+  } else if (category === 'contract_event') {
+    readinessStatus = 'ready';
+    readinessNote = resolvedPeriodicPaymentAmount
+      ? `Договор зарегистрирован (ставка ${resolvedPeriodicPaymentAmount.toLocaleString('ru-RU')} ₽/период, без проводок при подписании)`
+      : 'Договор зарегистрирован в справочнике 1С (без проводок при подписании)';
+  } else if (category === 'policy_event') {
+    readinessStatus = 'ready';
+    readinessNote = 'Параметр учётной политики 1С:БП 3.0 учтён (без проводок)';
   } else if (category === 'manual' && entries.length === 0) {
     readinessStatus = 'needs_clarification';
     readinessNote =
@@ -4462,7 +5065,7 @@ export function bindAndGenerateOperation(
     readinessStatus = 'needs_clarification';
     readinessNote =
       'Укажите штатный ФОТ за месяц в карточке для расчёта зарплаты, НДФЛ (13%) и страховых взносов';
-  } else if (needsAmount || amountMode === 'required_missing') {
+  } else if ((needsAmount || amountMode === 'required_missing') && finalOpAmount < 0.01) {
     readinessStatus = 'critical_error';
     readinessNote = 'Требуется указать сумму первичного документа';
   } else if (needsCounterparty && cpBinding.status === 'missing') {
@@ -4513,7 +5116,7 @@ export function bindAndGenerateOperation(
         : readinessNote,
     stockSourceNote,
     calculationProvenance: calculationProvenance || amountCalculationNote,
-    needsAmount: needsAmount || undefined,
+    needsAmount: (needsAmount && finalOpAmount < 0.01) || undefined,
     amountCalculationNote,
     monthlySalary: resolvedMonthlySalary,
     employeePosition: resolvedEmployeePosition,
@@ -4529,6 +5132,11 @@ export function bindAndGenerateOperation(
     alimonyRatePercent: resolvedAlimonyRatePercent,
     alimonyShareLabel: resolvedAlimonyShareLabel,
     financialNotesSummary: resolvedFinancialNotesSummary || undefined,
+    financialNotesList: resolvedFinancialNotesList,
+    disposedFinancialNoteId: resolvedDisposedNoteId,
+    periodicPaymentAmount: resolvedPeriodicPaymentAmount,
+    interestRatePercent: resolvedInterestRatePercent,
+    resolverTrace: resolverStep01Trace,
     vatRate,
     vatRule,
     vatAmount,
@@ -4604,28 +5212,45 @@ export function bindAndGenerateOperation(
   builtOp.mentorGuide1C = {
     ...baseGuide,
     step00Prep: buildStep00DirectoryPrepSteps(priorVirtualState, builtOp),
+    step01CalculationBreakdown: resolverStep01Trace ?? baseGuide.step01CalculationBreakdown,
   };
   return builtOp;
 }
 
 /**
  * Attaches chronological Step 00 directory preparation instructions (`step00Prep`)
- * to every operation using 1-based UI display numbering `#1..#N`.
+ * and syncs `#1..#N` source operation numbers on `step01CalculationBreakdown`
+ * for every operation in the workbench.
  */
 export function attachVirtualStateStep00ToOperations(
   operations: QueuedOperation[],
   db1C: Database1CSnapshot | null
 ): QueuedOperation[] {
   if (operations.length === 0) return operations;
-  const { stateBeforeByOpId } = buildVirtual1CStateTimeline(db1C, operations);
+  const { stateBeforeByOpId, displayNumberByOpId } = buildVirtual1CStateTimeline(db1C, operations);
   return operations.map((op) => {
     const stateBefore = stateBeforeByOpId[op.id] ?? createInitialVirtual1CState(db1C);
     const guide = op.mentorGuide1C ?? buildOperationMentorGuide1C(op, db1C);
+    const rawStep01 = op.resolverTrace ?? guide.step01CalculationBreakdown;
+    const syncedStep01 = rawStep01
+      ? {
+          ...rawStep01,
+          sourceLinks: rawStep01.sourceLinks.map((lnk) => ({
+            ...lnk,
+            opNumber:
+              lnk.opId && displayNumberByOpId[lnk.opId]
+                ? displayNumberByOpId[lnk.opId]
+                : lnk.opNumber,
+          })),
+        }
+      : undefined;
     return {
       ...op,
+      resolverTrace: syncedStep01 ?? op.resolverTrace,
       mentorGuide1C: {
         ...guide,
         step00Prep: buildStep00DirectoryPrepSteps(stateBefore, op),
+        step01CalculationBreakdown: syncedStep01 ?? guide.step01CalculationBreakdown,
       },
     };
   });
@@ -4634,7 +5259,7 @@ export function attachVirtualStateStep00ToOperations(
 /**
  * Chronologically recalculates dependent operations in the ledger whenever an upstream
  * operation (e.g. ПриемНаРаботу salary, ИсполнительныйЛист 76.41, OS commissioning СПИ,
- * advance, or supplier receipt) is updated by the user.
+ * recurring contract, promissory note, advance, or supplier receipt) is updated.
  */
 export function recalculateOperationsChronologically(
   operations: QueuedOperation[],
@@ -4661,14 +5286,26 @@ export function recalculateOperationsChronologically(
       op.amountMode === 'from_account_balance' ||
       op.amountMode === 'from_related_doc' ||
       op.amountMode === 'from_stock_balance' ||
+      Boolean(op.needsAmount) ||
       op.category === 'closing' ||
+      op.category === 'contract_event' ||
+      op.category === 'policy_event' ||
       op.category === 'writ_of_execution' ||
       op.category === 'alimony_payout' ||
       op.category === 'financial_investment' ||
+      op.category === 'financial_interest_accrual' ||
+      op.category === 'financial_disposal' ||
+      op.category === 'loan_issued' ||
+      op.category === 'loan_interest_accrual' ||
+      op.category === 'os_disposal' ||
+      op.category === 'vat_deduction' ||
+      op.category === 'purchase_services' ||
+      op.category === 'purchase_equipment' ||
       op.category === 'bank_out' ||
       op.category === 'payroll_accrual' ||
       op.category === 'insurance_accrual' ||
       op.category === 'payroll_payout' ||
+      op.category === 'accountable_return' ||
       op.category === 'tax_payment' ||
       op.category === 'depreciation_accrual' ||
       op.category === 'os_commissioning' ||
@@ -4715,6 +5352,10 @@ export function recalculateOperationsChronologically(
         alimonyRatePercent: op.alimonyRatePercent,
         alimonyShareLabel: op.alimonyShareLabel,
         financialNotesSummary: op.financialNotesSummary,
+        financialNotesList: op.financialNotesList,
+        disposedFinancialNoteId: op.disposedFinancialNoteId,
+        periodicPaymentAmount: op.periodicPaymentAmount,
+        interestRatePercent: op.interestRatePercent,
         vatRate: op.vatRate,
         vatRule: op.vatRule,
         vatAmount: op.amountMode === 'explicit' ? op.vatAmount : undefined,
@@ -4798,6 +5439,7 @@ export function isMisclassifiedLegacyOperation(op: QueuedOperation): boolean {
         'materials_writeoff',
         'workwear_issue',
         'os_commissioning',
+        'os_disposal',
         'production_output',
         'warehouse_transfer',
         'cash_bank_internal',
@@ -4806,14 +5448,21 @@ export function isMisclassifiedLegacyOperation(op: QueuedOperation): boolean {
         'accountable_return',
         'loan_received',
         'loan_repaid',
+        'loan_issued',
+        'loan_interest_accrual',
         'sale_goods',
         'sale_services',
         'depreciation_accrual',
         'insurance_accrual',
         'hr_hire',
         'writ_of_execution',
+        'contract_event',
+        'policy_event',
         'alimony_payout',
         'financial_investment',
+        'financial_interest_accrual',
+        'financial_disposal',
+        'vat_deduction',
         'bank_out',
         'payroll_accrual',
         'payroll_payout',
@@ -4872,6 +5521,10 @@ export function rebindOperationsAgainst1CDb(
         alimonyRatePercent: op.alimonyRatePercent,
         alimonyShareLabel: op.alimonyShareLabel,
         financialNotesSummary: op.financialNotesSummary,
+        financialNotesList: op.financialNotesList,
+        disposedFinancialNoteId: op.disposedFinancialNoteId,
+        periodicPaymentAmount: op.periodicPaymentAmount,
+        interestRatePercent: op.interestRatePercent,
         vatRate: shouldReclassify ? undefined : op.vatRate,
         vatRule: shouldReclassify ? undefined : op.vatRule,
         vatAmount: shouldReclassify ? undefined : op.vatAmount,
@@ -4916,6 +5569,9 @@ export function rebindOperationsAgainst1CDb(
         rebound.amountMode !== 'from_related_doc' &&
         rebound.amountMode !== 'from_account_balance' &&
         rebound.category !== 'payroll_accrual' &&
+        rebound.category !== 'financial_interest_accrual' &&
+        rebound.category !== 'financial_disposal' &&
+        rebound.category !== 'os_disposal' &&
         rebound.category !== 'closing'
           ? op.entries
           : rebound.entries,
@@ -4963,6 +5619,7 @@ export function sanitizeHydratedOperations(
       !op.readinessStatus ||
       !op.mentorGuide1C ||
       !op.mentorGuide1C.step00Prep ||
+      !op.mentorGuide1C.step01CalculationBreakdown ||
       (isFounderOp && (op.category !== 'founder_contribution' || !rawTrimmed));
 
     if (shouldRebuild) {
@@ -4987,6 +5644,10 @@ export function sanitizeHydratedOperations(
           alimonyRatePercent: op.alimonyRatePercent,
           alimonyShareLabel: op.alimonyShareLabel,
           financialNotesSummary: op.financialNotesSummary,
+          financialNotesList: op.financialNotesList,
+          disposedFinancialNoteId: op.disposedFinancialNoteId,
+          periodicPaymentAmount: op.periodicPaymentAmount,
+          interestRatePercent: op.interestRatePercent,
           vatRate: resetClass ? undefined : op.vatRate,
           vatRule: resetClass ? undefined : op.vatRule,
           vatAmount: resetClass ? undefined : op.vatAmount,

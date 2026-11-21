@@ -12,6 +12,7 @@ import {
   AccompanyingAction1C,
   AuditIssue,
   AutoFixChangeRecord,
+  AutofixExecutionSummary,
   BalanceAnchorOverride,
   BatchImportCompletenessStats,
   Database1CSnapshot,
@@ -37,11 +38,13 @@ import {
 } from '@/lib/storage';
 import {
   generateEducationalInnKpp,
+  inferOrganizationRegionCode,
   validateRussianInnChecksum,
 } from '@/lib/egrul/egrulLookup';
 import {
   attachVirtualStateStep00ToOperations,
   autoFixAllBy1CDb,
+  autoFixAuditIssue,
   autoFixSingleOperation,
   BatchSequentialContext,
   bindAndGenerateOperation,
@@ -141,6 +144,7 @@ interface AccountantContextValue {
   lastImportStats: BatchImportCompletenessStats | null;
   autoFixLogs: string[];
   autoFixChanges: AutoFixChangeRecord[];
+  autoFixSummary: AutofixExecutionSummary | null;
   isLookingUpEgrul: boolean;
   egrulProgress: { checked: number; total: number } | null;
   exportMode: ExportMode1C;
@@ -158,6 +162,7 @@ interface AccountantContextValue {
   changeOperationDocType1C: (id: string, docType1C: DocType1CBP30) => void;
   rebuildSingleOperationPostings: (id: string) => void;
   runSingleOperationAutoFix: (operationId: string) => number;
+  runAuditIssueAutoFix: (issue: AuditIssue) => number;
   updateOperationPayrollParams: (
     operationId: string,
     params: {
@@ -236,6 +241,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     useState<BatchImportCompletenessStats | null>(null);
   const [autoFixLogs, setAutoFixLogs] = useState<string[]>([]);
   const [autoFixChanges, setAutoFixChanges] = useState<AutoFixChangeRecord[]>([]);
+  const [autoFixSummary, setAutoFixSummary] = useState<AutofixExecutionSummary | null>(null);
   const [isLookingUpEgrul, setIsLookingUpEgrul] = useState<boolean>(false);
   const [egrulProgress, setEgrulProgress] = useState<{ checked: number; total: number } | null>(
     null
@@ -359,6 +365,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       setExportMode(saved.exportMode);
       setLastImportStats(saved.lastImportStats ?? null);
       setAutoFixChanges(saved.autoFixChanges ?? []);
+      setAutoFixSummary(saved.autoFixSummary ?? null);
       if (saved.db1C) {
         setSyncStatus('connected');
       }
@@ -412,6 +419,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       exportMode,
       lastImportStats,
       autoFixChanges,
+      autoFixSummary,
     });
   }, [
     hydrated,
@@ -426,6 +434,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     exportMode,
     lastImportStats,
     autoFixChanges,
+    autoFixSummary,
   ]);
 
   const executeEgrulLookupInternal = useCallback(
@@ -477,13 +486,28 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       const queries = Array.from(queriesMap.values());
       if (queries.length === 0) return 0;
 
+      const orgInn = db1C?.organization.inn || '';
+      const orgBik =
+        lastImportStats?.sheetDefaults.defaultBik ||
+        db1C?.organization.bik ||
+        DEFAULT_SBERBANK_BIK;
+      const orgRegionHint = inferOrganizationRegionCode({
+        organizationInn: orgInn,
+        organizationBik: orgBik,
+      });
+
       setIsLookingUpEgrul(true);
       setEgrulProgress({ checked: 0, total: queries.length });
       try {
         const res = await fetch('/api/egrul-lookup', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ queries, regionHint: '78' }),
+          body: JSON.stringify({
+            queries,
+            regionHint: orgRegionHint,
+            organizationInn: orgInn,
+            organizationBik: orgBik,
+          }),
         });
         if (!res.ok) return 0;
         const data = (await res.json()) as {
@@ -635,7 +659,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
         setEgrulProgress(null);
       }
     },
-    [pushNotice]
+    [db1C, lastImportStats, pushNotice]
   );
 
   const lookupCounterpartiesInEgrul = useCallback(
@@ -1349,6 +1373,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     setLastImportStats(null);
     setAutoFixLogs([]);
     setAutoFixChanges([]);
+    setAutoFixSummary(null);
     pushNotice('info', 'Очередь загруженных операций очищена.');
   }, [pushNotice]);
 
@@ -1460,6 +1485,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     setOsvSourceMode('combined');
     setAutoFixLogs(res.log);
     setAutoFixChanges(res.structuredChanges);
+    setAutoFixSummary(res.executionSummary);
 
     // Also run official FNS EGRUL verification for any remaining unresolved counterparties
     void executeEgrulLookupInternal(res.operations, undefined, true);
@@ -1467,7 +1493,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     if (res.fixedCount > 0) {
       pushNotice(
         'success',
-        `Автоисправление выполнено: исправлено замечаний и регламентных блоков — ${res.fixedCount}`
+        `Автоисправление выполнено: исправлено замечаний и регламентных блоков — ${res.fixedCount} · Осталось автоисправляемых: ${res.executionSummary.remainingAutofixableCount}`
       );
     } else {
       pushNotice(
@@ -1525,6 +1551,74 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       reportingYear,
       balanceAnchorOverride,
       pushNotice,
+    ]
+  );
+
+  const runAuditIssueAutoFix = useCallback(
+    (issue: AuditIssue): number => {
+      const activeDates = operations
+        .filter(
+          (o) =>
+            o.includeInProcessing &&
+            !o.autoGeneratedKind &&
+            o.date.startsWith(`${reportingYear}-`)
+        )
+        .map((o) => o.date)
+        .sort();
+      const lastOpMonthEnd = (() => {
+        const lastOp = activeDates[activeDates.length - 1];
+        if (!lastOp) return periodFilter.dateTo || `${reportingYear}-12-31`;
+        const [, mStr] = lastOp.split('-');
+        const month = Number(mStr) || 12;
+        const lastDay = new Date(Date.UTC(reportingYear, month, 0)).getUTCDate();
+        return `${reportingYear}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+      })();
+
+      const defaultBik =
+        lastImportStats?.sheetDefaults.defaultBik ||
+        db1C?.organization.bik ||
+        DEFAULT_SBERBANK_BIK;
+
+      const res = autoFixAuditIssue({
+        issue,
+        db1C,
+        operations,
+        calculateCurrentOsv: (ops) =>
+          calculateOsvReport({
+            db1C,
+            operations: ops,
+            dateFrom: periodFilter.dateFrom,
+            dateTo: periodFilter.dateTo,
+            reportingYear,
+            balanceAnchorOverride,
+            includeQueuedOperations: true,
+          }),
+        periodEndDate: lastOpMonthEnd,
+        reportingYear,
+        defaultBik,
+      });
+
+      setOperations(res.operations);
+      setOsvSourceMode('combined');
+      if (res.structuredChanges.length > 0) {
+        setAutoFixChanges((prev) => [...prev, ...res.structuredChanges]);
+      }
+      if (res.executionSummary) {
+        setAutoFixSummary(res.executionSummary);
+      }
+      pushNotice('success', res.summary);
+      return res.fixedCount;
+    },
+    [
+      db1C,
+      operations,
+      periodFilter.dateFrom,
+      periodFilter.dateTo,
+      reportingYear,
+      balanceAnchorOverride,
+      lastImportStats,
+      pushNotice,
+      setOsvSourceMode,
     ]
   );
 
@@ -1603,8 +1697,15 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
           continue;
         }
 
+        const homeRegion = inferOrganizationRegionCode({
+          organizationInn: db1C?.organization.inn,
+          organizationBik:
+            lastImportStats?.sheetDefaults.defaultBik ||
+            db1C?.organization.bik ||
+            DEFAULT_SBERBANK_BIK,
+        });
         if (!generatedByGroup.has(groupKey)) {
-          const gen = generateEducationalInnKpp(trimmed, op.counterpartyKind, '78');
+          const gen = generateEducationalInnKpp(trimmed, op.counterpartyKind, homeRegion);
           generatedByGroup.set(groupKey, { name: trimmed, ...gen });
         }
       }
@@ -1696,7 +1797,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       );
       return count;
     },
-    [operations, db1C, pushNotice]
+    [operations, db1C, lastImportStats, pushNotice]
   );
 
   const runClosingAndOffsetsOnly = useCallback(() => {
@@ -2301,6 +2402,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     setLastImportStats(null);
     setAutoFixLogs([]);
     setAutoFixChanges([]);
+    setAutoFixSummary(null);
     setPeriodFilter({
       dateFrom: `${reportingYear}-01-01`,
       dateTo: `${reportingYear}-12-31`,
@@ -2347,6 +2449,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       lastImportStats,
       autoFixLogs,
       autoFixChanges,
+      autoFixSummary,
       isLookingUpEgrul,
       egrulProgress,
       exportMode,
@@ -2362,6 +2465,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       changeOperationDocType1C,
       rebuildSingleOperationPostings,
       runSingleOperationAutoFix,
+      runAuditIssueAutoFix,
       updateOperationPayrollParams,
       updateOperationOsParams,
       removeOperation,
@@ -2406,6 +2510,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       lastImportStats,
       autoFixLogs,
       autoFixChanges,
+      autoFixSummary,
       isLookingUpEgrul,
       egrulProgress,
       exportMode,
@@ -2421,6 +2526,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       changeOperationDocType1C,
       rebuildSingleOperationPostings,
       runSingleOperationAutoFix,
+      runAuditIssueAutoFix,
       updateOperationPayrollParams,
       updateOperationOsParams,
       removeOperation,

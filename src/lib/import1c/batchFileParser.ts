@@ -15,6 +15,8 @@ import {
 import {
   advanceVirtual1CStateWithOperation,
   createInitialVirtual1CState,
+  extractFinancialNotesFromText1C,
+  extractRecurringContractTerms1C,
 } from '@/lib/engine/virtual1CState';
 import { resolveBankInfoByBik } from '@/lib/egrul/egrulLookup';
 import {
@@ -24,6 +26,7 @@ import {
   DEFAULT_SBERBANK_BIK,
   DEFAULT_SBERBANK_CORR,
   DEFAULT_SBERBANK_NAME,
+  ParsedFinancialNoteItem1C,
   QueuedOperation,
   SkippedExcelRowReason,
 } from '@/types/accounting';
@@ -249,8 +252,40 @@ export interface ExtractedFreeTextRequisites {
   alimonyRatePercentHint?: number;
   alimonyShareLabelHint?: string;
   financialNotesSummaryHint?: string;
+  financialNotesListHint?: ParsedFinancialNoteItem1C[];
+  periodicPaymentAmountHint?: number;
+  interestRatePercentHint?: number;
   multiSumTotal?: number;
   multiSumNote?: string;
+}
+
+export function isNonPostingManagementOrPolicyText(text: string): boolean {
+  const clean = (text ?? '').toLowerCase().replace(/ё/g, 'е');
+  if (
+    /принят\p{L}*\s+на\s+работу|прием\s+на\s+работу|оформлен\p{L}*\s+в\s+штат|поступил\p{L}*\s+исполнительн\p{L}*\s+лист/iu.test(
+      clean
+    )
+  ) {
+    return true;
+  }
+  if (
+    /(?:утвержден|принят|установлен|издан)\p{L}*.*(?:учетн\p{L}*\s+политик|лимит\s+(?:остатка\s+)?касс|штатн\p{L}*\s+расписан|приказ\s+об\s+учетн)/iu.test(
+      clean
+    )
+  ) {
+    return true;
+  }
+  if (
+    /(?:заключен|подписан|пролонгирован)\p{L}*\s+договор|(?:выставлен|получен|поступил)\p{L}*\s+счет\s+на\s+оплат/iu.test(
+      clean
+    ) &&
+    !/оплачен|перечислен|списан\p{L}*\s+с\s+р\/с|поступил\p{L}*\s+(?:товар|материал|оборудован|деньг|денежн|аванс|оплат)|оказан\p{L}*\s+услуг|выполнен\p{L}*\s+работ|акт\s+(?:оказанных|выполненных)|товарн\p{L}*\s+накладн|торг-12|(?:^|[^\p{L}])упд(?=$|[^\p{L}])/iu.test(
+      clean
+    )
+  ) {
+    return true;
+  }
+  return false;
 }
 
 const DATIVE_ROLE_TO_NOMINATIVE: Array<{ re: RegExp; label: string }> = [
@@ -375,7 +410,27 @@ function extractMultiSumAndFinancialNotes(text: string): {
     );
   if (!isMultiValueContext) return {};
 
-  // Scrub dates, requisite codes, doc numbers, percentages, and physical quantities/months
+  // 1. If structured securities / promissory notes with (principal, % rate) pairs exist, sum ONLY those note principals!
+  const structuredNotes = extractFinancialNotesFromText1C(text);
+  if (structuredNotes.length >= 2) {
+    const notesSum =
+      Math.round((structuredNotes.reduce((s, n) => s + n.principal, 0) + Number.EPSILON) * 100) /
+      100;
+    const summaryHint = structuredNotes
+      .map(
+        (n) =>
+          `${n.label || `Вексель №${n.index}`}: ${n.principal.toLocaleString('ru-RU')} ₽ (под ${n.ratePercent}%)`
+      )
+      .join(', ');
+    const partsStr = structuredNotes.map((n) => `${n.principal.toLocaleString('ru-RU')} ₽`).join(' + ');
+    return {
+      multiSumTotal: notesSum,
+      multiSumNote: `Суммированы номиналы ценных бумаг из условия: ${partsStr} = ${notesSum.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`,
+      financialNotesSummaryHint: summaryHint,
+    };
+  }
+
+  // 2. Scrub dates, requisite codes, doc numbers, percentages, and physical quantities/months
   const scrubbed = text
     .replace(/\b\d{1,2}[./]\d{1,2}[./]\d{2,4}\b/g, ' ')
     .replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' ')
@@ -390,11 +445,24 @@ function extractMultiSumAndFinancialNotes(text: string): {
   const rawMatches = Array.from(
     scrubbed.matchAll(/(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\b\d{4,9}(?:[.,]\d{1,2})?\b)/g)
   );
-  const amounts = rawMatches
+  let amounts = rawMatches
     .map((m) => parseRussianNumber(m[1]))
     .filter((n) => Number.isFinite(n) && n >= 100);
 
   if (amounts.length < 2) return {};
+
+  // Guard against "на сумму 820 000 руб.: 280 000 руб. и 540 000 руб." or "280 000 и 540 000, всего 820 000"
+  if (amounts.length >= 3) {
+    const restAfterFirst =
+      Math.round((amounts.slice(1).reduce((a, b) => a + b, 0) + Number.EPSILON) * 100) / 100;
+    const initBeforeLast =
+      Math.round((amounts.slice(0, -1).reduce((a, b) => a + b, 0) + Number.EPSILON) * 100) / 100;
+    if (Math.abs(amounts[0] - restAfterFirst) < 0.05) {
+      amounts = amounts.slice(1);
+    } else if (Math.abs(amounts[amounts.length - 1] - initBeforeLast) < 0.05) {
+      amounts = amounts.slice(0, -1);
+    }
+  }
 
   const sum = Math.round((amounts.reduce((a, b) => a + b, 0) + Number.EPSILON) * 100) / 100;
   const pctMatches = Array.from(text.matchAll(/(\d+(?:[.,]\d+)?)\s*%/g)).map((m) => m[1]);
@@ -877,11 +945,20 @@ export function extractRequisitesFromFreeText(
 
   // I. Multi-sum promissory notes / securities ("Приобретено два векселя (один на 280 000 под 13% , второй - 540 000 под 11%)")
   const multiSum = extractMultiSumAndFinancialNotes(text);
-  if (!nomenclatureHint && multiSum.financialNotesSummaryHint) {
+  const parsedNotesList = extractFinancialNotesFromText1C(text);
+  if (!nomenclatureHint && (multiSum.financialNotesSummaryHint || parsedNotesList.length > 0)) {
     nomenclatureHint = /облигац/iu.test(text)
       ? 'Долговые ценные бумаги (облигации)'
       : 'Векселя третьих лиц';
   }
+
+  // J. Recurring contract fee & loan/security interest rate
+  const isContractSignOrInvoice = isNonPostingManagementOrPolicyText(text);
+  const recurringTerms = isContractSignOrInvoice ? extractRecurringContractTerms1C(text) : null;
+  const ratePctMatch = text.match(/(?:под|по\s+ставк\p{L}*|ставк\p{L}*)\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*%/iu);
+  const interestRatePercentHint = ratePctMatch
+    ? Number(ratePctMatch[1].replace(',', '.'))
+    : undefined;
 
   const cleanBik = bikMatch ? bikMatch[1] : '';
   const bankInfo = cleanBik ? resolveBankInfoByBik(cleanBik) : undefined;
@@ -909,6 +986,9 @@ export function extractRequisitesFromFreeText(
     alimonyRatePercentHint,
     alimonyShareLabelHint,
     financialNotesSummaryHint: multiSum.financialNotesSummaryHint,
+    financialNotesListHint: parsedNotesList.length > 0 ? parsedNotesList : undefined,
+    periodicPaymentAmountHint: recurringTerms?.periodicAmount,
+    interestRatePercentHint,
     multiSumTotal: multiSum.multiSumTotal,
     multiSumNote: multiSum.multiSumNote,
   };
@@ -1341,9 +1421,7 @@ function mapTabularRowToDraft(params: {
   } else if (
     effectiveAmount < 0.01 &&
     description &&
-    !/принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу|оформлен\p{L}*\s+в\s+штат|поступил\p{L}*\s+исполнительн\p{L}*\s+лист/iu.test(
-      description
-    )
+    !isNonPostingManagementOrPolicyText(description)
   ) {
     const inlineSumMatch =
       description.match(
@@ -1360,6 +1438,7 @@ function mapTabularRowToDraft(params: {
     }
   }
 
+  const isNonPostingRow = Boolean(description && isNonPostingManagementOrPolicyText(description));
   const finalInn = innCell.replace(/\D/g, '') || extracted.inn;
   const finalKpp = kppCell.replace(/\D/g, '') || extracted.kpp;
 
@@ -1371,7 +1450,7 @@ function mapTabularRowToDraft(params: {
       docNumber: docNumber || extracted.docNumber,
       description: description || nomCell || counterpartyCell || 'Хозяйственная операция',
       amount: effectiveAmount,
-      needsAmount: effectiveAmount < 0.01 ? true : undefined,
+      needsAmount: !isNonPostingRow && effectiveAmount < 0.01 ? true : undefined,
       amountCalculationNote,
       vatRate,
       vatRule,
@@ -1407,6 +1486,9 @@ function mapTabularRowToDraft(params: {
       alimonyRatePercent: extracted.alimonyRatePercentHint,
       alimonyShareLabel: extracted.alimonyShareLabelHint,
       financialNotesSummary: extracted.financialNotesSummaryHint,
+      financialNotesList: extracted.financialNotesListHint,
+      periodicPaymentAmount: extracted.periodicPaymentAmountHint,
+      interestRatePercent: extracted.interestRatePercentHint,
       directionHint,
       explicitDebit: debitCell || undefined,
       explicitCredit: creditCell || undefined,
@@ -1624,12 +1706,7 @@ function parseRowsMatrixDetailed(params: {
       } else if (effectiveAmt < 0.01 && req.quantity && req.unitPrice) {
         effectiveAmt = Math.round((req.quantity * req.unitPrice + Number.EPSILON) * 100) / 100;
         amountNote = `Рассчитано из текста: ${req.quantity} × ${req.unitPrice.toFixed(2)} ₽ = ${effectiveAmt.toFixed(2)} ₽`;
-      } else if (
-        effectiveAmt < 0.01 &&
-        !/принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу|оформлен\p{L}*\s+в\s+штат|поступил\p{L}*\s+исполнительн\p{L}*\s+лист/iu.test(
-          desc
-        )
-      ) {
+      } else if (effectiveAmt < 0.01 && !isNonPostingManagementOrPolicyText(desc)) {
         const inlineSumMatch =
           desc.match(
             /(?:на\s+сумму|в\s+сумме|в\s+размере|стоимостью)[\s:=—-]*(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)/iu
@@ -1646,6 +1723,7 @@ function parseRowsMatrixDetailed(params: {
       }
 
       const inferredRowVat = inferVatFromTextAndCell(desc);
+      const isNonPostingHeaderless = isNonPostingManagementOrPolicyText(desc);
 
       drafts.push({
         rowKey: `${fileIndex}_${sheetName}_${r + 1}`,
@@ -1656,7 +1734,7 @@ function parseRowsMatrixDetailed(params: {
         amount: effectiveAmt,
         vatRate: inferredRowVat.vatRate,
         vatRule: inferredRowVat.vatRule,
-        needsAmount: effectiveAmt < 0.01 ? true : undefined,
+        needsAmount: !isNonPostingHeaderless && effectiveAmt < 0.01 ? true : undefined,
         amountCalculationNote: amountNote,
         quantity: req.quantity,
         unitPrice: req.unitPrice,
@@ -1671,6 +1749,9 @@ function parseRowsMatrixDetailed(params: {
         alimonyRatePercent: req.alimonyRatePercentHint,
         alimonyShareLabel: req.alimonyShareLabelHint,
         financialNotesSummary: req.financialNotesSummaryHint,
+        financialNotesList: req.financialNotesListHint,
+        periodicPaymentAmount: req.periodicPaymentAmountHint,
+        interestRatePercent: req.interestRatePercentHint,
         counterpartyName: req.counterparty,
         counterpartyInn: req.inn,
         counterpartyKpp: req.kpp,
@@ -1846,15 +1927,16 @@ export function parseFreeTextOrDelimitedOperations(
 
     const req = extractRequisitesFromFreeText(line, options?.reportingYear);
 
+    const isNonPostingLine = isNonPostingManagementOrPolicyText(line);
     let amount = trailingTabAmount;
     let lineAmountNote: string | undefined;
-    if (amount <= 0) {
+    if (amount <= 0 && !isNonPostingLine) {
       if (req.multiSumTotal && req.multiSumTotal > 0) {
         amount = req.multiSumTotal;
         lineAmountNote = req.multiSumNote;
       } else if (req.quantity && req.unitPrice && req.quantity > 0 && req.unitPrice > 0) {
         amount = Math.round((req.quantity * req.unitPrice + Number.EPSILON) * 100) / 100;
-      } else if (!/поступил\p{L}*\s+исполнительн\p{L}*\s+лист/iu.test(line)) {
+      } else {
         const rubMatch = line.match(
           /(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р(?=$|[^\p{L}]))/iu
         );
@@ -1873,9 +1955,11 @@ export function parseFreeTextOrDelimitedOperations(
 
     const looksLikeAccountingOp =
       amount > 0 ||
+      isNonPostingLine ||
       Boolean(req.monthlySalaryHint) ||
       Boolean(req.alimonyRecipientHint) ||
-      /перечислен|поступил|оплачен|реализован|отгружен|начислен|выда[лн]|выплат|уплат|списан|принят|при[её]м\s+на\s+работу|оформлен\p{L}*\s+в\s+штат|оказан|передан|отпущен|израсходован|введ[её]н|выпущен|оприходован|перемещ|снят|внесен|закрыт|амортизац|приобретен|исполнительн\p{L}*\s+лист|вексел/iu.test(
+      Boolean(req.periodicPaymentAmountHint) ||
+      /перечислен|поступил|оплачен|реализован|отгружен|начислен|выда[лн]|выплат|уплат|списан|принят|при[её]м\s+на\s+работу|оформлен\p{L}*\s+в\s+штат|оказан|передан|отпущен|израсходован|введ[её]н|выпущен|оприходован|перемещ|снят|внесен|закрыт|амортизац|приобретен|исполнительн\p{L}*\s+лист|вексел|заключен\p{L}*\s+договор|подписан\p{L}*\s+договор|сч[её]т\s+на\s+оплат|учетн\p{L}*\s+политик|лимит\s+(?:остатка\s+)?касс|индоссирован|погашен|выбыл|ликвидирован|продан|за[её]м|процент|вычет\p{L}*\s+ндс/iu.test(
         line
       );
 
@@ -1893,7 +1977,7 @@ export function parseFreeTextOrDelimitedOperations(
       amountCalculationNote: lineAmountNote,
       vatRate: inferredLineVat.vatRate,
       vatRule: inferredLineVat.vatRule,
-      needsAmount: amount <= 0 ? true : undefined,
+      needsAmount: !isNonPostingLine && amount <= 0 ? true : undefined,
       quantity: req.quantity,
       unitPrice: req.unitPrice,
       nomenclatureName: req.nomenclatureHint,
@@ -1907,6 +1991,9 @@ export function parseFreeTextOrDelimitedOperations(
       alimonyRatePercent: req.alimonyRatePercentHint,
       alimonyShareLabel: req.alimonyShareLabelHint,
       financialNotesSummary: req.financialNotesSummaryHint,
+      financialNotesList: req.financialNotesListHint,
+      periodicPaymentAmount: req.periodicPaymentAmountHint,
+      interestRatePercent: req.interestRatePercentHint,
       counterpartyName: req.counterparty,
       counterpartyInn: req.inn,
       counterpartyKpp: req.kpp,

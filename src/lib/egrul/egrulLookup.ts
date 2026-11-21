@@ -269,6 +269,78 @@ const KNOWN_RUSSIAN_COMPANIES_FALLBACK: EgrulCandidate[] = [
   },
 ];
 
+export const KNOWN_MAJOR_RUSSIAN_COUNTERPARTIES: Array<{
+  aliases: string[];
+  name: string;
+  inn: string;
+  kpp: string;
+  ogrn: string;
+}> = [
+  {
+    aliases: ['сбербанк', 'пао сбербанк', 'сбербанк россии', 'северо западный банк пао сбербанк'],
+    name: 'ПАО СБЕРБАНК',
+    inn: '7707083893',
+    kpp: '784243001',
+    ogrn: '1027700132195',
+  },
+  {
+    aliases: ['мегафон', 'пао мегафон'],
+    name: 'ПАО «МЕГАФОН»',
+    inn: '7812014560',
+    kpp: '781201001',
+    ogrn: '1027809169585',
+  },
+  {
+    aliases: ['ростелеком', 'пао ростелеком'],
+    name: 'ПАО «РОСТЕЛЕКОМ»',
+    inn: '7707049388',
+    kpp: '784001001',
+    ogrn: '1027700198767',
+  },
+  {
+    aliases: ['комус', 'ооо комус'],
+    name: 'ООО «КОМУС»',
+    inn: '7721617092',
+    kpp: '772101001',
+    ogrn: '5087746123450',
+  },
+  {
+    aliases: ['ленэнерго', 'россети ленэнерго', 'пао россети ленэнерго'],
+    name: 'ПАО «РОССЕТИ ЛЕНЭНЕРГО»',
+    inn: '7830000426',
+    kpp: '783401001',
+    ogrn: '1027800000186',
+  },
+  {
+    aliases: ['петроэлектросбыт', 'ао петроэлектросбыт'],
+    name: 'АО «ПЕТРОЭЛЕКТРОСБЫТ»',
+    inn: '7815018885',
+    kpp: '784101001',
+    ogrn: '1027807582793',
+  },
+  {
+    aliases: ['водоканал', 'водоканал санкт петербурга', 'гуп водоканал спб'],
+    name: 'ГУП «ВОДОКАНАЛ САНКТ-ПЕТЕРБУРГА»',
+    inn: '7830000426',
+    kpp: '784201001',
+    ogrn: '1027809256254',
+  },
+  {
+    aliases: ['мтс', 'пао мтс'],
+    name: 'ПАО «МТС»',
+    inn: '7740000076',
+    kpp: '784043001',
+    ogrn: '1027700149124',
+  },
+  {
+    aliases: ['деловые линии', 'ооо деловые линии'],
+    name: 'ООО «ДЕЛОВЫЕ ЛИНИИ»',
+    inn: '7826156685',
+    kpp: '781001001',
+    ogrn: '1027810306259',
+  },
+];
+
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const egrulMemoryCache = new Map<
   string,
@@ -295,23 +367,74 @@ function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function rankEgrulCandidate(
+const NEIGHBOR_REGIONS_MAP: Record<string, string[]> = {
+  '78': ['47'],
+  '47': ['78'],
+  '77': ['50'],
+  '50': ['77'],
+  '66': ['74', '72'],
+  '23': ['01', '61'],
+};
+
+export interface OrganizationRegionInput {
+  organizationInn?: string;
+  organizationBik?: string;
+  organizationAddress?: string;
+}
+
+export function inferOrganizationRegionCode(
+  dbOrOrg?: Database1CSnapshot | OrganizationRegionInput | null,
+  defaultBik = DEFAULT_SBERBANK_BIK
+): string {
+  const isSnapshot = Boolean(dbOrOrg && 'organization' in dbOrOrg);
+  const rawInn = isSnapshot
+    ? (dbOrOrg as Database1CSnapshot).organization?.inn
+    : (dbOrOrg as OrganizationRegionInput | null | undefined)?.organizationInn;
+  const rawAddr = isSnapshot
+    ? (dbOrOrg as Database1CSnapshot).organization?.address
+    : (dbOrOrg as OrganizationRegionInput | null | undefined)?.organizationAddress;
+  const rawBik = isSnapshot
+    ? (dbOrOrg as Database1CSnapshot).organization?.bik
+    : (dbOrOrg as OrganizationRegionInput | null | undefined)?.organizationBik;
+
+  const orgInn = (rawInn ?? '').replace(/\D/g, '');
+  if (orgInn.length >= 10 && /^\d{2}$/.test(orgInn.slice(0, 2))) {
+    return orgInn.slice(0, 2);
+  }
+  const orgAddr = (rawAddr ?? '').toLowerCase();
+  if (orgAddr.includes('петербург') || orgAddr.includes('спб')) return '78';
+  if (orgAddr.includes('москв')) return '77';
+
+  const cleanBik = (rawBik || defaultBik || '').replace(/\D/g, '');
+  if (cleanBik.startsWith('0440')) return '78';
+  if (cleanBik.startsWith('0445')) return '77';
+  if (cleanBik.startsWith('0465')) return '66';
+  return '78';
+}
+
+export function rankEgrulCandidate(
   candidate: EgrulCandidate,
   cleanQueryNorm: string,
   regionPrefixHint = '78'
 ): number {
   let score = 0;
-  if (candidate.isActive) score += 100;
+  // Strongly prefer active companies over liquidated / inactive entities
+  if (candidate.isActive) {
+    score += 200;
+  } else {
+    score -= 200;
+  }
+
   const candShortNorm = normalizeEntityKey(candidate.name);
   const candFullNorm = normalizeEntityKey(candidate.fullName);
 
   if (cleanQueryNorm && (candShortNorm === cleanQueryNorm || candFullNorm === cleanQueryNorm)) {
-    score += 60;
+    score += 80;
   } else if (
     cleanQueryNorm &&
     (candShortNorm.startsWith(cleanQueryNorm) || cleanQueryNorm.startsWith(candShortNorm))
   ) {
-    score += 30;
+    score += 35;
   }
 
   // Prefer headquarters KPP (...01001)
@@ -319,15 +442,51 @@ function rankEgrulCandidate(
     score += 20;
   }
 
-  // Prefer region hint (e.g., 78 St. Petersburg when default bank BIK is 044030653)
-  if (
+  // Strong home-region priority (e.g. St. Petersburg 78... beats Samara 63... on identical names)
+  const candReg = candidate.region || candidate.inn.slice(0, 2);
+  const kppReg = candidate.kpp.slice(0, 2);
+  if (regionPrefixHint && (candReg === regionPrefixHint || kppReg === regionPrefixHint)) {
+    score += 65;
+  } else if (
     regionPrefixHint &&
-    (candidate.inn.startsWith(regionPrefixHint) || candidate.kpp.startsWith(regionPrefixHint))
+    (NEIGHBOR_REGIONS_MAP[regionPrefixHint]?.includes(candReg) ||
+      NEIGHBOR_REGIONS_MAP[regionPrefixHint]?.includes(kppReg))
   ) {
-    score += 15;
+    score += 28;
   }
 
   return score;
+}
+
+export function sortEgrulCandidatesByRank(
+  candidates: EgrulCandidate[],
+  rawQueryName: string,
+  regionPrefixHint = '78'
+): EgrulCandidate[] {
+  const queryNorm = normalizeEntityKey(rawQueryName);
+  return [...candidates].sort(
+    (a, b) =>
+      rankEgrulCandidate(b, queryNorm, regionPrefixHint) -
+      rankEgrulCandidate(a, queryNorm, regionPrefixHint)
+  );
+}
+
+export function selectBestEgrulCandidate(
+  candidates: EgrulCandidate[],
+  rawQueryOrOpts?: string | { targetName?: string; homeRegionCode?: string },
+  regionPrefixHint = '78'
+): EgrulCandidate | null {
+  if (!candidates || candidates.length === 0) return null;
+  const rawName =
+    typeof rawQueryOrOpts === 'string'
+      ? rawQueryOrOpts
+      : (rawQueryOrOpts?.targetName ?? '');
+  const effRegion =
+    typeof rawQueryOrOpts === 'object' && rawQueryOrOpts?.homeRegionCode
+      ? rawQueryOrOpts.homeRegionCode
+      : regionPrefixHint;
+  const sorted = sortEgrulCandidatesByRank(candidates, rawName, effRegion);
+  return sorted[0] ?? null;
 }
 
 export interface EgrulLookupOptions {
@@ -567,7 +726,7 @@ export async function lookupCounterpartyInEgrul(
   }
 
   const fetchImpl = options.fetchImpl ?? fetch;
-  const timeoutMs = options.timeoutMs ?? 6000;
+  const timeoutMs = options.timeoutMs ?? 2200;
   const dadataKey = (options.dadataApiKey ?? process.env.DADATA_API_KEY ?? '').trim();
   const queryNorm = normalizeEntityKey(rawName);
 
@@ -641,6 +800,8 @@ export interface CounterpartyPriorityResolutionInput {
   explicitBik?: string;
   db1C: Database1CSnapshot | null;
   egrulCandidates?: EgrulCandidate[];
+  regionPrefixHint?: string;
+  autoFillFormalIfUnfound?: boolean;
 }
 
 export interface CounterpartyPriorityResolutionResult {
@@ -663,8 +824,9 @@ export interface CounterpartyPriorityResolutionResult {
  * Enforces strict 4-tier counterparty resolution priority:
  * 1. Explicit INN/KPP/bank requisites in Excel operation text
  * 2. Match in loaded 1C directories (ВсеСправочники.Контрагенты / ФизическиеЛица)
- * 3. Server lookup in official FNS EGRUL / DaData
- * 4. Honest fallback: 'educational_unverified' («Учебный контрагент (не найден в ЕГРЮЛ)») — NEVER invents fake INNs.
+ * 3. Server lookup in official FNS EGRUL / DaData (ranked by home region + active status)
+ * 4. Honest fallback: 'educational_unverified' by default, or deterministic valid FNS-checksum
+ *    'educational_generated' when `autoFillFormalIfUnfound` is requested by autofix.
  */
 export function resolveCounterpartyByStrictPriority(
   input: CounterpartyPriorityResolutionInput
@@ -674,6 +836,8 @@ export function resolveCounterpartyByStrictPriority(
   const explicitKpp = (input.explicitKpp ?? '').replace(/\D/g, '');
   const explicitBik = (input.explicitBik ?? '').replace(/\D/g, '');
   const explicitBankAccount = (input.explicitBankAccount ?? '').replace(/\D/g, '');
+  const regionHint =
+    input.regionPrefixHint || inferOrganizationRegionCode(input.db1C, explicitBik || DEFAULT_SBERBANK_BIK);
 
   const bankFromExplicit = explicitBik ? resolveBankInfoByBik(explicitBik) : undefined;
 
@@ -720,10 +884,11 @@ export function resolveCounterpartyByStrictPriority(
     };
   }
 
-  // Priority 3: Real FNS EGRUL / DaData lookup result
-  const candidates = input.egrulCandidates ?? [];
-  if (candidates.length > 0) {
-    const best = candidates[0];
+  // Priority 3: Real FNS EGRUL / DaData lookup result (region-ranked)
+  const rawCandidates = input.egrulCandidates ?? [];
+  if (rawCandidates.length > 0) {
+    const sorted = sortEgrulCandidatesByRank(rawCandidates, trimmedName, regionHint);
+    const best = sorted[0];
     return {
       name: trimmedName || best.name,
       fullName: best.fullName || best.name,
@@ -736,7 +901,28 @@ export function resolveCounterpartyByStrictPriority(
       corrAccount: bankFromExplicit?.corrAccount || undefined,
       kind: best.kind,
       source: 'egrul_verified',
-      egrulCandidates: candidates,
+      egrulCandidates: sorted,
+    };
+  }
+
+  const inferredKind: CounterpartyPriorityResolutionResult['kind'] = /^ИП\s/i.test(trimmedName)
+    ? 'ИндивидуальныйПредприниматель'
+    : 'ЮридическоеЛицо';
+
+  if (input.autoFillFormalIfUnfound && trimmedName.length >= 2) {
+    const generated = generateEducationalInnKpp(trimmedName, inferredKind, regionHint);
+    return {
+      name: trimmedName,
+      inn: generated.inn,
+      kpp: explicitKpp || generated.kpp,
+      ogrn: generated.ogrn,
+      bankAccount: explicitBankAccount || undefined,
+      bik: explicitBik || DEFAULT_SBERBANK_BIK,
+      bankName: bankFromExplicit?.bankName || DEFAULT_SBERBANK_NAME,
+      corrAccount: bankFromExplicit?.corrAccount || DEFAULT_SBERBANK_CORR,
+      kind: inferredKind,
+      source: 'educational_generated',
+      egrulCandidates: [],
     };
   }
 
@@ -749,7 +935,7 @@ export function resolveCounterpartyByStrictPriority(
     bik: explicitBik || undefined,
     bankName: bankFromExplicit?.bankName,
     corrAccount: bankFromExplicit?.corrAccount || undefined,
-    kind: /^ИП\s/i.test(trimmedName) ? 'ИндивидуальныйПредприниматель' : 'ЮридическоеЛицо',
+    kind: inferredKind,
     source: trimmedName.length >= 2 ? 'educational_unverified' : 'unresolved',
     egrulCandidates: [],
   };
