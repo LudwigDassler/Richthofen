@@ -4,7 +4,6 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
-  BookOpenCheck,
   Calculator,
   CheckCircle2,
   ChevronDown,
@@ -36,6 +35,7 @@ import {
 } from '@/types/accounting';
 import {
   buildOperationMentorGuide1C,
+  computeContextCounterpartySuggestions,
   DOC_TYPE_LABELS_1C,
   doesOperationRequireCounterparty,
   getCounterpartyGroupKey,
@@ -60,9 +60,11 @@ const DOC_TYPES_1C: DocType1CBP30[] = [
   'ВыпускПродукции',
   'ПринятиеКУчетуОС',
   'ПриемНаРаботу',
+  'ИсполнительныйЛист',
   'НачислениеЗарплаты',
   'ВедомостьВБанк',
   'ВедомостьВКассу',
+  'ФинансовыеВложения',
   'СчетФактураПолученный',
   'СчетФактураВыданный',
   'КорректировкаДолга',
@@ -110,7 +112,12 @@ interface QuickPickCounterpartyChip {
 }
 
 function deriveReadinessStatus(op: QueuedOperation): OperationReadinessStatus {
-  if (op.category === 'hr_hire' || op.docType1C === 'ПриемНаРаботу') {
+  if (
+    op.category === 'hr_hire' ||
+    op.docType1C === 'ПриемНаРаботу' ||
+    op.category === 'writ_of_execution' ||
+    op.docType1C === 'ИсполнительныйЛист'
+  ) {
     return 'ready';
   }
   if (op.readinessStatus) return op.readinessStatus;
@@ -139,6 +146,7 @@ export function Tab2ImportPostings() {
     db1C,
     reportingYear,
     operations,
+    virtual1CState,
     auditIssues,
     directoryOptions1C,
     lastImportStats,
@@ -160,6 +168,7 @@ export function Tab2ImportPostings() {
     runSmartAutoFixAll,
     removeOperation,
     clearAllOperations,
+    jumpToOperation,
     setActiveTab,
   } = useAccountant();
 
@@ -755,7 +764,7 @@ export function Tab2ImportPostings() {
             return (
               <OperationEditorCard
                 key={op.id}
-                index={index + 1}
+                index={virtual1CState.displayNumberByOpId[op.id] ?? index + 1}
                 op={op}
                 allOperations={operations}
                 db1C={db1C}
@@ -767,6 +776,7 @@ export function Tab2ImportPostings() {
                 isGuideOpen={isGuideOpen}
                 onToggleExpand={() => toggleCardExpanded(op.id)}
                 onToggleGuide={() => toggleSingleGuide(op.id)}
+                onJumpToOperation={jumpToOperation}
                 onUpdate={(updater) => updateOperation(op.id, updater)}
                 onChangeDocType={(dt) => changeOperationDocType1C(op.id, dt)}
                 onBind1C={(item) => bindOperationTo1CDirectoryItem(op.id, item)}
@@ -806,6 +816,7 @@ function OperationEditorCard({
   isGuideOpen,
   onToggleExpand,
   onToggleGuide,
+  onJumpToOperation,
   onUpdate,
   onChangeDocType,
   onBind1C,
@@ -829,6 +840,7 @@ function OperationEditorCard({
   isGuideOpen: boolean;
   onToggleExpand: () => void;
   onToggleGuide: () => void;
+  onJumpToOperation: (opId: string) => void;
   onUpdate: (updater: (prev: QueuedOperation) => QueuedOperation) => void;
   onChangeDocType: (dt: DocType1CBP30) => void;
   onBind1C: (item: import('@/types/accounting').DirectoryAutocompleteOption1C) => void;
@@ -857,6 +869,8 @@ function OperationEditorCard({
   const statusLabel = getOperationStatusBadgeText(op);
 
   const isHireOrder = op.category === 'hr_hire' || op.docType1C === 'ПриемНаРаботу';
+  const isWritOfExecution =
+    op.category === 'writ_of_execution' || op.docType1C === 'ИсполнительныйЛист';
   const isPayrollAccrual =
     op.category === 'payroll_accrual' ||
     op.category === 'insurance_accrual' ||
@@ -868,6 +882,7 @@ function OperationEditorCard({
 
   const isCriticalMissingAmount =
     !isHireOrder &&
+    !isWritOfExecution &&
     !isPayrollAccrual &&
     (op.amountMode === 'required_missing' ||
       (Boolean(op.needsAmount) && op.amountMode !== 'calculated_by_1c'));
@@ -914,13 +929,23 @@ function OperationEditorCard({
         ? `Оклад ${formatMoney(op.monthlySalary, true)} ₽`
         : 'Кадровый приказ';
     }
+    if (isWritOfExecution) {
+      return `Исп. лист · ${op.alimonyShareLabel || `${op.alimonyRatePercent ?? 25}%`}`;
+    }
     if (op.entries.length === 0) return '0 проводок';
     const first = op.entries[0];
     const base = first.isOffBalance
       ? `Дт ${first.debit}`
       : `Дт ${first.debit} Кт ${first.credit}`;
     return op.entries.length > 1 ? `${base} (+${op.entries.length - 1})` : base;
-  }, [op.entries, op.monthlySalary, isHireOrder]);
+  }, [
+    op.entries,
+    op.monthlySalary,
+    op.alimonyShareLabel,
+    op.alimonyRatePercent,
+    isHireOrder,
+    isWritOfExecution,
+  ]);
 
   const entityDisplaySummary = useMemo(() => {
     if (profile === 'accountable_71') {
@@ -932,10 +957,22 @@ function OperationEditorCard({
       if (isHireOrder) {
         return [op.employeeName, op.employeePosition].filter(Boolean).join(' · ') || op.description;
       }
+      if (isWritOfExecution) {
+        const pair = [
+          op.employeeName,
+          op.alimonyRecipientName ? `→ ${op.alimonyRecipientName}` : '',
+        ]
+          .filter(Boolean)
+          .join(' ');
+        return pair ? `${pair} · ${op.description}` : op.description;
+      }
       if (op.payrollStaffSummary && op.payrollStaffSummary.length > 0) {
         return `${op.description} · Штат: ${op.payrollStaffSummary.length} сотр.`;
       }
       return op.employeeName ? `${op.employeeName} · ${op.description}` : op.description;
+    }
+    if (op.category === 'alimony_payout' && op.alimonyRecipientName) {
+      return `${op.alimonyRecipientName} (76.41) · ${op.description}`;
     }
     if (op.counterpartyName) {
       return `${op.counterpartyName} · ${op.description}`;
@@ -947,83 +984,20 @@ function OperationEditorCard({
       return `${op.nomenclatureName} · ${op.description}`;
     }
     return op.description;
-  }, [profile, isHireOrder, op]);
+  }, [profile, isHireOrder, isWritOfExecution, op]);
 
-  // 1-Click Quick-Pick Counterparty Chips for commercial operations missing counterpartyName
+  // Strict Context-Proven Counterparty Suggestions (zero random directory guessing)
   const quickPickChips = useMemo<QuickPickCounterpartyChip[]>(() => {
     if (profile !== 'trade_services' || op.counterpartyName.trim().length >= 2) {
       return [];
     }
-    const isSaleSide =
-      op.category === 'sale_goods' ||
-      op.category === 'sale_services' ||
-      op.category === 'bank_in' ||
-      op.category === 'cash_in';
-
-    const seen = new Set<string>();
-    const candidates: QuickPickCounterpartyChip[] = [];
-
-    const pushCandidate = (name: string, inn: string, kpp: string, hint: string) => {
-      const clean = name.trim();
-      if (clean.length < 2) return;
-      const key = getCounterpartyGroupKey(clean);
-      if (!key || seen.has(key)) return;
-      seen.add(key);
-      candidates.push({ name: clean, inn: inn || '', kpp: kpp || '', hint });
-    };
-
-    // 1. Prioritize matching side from queued operations (e.g., 62.02 buyer advances for sales, 60 supplier advances for purchases)
-    for (const other of allOperations) {
-      if (other.id === op.id || !other.includeInProcessing) continue;
-      if (!doesOperationRequireCounterparty(other.category)) continue;
-      if (other.counterpartyKind === 'ФизическоеЛицо') continue;
-      const otherName = other.counterpartyName.trim();
-      if (!otherName) continue;
-
-      const otherIsBuyer =
-        other.category === 'bank_in' ||
-        other.category === 'cash_in' ||
-        other.category === 'sale_goods' ||
-        other.category === 'sale_services' ||
-        other.entries.some((e) => e.credit.startsWith('62') || e.debit.startsWith('62'));
-      const otherIsSupplier =
-        other.category.startsWith('purchase_') ||
-        other.category === 'bank_out' ||
-        other.category === 'cash_out' ||
-        other.entries.some((e) => e.debit.startsWith('60') || e.credit.startsWith('60'));
-
-      if (isSaleSide && otherIsBuyer) {
-        pushCandidate(
-          otherName,
-          other.counterpartyInn,
-          other.counterpartyKpp,
-          other.entries.some((e) => e.credit === '62.02') ? 'аванс 62.02' : 'покупатель'
-        );
-      } else if (!isSaleSide && otherIsSupplier) {
-        pushCandidate(otherName, other.counterpartyInn, other.counterpartyKpp, 'поставщик');
-      }
-    }
-
-    // 2. Add commercial counterparties from 1C DB
-    for (const dir of directoryOptions1C) {
-      if (dir.source !== 'Контрагенты') continue;
-      pushCandidate(dir.name, dir.inn, dir.kpp, 'БД 1С');
-      if (candidates.length >= 6) break;
-    }
-
-    // 3. Fallback: any remaining commercial counterparties from queue
-    if (candidates.length < 6) {
-      for (const other of allOperations) {
-        if (other.id === op.id || !other.counterpartyName.trim()) continue;
-        if (!doesOperationRequireCounterparty(other.category)) continue;
-        if (other.counterpartyKind === 'ФизическоеЛицо') continue;
-        pushCandidate(other.counterpartyName, other.counterpartyInn, other.counterpartyKpp, 'из операций');
-        if (candidates.length >= 6) break;
-      }
-    }
-
-    return candidates.slice(0, 6);
-  }, [profile, op.id, op.category, op.counterpartyName, allOperations, directoryOptions1C]);
+    return computeContextCounterpartySuggestions(op, allOperations, db1C).map((s) => ({
+      name: s.name,
+      inn: s.inn,
+      kpp: s.kpp,
+      hint: s.provenanceLabel,
+    }));
+  }, [profile, op, allOperations, db1C]);
 
   const commitPayrollSalary = () => {
     const parsed = parseRussianNumber(salaryDraft);
@@ -1040,14 +1014,20 @@ function OperationEditorCard({
     onUpdateOs({ usefulLifeMonths: parsedSpi });
   };
 
-  // Payroll live math preview
+  // Payroll live math preview (including 76.41 alimony withholding when present)
   const payrollGross =
     op.entries.find((e) => e.credit === '70')?.amount ??
     (op.monthlySalary && op.monthlySalary > 0 ? op.monthlySalary : op.amount);
   const payrollNdfl =
     op.entries.find((e) => e.debit === '70' && e.credit === '68.01')?.amount ??
     Math.round(payrollGross * 0.13 * 100) / 100;
-  const payrollNet70 = Math.max(0, Math.round((payrollGross - payrollNdfl) * 100) / 100);
+  const payrollAlimony7641 = op.entries
+    .filter((e) => e.debit === '70' && e.credit === '76.41')
+    .reduce((sum, e) => sum + e.amount, 0);
+  const payrollNet70 = Math.max(
+    0,
+    Math.round((payrollGross - payrollNdfl - payrollAlimony7641) * 100) / 100
+  );
   const payrollIns30 =
     op.entries.find((e) => e.credit === '69.09')?.amount ??
     Math.round(payrollGross * 0.3 * 100) / 100;
@@ -1137,11 +1117,13 @@ function OperationEditorCard({
               ? op.monthlySalary
                 ? `${formatMoney(op.monthlySalary, true)} ₽/мес`
                 : 'приказ'
-              : op.amount >= 0.01
-                ? `${formatMoney(op.amount, true)} ₽`
-                : op.amountMode === 'calculated_by_1c'
-                  ? 'авто 1С'
-                  : '0,00 ₽'}
+              : isWritOfExecution
+                ? op.alimonyShareLabel || `${op.alimonyRatePercent ?? 25}%`
+                : op.amount >= 0.01
+                  ? `${formatMoney(op.amount, true)} ₽`
+                  : op.amountMode === 'calculated_by_1c'
+                    ? 'авто 1С'
+                    : '0,00 ₽'}
           </span>
 
           {/* Soft rounded-full status pill */}
@@ -1528,6 +1510,40 @@ function OperationEditorCard({
                         />
                       </div>
                     </div>
+                  ) : isWritOfExecution ? (
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
+                          Сотрудник-должник (счёт 70)
+                        </label>
+                        <input
+                          type="text"
+                          value={op.employeeName ?? ''}
+                          onChange={(e) =>
+                            onUpdate((prev) => ({ ...prev, employeeName: e.target.value }))
+                          }
+                          placeholder="Валеев В.В."
+                          className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-xs"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
+                          Получатель алиментов (счёт 76.41)
+                        </label>
+                        <input
+                          type="text"
+                          value={op.alimonyRecipientName ?? ''}
+                          onChange={(e) =>
+                            onUpdate((prev) => ({
+                              ...prev,
+                              alimonyRecipientName: e.target.value,
+                            }))
+                          }
+                          placeholder="Валеева (получатель алиментов)"
+                          className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-xs"
+                        />
+                      </div>
+                    </div>
                   ) : isPayrollPayout ? (
                     <div className="grid grid-cols-2 gap-2">
                       <div>
@@ -1605,70 +1621,142 @@ function OperationEditorCard({
                   )}
                 </div>
 
-                {/* Column 2: Cost Account & Insurance Tariff */}
+                {/* Column 2: Cost Account & Insurance Tariff / Writ Parameters */}
                 <div className="lg:col-span-4 space-y-2">
-                  <div>
-                    <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
-                      Счёт учёта затрат по оплате труда
-                    </label>
-                    <select
-                      aria-label="Счёт учёта затрат по зарплате"
-                      value={op.costAccount || '26'}
-                      onChange={(e) => onUpdatePayroll({ costAccount: e.target.value })}
-                      className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 tabular-nums text-xs"
-                    >
-                      {PAYROLL_COST_ACCOUNTS.map((opt) => (
-                        <option key={opt.code} value={opt.code}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {isPayrollAccrual && (
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
-                          НДФЛ (счёт 68.01)
-                        </label>
-                        <div className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 tabular-nums text-xs text-slate-700 dark:text-slate-300">
-                          13% ({formatMoney(payrollNdfl, true)} ₽)
+                  {isWritOfExecution ? (
+                    <>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
+                            Размер удержания, %
+                          </label>
+                          <input
+                            type="number"
+                            step="0.5"
+                            min="0"
+                            max="70"
+                            value={op.alimonyRatePercent ?? 25}
+                            onChange={(e) => {
+                              const pct = Math.max(
+                                0,
+                                Math.min(70, parseRussianNumber(e.target.value) || 25)
+                              );
+                              onUpdate((prev) => ({
+                                ...prev,
+                                alimonyRatePercent: pct,
+                                alimonyShareLabel:
+                                  Math.abs(pct - 25) < 0.01
+                                    ? '1/4 (25%)'
+                                    : Math.abs(pct - 33.33) < 0.2
+                                      ? '1/3 (33,33%)'
+                                      : Math.abs(pct - 50) < 0.01
+                                        ? '1/2 (50%)'
+                                        : `${pct}%`,
+                              }));
+                            }}
+                            className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 tabular-nums text-xs text-slate-900 dark:text-slate-100"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
+                            ИНН получателя (необяз.)
+                          </label>
+                          <input
+                            type="text"
+                            value={op.alimonyRecipientInn ?? ''}
+                            onChange={(e) =>
+                              onUpdate((prev) => ({
+                                ...prev,
+                                alimonyRecipientInn: e.target.value.replace(/\D/g, ''),
+                              }))
+                            }
+                            placeholder="10/12 цифр"
+                            className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 tabular-nums text-xs text-slate-900 dark:text-slate-100"
+                          />
                         </div>
                       </div>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                        Документ «Исполнительный лист» сам по себе проводок не формирует — он ставит удержание на учёт, чтобы при «Начислении зарплаты» автоматически сформировалась проводка Дт 70 — Кт 76.41 с дохода за минусом НДФЛ 13%.
+                      </p>
+                    </>
+                  ) : (
+                    <>
                       <div>
                         <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
-                          Травматизм (69.11), %
+                          Счёт учёта затрат по оплате труда
                         </label>
-                        <input
-                          type="number"
-                          step="0.1"
-                          min="0"
-                          aria-label="Тариф взносов на травматизм, %"
-                          value={injuryDraft}
-                          onChange={(e) => setInjuryDraft(e.target.value)}
-                          onBlur={commitPayrollSalary}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              commitPayrollSalary();
-                            }
-                          }}
-                          className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 tabular-nums text-xs text-slate-900 dark:text-slate-100"
-                        />
+                        <select
+                          aria-label="Счёт учёта затрат по зарплате"
+                          value={op.costAccount || '26'}
+                          onChange={(e) => onUpdatePayroll({ costAccount: e.target.value })}
+                          className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 tabular-nums text-xs"
+                        >
+                          {PAYROLL_COST_ACCOUNTS.map((opt) => (
+                            <option key={opt.code} value={opt.code}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
                       </div>
-                    </div>
-                  )}
 
-                  {isHireOrder && (
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                      Кадровый приказ ПриемНаРаботу не создаёт бухгалтерских проводок сам по себе — он регистрирует сотрудника и оклад для автоматического расчёта ЗП в конце каждого месяца.
-                    </p>
+                      {isPayrollAccrual && (
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
+                              НДФЛ (счёт 68.01)
+                            </label>
+                            <div className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 tabular-nums text-xs text-slate-700 dark:text-slate-300">
+                              13% ({formatMoney(payrollNdfl, true)} ₽)
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
+                              Травматизм (69.11), %
+                            </label>
+                            <input
+                              type="number"
+                              step="0.1"
+                              min="0"
+                              aria-label="Тариф взносов на травматизм, %"
+                              value={injuryDraft}
+                              onChange={(e) => setInjuryDraft(e.target.value)}
+                              onBlur={commitPayrollSalary}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  commitPayrollSalary();
+                                }
+                              }}
+                              className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 tabular-nums text-xs text-slate-900 dark:text-slate-100"
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {isHireOrder && (
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                          Кадровый приказ ПриемНаРаботу не создаёт бухгалтерских проводок сам по себе — он регистрирует сотрудника и оклад для автоматического расчёта ЗП в конце каждого месяца.
+                        </p>
+                      )}
+                    </>
                   )}
                 </div>
 
-                {/* Column 3: Salary / ФОТ / Payout Input */}
+                {/* Column 3: Salary / ФОТ / Payout / Writ Share */}
                 <div className="lg:col-span-3 space-y-2">
-                  {isHireOrder || isPayrollAccrual ? (
+                  {isWritOfExecution ? (
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 p-3 space-y-1">
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                        Способ расчёта удержания
+                      </div>
+                      <div className="font-semibold tabular-nums text-slate-900 dark:text-slate-100">
+                        Доля {op.alimonyShareLabel || `${op.alimonyRatePercent ?? 25}%`}
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                        База: (Начислено − НДФЛ 13%)
+                      </div>
+                    </div>
+                  ) : isHireOrder || isPayrollAccrual ? (
                     <>
                       <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
                         {isHireOrder
@@ -1733,7 +1821,11 @@ function OperationEditorCard({
 
               {/* Calculated Payroll Breakdown Strip */}
               {isPayrollAccrual && (
-                <div className="rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-800/50 px-3.5 py-2.5 grid grid-cols-2 sm:grid-cols-5 gap-2 tabular-nums text-[11px]">
+                <div
+                  className={`rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-800/50 px-3.5 py-2.5 grid grid-cols-2 ${
+                    payrollAlimony7641 > 0.009 ? 'sm:grid-cols-6' : 'sm:grid-cols-5'
+                  } gap-2 tabular-nums text-[11px]`}
+                >
                   <div>
                     <div className="text-slate-500">Начислено ФОТ (Кт 70)</div>
                     <div className="font-semibold text-slate-900 dark:text-white">
@@ -1746,6 +1838,14 @@ function OperationEditorCard({
                       {formatMoney(payrollNdfl, true)} ₽
                     </div>
                   </div>
+                  {payrollAlimony7641 > 0.009 && (
+                    <div>
+                      <div className="text-slate-500">Алименты (Кт 76.41)</div>
+                      <div className="font-semibold text-amber-700 dark:text-amber-400">
+                        {formatMoney(payrollAlimony7641, true)} ₽
+                      </div>
+                    </div>
+                  )}
                   <div>
                     <div className="text-slate-500">К выплате (сальдо 70)</div>
                     <div className="font-semibold text-emerald-700 dark:text-emerald-400">
@@ -2228,6 +2328,98 @@ function OperationEditorCard({
                       В 1С:БП 3.0 отражается кассовым ордером ({op.docType1C}) с видом «{op.documentSubKind1C || 'Получение наличных в банке'}». Контрагент и НДС не заполняются.
                     </p>
                   </div>
+                ) : op.category === 'alimony_payout' ? (
+                  <>
+                    <div>
+                      <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
+                        Получатель алиментов (счёт 76.41)
+                      </label>
+                      <input
+                        type="text"
+                        value={op.alimonyRecipientName || op.counterpartyName || ''}
+                        onChange={(e) =>
+                          onUpdate((prev) => ({
+                            ...prev,
+                            alimonyRecipientName: e.target.value,
+                            counterpartyName: e.target.value,
+                            counterpartyKind: 'ФизическоеЛицо',
+                          }))
+                        }
+                        placeholder="ФИО взыскателя алиментов"
+                        className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-xs"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
+                          ИНН физлица-получателя
+                        </label>
+                        <input
+                          type="text"
+                          value={op.alimonyRecipientInn ?? ''}
+                          onChange={(e) =>
+                            onUpdate((prev) => ({
+                              ...prev,
+                              alimonyRecipientInn: e.target.value.replace(/\D/g, ''),
+                            }))
+                          }
+                          placeholder="10/12 цифр"
+                          className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 tabular-nums text-xs text-slate-900 dark:text-slate-100"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
+                          Должник (сотрудник)
+                        </label>
+                        <input
+                          type="text"
+                          value={op.employeeName ?? ''}
+                          onChange={(e) =>
+                            onUpdate((prev) => ({ ...prev, employeeName: e.target.value }))
+                          }
+                          placeholder="ФИО сотрудника"
+                          className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-slate-100"
+                        />
+                      </div>
+                    </div>
+                  </>
+                ) : op.category === 'financial_investment' ? (
+                  <>
+                    <div>
+                      <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
+                        Ценные бумаги / Векселя (счёт 58.02)
+                      </label>
+                      <input
+                        type="text"
+                        value={op.nomenclatureName ?? ''}
+                        onChange={(e) =>
+                          onUpdate((prev) => ({ ...prev, nomenclatureName: e.target.value }))
+                        }
+                        placeholder="Векселя процентные (счёт 58.02)"
+                        className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-xs"
+                      />
+                    </div>
+                    {op.financialNotesSummary && (
+                      <div className="text-[11px] tabular-nums text-slate-600 dark:text-slate-300">
+                        Состав: {op.financialNotesSummary}
+                      </div>
+                    )}
+                    <div>
+                      <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
+                        Эмитент / Продавец векселей (счёт 76.09)
+                      </label>
+                      <input
+                        type="text"
+                        list="db1c-counterparties-list"
+                        value={op.counterpartyName ?? ''}
+                        onChange={(e) =>
+                          onUpdate((prev) => ({ ...prev, counterpartyName: e.target.value }))
+                        }
+                        placeholder="Контрагент по передаче векселей"
+                        className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-slate-100"
+                      />
+                    </div>
+                  </>
                 ) : (
                   <>
                     <div>
@@ -2302,9 +2494,17 @@ function OperationEditorCard({
               <div className="lg:col-span-3 space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
                   <label className="block text-[11px] text-slate-500 dark:text-slate-400">
-                    Сумма операции, ₽
+                    {op.category === 'alimony_payout'
+                      ? 'Сумма алиментов (76.41), ₽'
+                      : op.category === 'financial_investment'
+                        ? 'Сумма вложений (58.02), ₽'
+                        : 'Сумма операции, ₽'}
                   </label>
-                  <span className="text-[10px] text-slate-500">Без НДС</span>
+                  <span className="text-[10px] text-slate-500">
+                    {op.category === 'financial_investment'
+                      ? 'Без НДС (ст. 149 НК)'
+                      : 'Без НДС'}
+                  </span>
                 </div>
                 <input
                   type="number"
@@ -2438,7 +2638,7 @@ function OperationEditorCard({
 
                   {quickPickChips.length > 0 && (
                     <div className="pt-1.5 flex flex-wrap items-center gap-1.5">
-                      <span className="text-[10px] text-slate-500">Быстрый выбор:</span>
+                      <span className="text-[10px] text-slate-500">По контексту расчётов:</span>
                       {quickPickChips.map((chip) => (
                         <button
                           key={`${chip.name}-${chip.inn}`}
@@ -2446,7 +2646,7 @@ function OperationEditorCard({
                           onClick={() =>
                             onQuickAssignCounterparty(chip.name, chip.inn, chip.kpp)
                           }
-                          className="px-2.5 py-0.5 rounded-full border border-amber-300/80 dark:border-amber-800 bg-amber-50/70 dark:bg-amber-950/30 hover:bg-amber-100 dark:hover:bg-amber-950/60 text-[11px] font-medium text-amber-900 dark:text-amber-200 transition-colors"
+                          className="px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-[11px] font-medium text-slate-800 dark:text-slate-200 transition-colors"
                         >
                           {chip.name}
                           {chip.hint ? ` (${chip.hint})` : ''}
@@ -2612,7 +2812,7 @@ function OperationEditorCard({
           )}
 
           {/* Inline Editable Accounting Postings Table */}
-          {(!isHireOrder || op.entries.length > 0) && (
+          {((!isHireOrder && !isWritOfExecution) || op.entries.length > 0) && (
             <div className="border-t border-slate-100 dark:border-slate-800/80 px-4 py-3 bg-slate-50/40 dark:bg-slate-950/30">
               <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                 <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-600 dark:text-slate-400">
@@ -2825,15 +3025,24 @@ function OperationEditorCard({
               className="w-full px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800/30 rounded-b-2xl transition-colors"
             >
               <div className="flex flex-wrap items-center gap-2 min-w-0">
-                <BookOpenCheck className="w-3.5 h-3.5 text-amber-600 shrink-0" strokeWidth={1.6} />
                 <span className="font-medium text-slate-800 dark:text-slate-200">
                   Пошаговая инструкция по проведению в 1С:Бухгалтерия 8.3
                 </span>
+                {mentorGuide.step00Prep && mentorGuide.step00Prep.length > 0 && (
+                  <span className="text-[11px] tabular-nums text-slate-500 dark:text-slate-400">
+                    · Справочники:{' '}
+                    {mentorGuide.step00Prep.filter((s) => s.status === 'create_new').length > 0
+                      ? `создать ${
+                          mentorGuide.step00Prep.filter((s) => s.status === 'create_new').length
+                        }`
+                      : 'уже в базе'}
+                  </span>
+                )}
                 <span className="hidden md:inline text-[11px] text-slate-500 dark:text-slate-400 truncate">
                   · {mentorGuide.navigationPath1C}
                 </span>
               </div>
-              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 dark:text-amber-400 shrink-0">
+              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-700 dark:text-slate-300 shrink-0">
                 {isGuideOpen ? 'Свернуть инструкцию' : 'Открыть разбор 1С'}
                 {isGuideOpen ? (
                   <ChevronUp className="w-3.5 h-3.5" strokeWidth={1.6} />
@@ -2845,6 +3054,99 @@ function OperationEditorCard({
 
             {isGuideOpen && (
               <div className="px-4 py-4 border-t border-slate-100 dark:border-slate-800/80 bg-slate-50/50 dark:bg-slate-950/40 rounded-b-2xl space-y-3.5 text-xs">
+                {/* STEP 00: CHRONOLOGICAL 1C DIRECTORY PREPARATION */}
+                {mentorGuide.step00Prep && mentorGuide.step00Prep.length > 0 && (
+                  <div className="pb-3.5 border-b border-slate-200/70 dark:border-slate-800 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-[11px] font-semibold text-slate-700 dark:text-slate-200">
+                        00. Подготовка справочников (кнопка «Создать» в 1С:БП 3.0)
+                      </div>
+                      <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                        Проверено по хронологическому сгустку данных до операции #{index}
+                      </span>
+                    </div>
+
+                    <div className="divide-y divide-slate-200/80 dark:divide-slate-800 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+                      {mentorGuide.step00Prep.map((step) => {
+                        const isCreateNew = step.status === 'create_new';
+                        return (
+                          <div key={step.id} className="p-3 space-y-2">
+                            <div className="flex flex-wrap items-baseline justify-between gap-2">
+                              <div className="flex flex-wrap items-baseline gap-2 min-w-0">
+                                <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                                  {step.entityLabel}:
+                                </span>
+                                <span className="font-semibold text-slate-900 dark:text-slate-100">
+                                  {step.entityName}
+                                </span>
+                                <span aria-hidden="true" className="text-slate-300 dark:text-slate-700">
+                                  ·
+                                </span>
+                                <span
+                                  className={
+                                    isCreateNew
+                                      ? 'font-semibold text-amber-700 dark:text-amber-400'
+                                      : 'font-medium text-emerald-700 dark:text-emerald-400'
+                                  }
+                                >
+                                  {isCreateNew ? 'Создать в 1С (впервые)' : step.originSummary}
+                                </span>
+                              </div>
+
+                              {!isCreateNew && step.firstSeenOpId && (
+                                <button
+                                  type="button"
+                                  onClick={() => onJumpToOperation(step.firstSeenOpId!)}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-[11px] font-medium tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap transition-colors"
+                                >
+                                  Операция #{step.firstSeenOpNumber ?? 1} →
+                                </button>
+                              )}
+                            </div>
+
+                            {isCreateNew ? (
+                              <div className="space-y-1.5">
+                                <div className="text-[11px] text-slate-600 dark:text-slate-300">
+                                  <span className="text-slate-500 dark:text-slate-400">
+                                    Где нажать «Создать»:{' '}
+                                  </span>
+                                  <span className="font-medium">{step.menuPath1C}</span>
+                                </div>
+                                {step.fieldsToFill.length > 0 && (
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-4 gap-y-1 pt-1 text-[11px]">
+                                    {step.fieldsToFill.map((fld, fIdx) => (
+                                      <div
+                                        key={fIdx}
+                                        className="flex items-baseline justify-between gap-2 border-b border-slate-100 dark:border-slate-800/70 pb-0.5"
+                                      >
+                                        <span className="text-slate-500 dark:text-slate-400 shrink-0">
+                                          {fld.field}:
+                                        </span>
+                                        <span className="font-medium tabular-nums text-slate-900 dark:text-slate-100 text-right">
+                                          {fld.value}
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                {step.note && (
+                                  <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                                    {step.note}
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                                Повторно нажимать «Создать» не нужно — выберите существующий элемент в поле документа из справочника ({step.menuPath1C}).
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 pb-3 border-b border-slate-200/70 dark:border-slate-800">
                   <div className="lg:col-span-7 space-y-1.5">
                     <div className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">

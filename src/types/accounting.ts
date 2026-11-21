@@ -256,10 +256,12 @@ export type DocType1CBP30 =
   | 'ПоступлениеНаличных'
   | 'НачислениеЗарплаты'
   | 'ПриемНаРаботу'
+  | 'ИсполнительныйЛист'
   | 'ВедомостьВБанк'
   | 'ВедомостьВКассу'
   | 'АвансовыйОтчет'
   | 'КорректировкаДолга'
+  | 'ФинансовыеВложения'
   | 'ОперацияБух'
   | 'ЗакрытиеМесяца'
   | 'ВводОстатков';
@@ -289,11 +291,14 @@ export type OperationCategory =
   | 'cash_out'
   | 'cash_in'
   | 'hr_hire'
+  | 'writ_of_execution'
+  | 'alimony_payout'
   | 'payroll_accrual'
   | 'payroll_payout'
   | 'tax_payment'
   | 'bank_fee'
   | 'founder_contribution'
+  | 'financial_investment'
   | 'penalty_claim'
   | 'advance_offset'
   | 'advance_vat'
@@ -324,11 +329,40 @@ export type OperationReadinessStatus =
   | 'needs_clarification'
   | 'critical_error';
 
+export type DirectoryPrepEntityKind1C =
+  | 'counterparty'
+  | 'contract'
+  | 'nomenclature'
+  | 'employee'
+  | 'fixed_asset'
+  | 'writ_of_execution'
+  | 'financial_investment';
+
+export interface DirectoryPrepStep1C {
+  id: string;
+  entityKind: DirectoryPrepEntityKind1C;
+  entityLabel: string;
+  entityName: string;
+  status: 'create_new' | 'already_exists';
+  originSummary: string;
+  firstSeenOpNumber?: number;
+  firstSeenOpId?: string;
+  firstSeenDate?: string;
+  menuPath1C: string;
+  fieldsToFill: Array<{
+    field: string;
+    value: string;
+  }>;
+  note?: string;
+}
+
 export interface OperationMentorGuide1C {
   accountingMeaning: string;
   whyAmountOrVatRule: string;
   navigationPath1C: string;
   documentOperationKind1C: string;
+  directoryPrepSteps?: DirectoryPrepStep1C[];
+  step00Prep?: DirectoryPrepStep1C[];
   headerFieldsSteps: Array<{
     field: string;
     value: string;
@@ -429,6 +463,12 @@ export interface QueuedOperation {
     salary: number;
     source: string;
   }>;
+  alimonyRecipientName?: string;
+  alimonyRecipientInn?: string;
+  alimonyRatePercent?: number;
+  alimonyShareLabel?: string;
+  financialNotesSummary?: string;
+  linkedSourceOpIds?: string[];
   usefulLifeMonths?: number;
   depreciationBaseAmount?: number;
   vatRate: number;
@@ -478,6 +518,168 @@ export interface QueuedOperation {
     cashFlowItem: EntityBindingStatus;
   };
   entries: AccountingEntry[];
+}
+
+export type VirtualEntityOriginSource1C = 'from_1c_base' | 'created_in_operation';
+
+export interface VirtualEntityUsageRef1C {
+  opId: string;
+  opNumber: number;
+  date: string;
+}
+
+export interface VirtualCounterparty1C {
+  key: string;
+  name: string;
+  fullName?: string;
+  kind: 'ЮридическоеЛицо' | 'ИндивидуальныйПредприниматель' | 'ФизическоеЛицо';
+  roleHint?: string;
+  inn: string;
+  kpp: string;
+  bik: string;
+  bankName: string;
+  bankAccount: string;
+  source: VirtualEntityOriginSource1C;
+  firstSeenOpId?: string;
+  firstSeenOpNumber?: number;
+  firstSeenDate?: string;
+  usages: VirtualEntityUsageRef1C[];
+}
+
+export interface VirtualContract1C {
+  key: string;
+  name: string;
+  number: string;
+  date: string;
+  counterpartyName: string;
+  contractKind: 'СПоставщиком' | 'СПокупателем' | 'Прочее';
+  source: VirtualEntityOriginSource1C;
+  firstSeenOpId?: string;
+  firstSeenOpNumber?: number;
+  firstSeenDate?: string;
+  usages: VirtualEntityUsageRef1C[];
+}
+
+export interface VirtualNomenclature1C {
+  key: string;
+  name: string;
+  itemKind:
+    | 'Материалы'
+    | 'Топливо и ГСМ'
+    | 'Товары'
+    | 'Продукция'
+    | 'Услуги'
+    | 'Спецодежда и инвентарь'
+    | 'Оборудование (компоненты ОС)';
+  unit: string;
+  defaultAccount: string;
+  vatRateLabel: string;
+  source: VirtualEntityOriginSource1C;
+  firstSeenOpId?: string;
+  firstSeenOpNumber?: number;
+  firstSeenDate?: string;
+  usages: VirtualEntityUsageRef1C[];
+}
+
+export interface VirtualEmployee1C {
+  key: string;
+  fullName: string;
+  position: string;
+  monthlySalary: number;
+  subdivision: string;
+  hireDate: string;
+  inn?: string;
+  isStaffEmployee: boolean;
+  source: VirtualEntityOriginSource1C;
+  firstSeenOpId?: string;
+  firstSeenOpNumber?: number;
+  firstSeenDate?: string;
+  usages: VirtualEntityUsageRef1C[];
+}
+
+export interface VirtualFixedAsset1C {
+  key: string;
+  name: string;
+  initialCost: number;
+  status: 'На счёте 08.04.1 (к вводу)' | 'Введено в эксплуатацию (счёт 01.01)';
+  usefulLifeMonths: number;
+  monthlyDepreciation: number;
+  receiptDate?: string;
+  commissioningDate?: string;
+  source: VirtualEntityOriginSource1C;
+  firstSeenOpId?: string;
+  firstSeenOpNumber?: number;
+  firstSeenDate?: string;
+  usages: VirtualEntityUsageRef1C[];
+}
+
+export interface VirtualWritOfExecution1C {
+  key: string;
+  debtorEmployeeName: string;
+  recipientName: string;
+  recipientInn: string;
+  ratePercent: number;
+  shareLabel: string;
+  fixedAmount?: number;
+  startDate: string;
+  accumulatedAccrued7641: number;
+  accumulatedPaid7641: number;
+  balance7641: number;
+  source: VirtualEntityOriginSource1C;
+  firstSeenOpId?: string;
+  firstSeenOpNumber?: number;
+  firstSeenDate?: string;
+  usages: VirtualEntityUsageRef1C[];
+}
+
+export interface VirtualFinancialInvestment1C {
+  key: string;
+  name: string;
+  account: string;
+  totalAmount: number;
+  notesBreakdown: string;
+  interestRatePercent?: number;
+  counterpartyName?: string;
+  acquisitionDate: string;
+  source: VirtualEntityOriginSource1C;
+  firstSeenOpId?: string;
+  firstSeenOpNumber?: number;
+  firstSeenDate?: string;
+  usages: VirtualEntityUsageRef1C[];
+}
+
+export interface VirtualOpenSettlement1C {
+  id: string;
+  account: '60.01' | '60.02' | '62.01' | '62.02' | '76.41' | '70' | '68' | '69';
+  counterpartyName: string;
+  counterpartyInn: string;
+  counterpartyKpp: string;
+  contractName: string;
+  originalAmount: number;
+  remainingAmount: number;
+  subjectSummary: string;
+  keywordStems: string[];
+  source: VirtualEntityOriginSource1C;
+  originOpId?: string;
+  originOpNumber?: number;
+  originDate: string;
+}
+
+export interface Virtual1CStateSnapshot {
+  counterparties: VirtualCounterparty1C[];
+  contracts: VirtualContract1C[];
+  nomenclature: VirtualNomenclature1C[];
+  employees: VirtualEmployee1C[];
+  fixedAssets: VirtualFixedAsset1C[];
+  writsOfExecution: VirtualWritOfExecution1C[];
+  financialInvestments: VirtualFinancialInvestment1C[];
+  openSettlements: VirtualOpenSettlement1C[];
+}
+
+export interface Virtual1CStateTimelineResult {
+  finalState: Virtual1CStateSnapshot;
+  stateBeforeByOpId: Record<string, Virtual1CStateSnapshot>;
+  displayNumberByOpId: Record<string, number>;
 }
 
 export interface SkippedExcelRowReason {

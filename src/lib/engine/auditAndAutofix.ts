@@ -17,6 +17,7 @@ import {
   doesOperationRequireCounterparty,
 } from '@/lib/engine/mentorGuide1C';
 import {
+  attachVirtualStateStep00ToOperations,
   BatchSequentialContext,
   bindAndGenerateOperation,
   detectOperationClassification,
@@ -28,6 +29,11 @@ import {
   normalizeEntityKey,
   recalculateOperationsChronologically,
 } from '@/lib/engine/postingEngine';
+import {
+  buildVirtual1CStateTimeline,
+  extractKeywordStems1C,
+  resolveUnpaidSupplier6001ByKeywords,
+} from '@/lib/engine/virtual1CState';
 import {
   extractRequisitesFromFreeText,
   normalizeOperationDateToReportingYear,
@@ -120,7 +126,7 @@ export function computePendingNewCounterparties(
     if (op.counterpartyKind === 'ФизическоеЛицо') continue;
 
     const trimmedName = op.counterpartyName.trim();
-    if (trimmedName.length < 2) continue;
+    if (trimmedName.length < 2 || trimmedName.includes(';')) continue;
 
     const isMatchedIn1C =
       op.bindings.counterparty.status === 'matched_1c' ||
@@ -186,6 +192,182 @@ export function computePendingNewCounterparties(
   }
 
   return Array.from(map.values());
+}
+
+export interface ContextCounterpartySuggestion {
+  name: string;
+  inn: string;
+  kpp: string;
+  contractName?: string;
+  provenanceLabel: string;
+  sourceOperationId?: string;
+}
+
+function formatShortRuDate(iso?: string): string {
+  if (!iso || iso.length < 10) return '';
+  const [y, m, d] = iso.slice(0, 10).split('-');
+  if (!y || !m || !d) return iso;
+  return `${d}.${m}.${y}`;
+}
+
+/**
+ * Returns counterparty suggestions ONLY when proven by chronological context:
+ * - Unpaid 60.01 supplier invoice matching payment subject stems or exact unpaid amount
+ * - Buyer 62.02 advance matching shipment stems or advance balance
+ * - Prior commercial operation with overlapping nomenclature/subject stems
+ *
+ * STRICT ANTI-HALLUCINATION RULE: Never falls back to random directory rows (`counterparties[0]`).
+ * Returns `[]` if no contextual proof exists.
+ */
+export function computeContextCounterpartySuggestions(
+  op: QueuedOperation,
+  operations: QueuedOperation[],
+  db1C: Database1CSnapshot | null
+): ContextCounterpartySuggestion[] {
+  if (!doesOperationRequireCounterparty(op.category)) {
+    return [];
+  }
+
+  const timeline = buildVirtual1CStateTimeline(db1C, operations);
+  const stateBefore = timeline.stateBeforeByOpId[op.id] ?? timeline.finalState;
+  const displayNumMap = timeline.displayNumberByOpId;
+
+  const seen = new Set<string>();
+  const suggestions: ContextCounterpartySuggestion[] = [];
+
+  const pushSuggestion = (item: ContextCounterpartySuggestion) => {
+    const clean = item.name.trim();
+    if (clean.length < 2) return;
+    const key = getCounterpartyGroupKey(clean);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    suggestions.push({ ...item, name: clean });
+  };
+
+  const isSaleSide =
+    op.category === 'sale_goods' ||
+    op.category === 'sale_services' ||
+    op.category === 'bank_in' ||
+    op.category === 'cash_in';
+
+  // 1. Supplier payment (`bank_out` / `cash_out`): check unpaid 60.01 settlements by subject stems or exact amount
+  if (!isSaleSide && (op.category === 'bank_out' || op.category === 'cash_out')) {
+    const resolved6001 = resolveUnpaidSupplier6001ByKeywords(
+      stateBefore,
+      `${op.description} ${op.nomenclatureName ?? ''}`,
+      undefined,
+      op.amount >= 0.01 ? op.amount : undefined
+    );
+    if (resolved6001 && resolved6001.matchedSettlements.length > 0) {
+      const bySupplier = new Map<
+        string,
+        {
+          name: string;
+          inn: string;
+          kpp: string;
+          contractName: string;
+          amount: number;
+          originOpNumber?: number;
+          originDate?: string;
+          originOpId?: string;
+        }
+      >();
+      for (const s of resolved6001.matchedSettlements) {
+        if (!s.counterpartyName.trim()) continue;
+        const k = getCounterpartyGroupKey(s.counterpartyName);
+        const existing = bySupplier.get(k);
+        if (existing) {
+          existing.amount = round2(existing.amount + s.remainingAmount);
+        } else {
+          bySupplier.set(k, {
+            name: s.counterpartyName,
+            inn: s.counterpartyInn,
+            kpp: s.counterpartyKpp,
+            contractName: s.contractName,
+            amount: s.remainingAmount,
+            originOpNumber: s.originOpNumber,
+            originDate: s.originDate,
+            originOpId: s.originOpId,
+          });
+        }
+      }
+
+      for (const part of Array.from(bySupplier.values())) {
+        const opRef = part.originOpNumber ? `оп. #${part.originOpNumber}` : 'входящее сальдо 60.01';
+        const datePart = part.originDate ? ` от ${formatShortRuDate(part.originDate)}` : '';
+        pushSuggestion({
+          name: part.name,
+          inn: part.inn,
+          kpp: part.kpp,
+          contractName: part.contractName,
+          provenanceLabel: `${opRef}${datePart} · долг 60.01: ${part.amount.toFixed(2)} ₽`,
+          sourceOperationId: part.originOpId,
+        });
+      }
+    }
+  }
+
+  // 2. Sale / shipment: check prior buyer advances on 62.02
+  if (isSaleSide && (op.category === 'sale_goods' || op.category === 'sale_services')) {
+    for (const other of operations) {
+      if (other.id === op.id || !other.includeInProcessing) continue;
+      if (op.date && other.date && other.date > op.date) continue;
+      if (other.counterpartyName.trim().length < 2) continue;
+      const has6202 = other.entries.some((e) => e.credit === '62.02');
+      if (has6202) {
+        const num = displayNumMap[other.id];
+        const datePart = other.date ? ` от ${formatShortRuDate(other.date)}` : '';
+        pushSuggestion({
+          name: other.counterpartyName,
+          inn: other.counterpartyInn,
+          kpp: other.counterpartyKpp,
+          contractName: other.contractName,
+          provenanceLabel: `${num ? `оп. #${num}${datePart}` : 'аванс'} · аванс 62.02`,
+          sourceOperationId: other.id,
+        });
+      }
+    }
+  }
+
+  // 3. Stem overlap with prior operations on the same commercial side (strictly >= 1 meaningful stem match)
+  const opStems = extractKeywordStems1C(`${op.description} ${op.nomenclatureName ?? ''}`);
+  if (opStems.length > 0) {
+    for (const other of operations) {
+      if (other.id === op.id || !other.includeInProcessing) continue;
+      if (op.date && other.date && other.date > op.date) continue;
+      if (!doesOperationRequireCounterparty(other.category)) continue;
+      if (other.counterpartyKind === 'ФизическоеЛицо') continue;
+      if (other.counterpartyName.trim().length < 2) continue;
+
+      const otherIsSaleSide =
+        other.category === 'sale_goods' ||
+        other.category === 'sale_services' ||
+        other.category === 'bank_in' ||
+        other.category === 'cash_in';
+      if (otherIsSaleSide !== isSaleSide) continue;
+
+      const otherStems = extractKeywordStems1C(
+        `${other.description} ${other.nomenclatureName ?? ''}`
+      );
+      const matched = opStems.filter((st) =>
+        otherStems.some((ost) => ost.startsWith(st) || st.startsWith(ost))
+      );
+      if (matched.length > 0) {
+        const num = displayNumMap[other.id];
+        const datePart = other.date ? ` от ${formatShortRuDate(other.date)}` : '';
+        pushSuggestion({
+          name: other.counterpartyName,
+          inn: other.counterpartyInn,
+          kpp: other.counterpartyKpp,
+          contractName: other.contractName,
+          provenanceLabel: `${num ? `оп. #${num}${datePart}` : 'связь по предмету'}`,
+          sourceOperationId: other.id,
+        });
+      }
+    }
+  }
+
+  return suggestions.slice(0, 4);
 }
 
 function buildRedBalanceGuide1C(code: string, name: string, val: number): {
@@ -702,10 +884,11 @@ export function runAuditDiagnostics(params: {
       });
     }
 
-    // Missing primary amount check ("Требуется сумма") — NEVER flag HR orders, payroll calculated_by_1c, neutral manual ops, or reclassifiable operations!
+    // Missing primary amount check ("Требуется сумма") — NEVER flag HR orders, writs of execution, payroll calculated_by_1c, neutral manual ops, or reclassifiable operations!
     const isCalculatedBy1C =
       op.amountMode === 'calculated_by_1c' ||
       op.category === 'hr_hire' ||
+      op.category === 'writ_of_execution' ||
       op.category === 'payroll_accrual' ||
       op.category === 'insurance_accrual' ||
       op.category === 'manual' ||
@@ -790,18 +973,27 @@ export function runAuditDiagnostics(params: {
                   (b.subconto || '').trim().length >= 2
               )
           ));
+      const contextCpMatches = computeContextCounterpartySuggestions(op, operations, db1C);
+      const canAutoLinkSupplierByContext =
+        (op.category === 'bank_out' || op.category === 'cash_out') &&
+        contextCpMatches.length > 0;
+      const canAutoLinkCp = canAutoLinkBuyer || canAutoLinkSupplierByContext;
       issues.push({
         id: `missing-cp-name-${op.id}`,
-        severity: canAutoLinkBuyer ? 'warning' : 'error',
+        severity: canAutoLinkCp ? 'warning' : 'error',
         category: 'missing_requisite',
         operationId: op.id,
         title: 'Не указано наименование контрагента',
-        description: canAutoLinkBuyer
-          ? `Документ «${op.description.slice(0, 70)}» (${op.amount.toFixed(2)} ₽): покупатель может быть привязан автоматически по авансу 62.02 / договору кнопкой «Исправить».`
-          : `Документ «${op.description.slice(0, 70)}» (${op.amount.toFixed(2)} ₽): выберите контрагента из базы 1С или введите наименование (от 2 символов).`,
+        description: canAutoLinkSupplierByContext
+          ? `Документ «${op.description.slice(0, 70)}»: поставщик (${contextCpMatches
+              .map((c) => c.name)
+              .join(', ')}) определяется по неоплаченному поступлению 60.01 — нажмите «Исправить».`
+          : canAutoLinkBuyer
+            ? `Документ «${op.description.slice(0, 70)}» (${op.amount.toFixed(2)} ₽): покупатель может быть привязан автоматически по авансу 62.02 / договору кнопкой «Исправить».`
+            : `Документ «${op.description.slice(0, 70)}» (${op.amount.toFixed(2)} ₽): выберите контрагента из базы 1С или введите наименование (от 2 символов).`,
         accountingReason: `Субконто «Контрагенты» является обязательным аналитическим разрезом по счетам 60, 62 и 76 в 1С БП 3.0. Без указания контрагента невозможна сверка расчётов и заполнение книг покупок/продаж.`,
-        quickFixLabel: canAutoLinkBuyer
-          ? 'Нажмите «Исправить» для автопривязки покупателя по предоплате / договору'
+        quickFixLabel: canAutoLinkCp
+          ? 'Нажмите «Исправить» для автопривязки контрагента по неоплаченным накладным / предоплате'
           : 'Выберите контрагента из базы 1С или введите наименование и нажмите «Применить»',
         guide1C: {
           menuPath: 'Справочники → Покупки и продажи → Контрагенты',
@@ -812,7 +1004,7 @@ export function runAuditDiagnostics(params: {
           repostInstruction: 'Заполните поле «Контрагент» и «Договор» → «Провести и закрыть»',
           verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 60 / 62 (проверить отсутствие пустого субконто «<...>»)',
         },
-        canAutoFixBy1C: canResolveFounder || canAutoLinkBuyer,
+        canAutoFixBy1C: canResolveFounder || canAutoLinkCp,
         inlineTarget: {
           kind: 'operation_field',
           operationId: op.id,
@@ -822,7 +1014,14 @@ export function runAuditDiagnostics(params: {
           currentValue: trimmedCpName.length >= 2 ? trimmedCpName : '',
         },
       });
-    } else if (needsCp && !isMatchedIn1C && !isValidRussianInnFormat(op.counterpartyInn)) {
+    } else if (
+      needsCp &&
+      !isMatchedIn1C &&
+      !trimmedCpName.includes(';') &&
+      op.counterpartyKind !== 'ФизическоеЛицо' &&
+      !isFounderContributionText(op.description) &&
+      !isValidRussianInnFormat(op.counterpartyInn)
+    ) {
       const resolvable = canResolveCounterpartyFrom1C(op, db1C);
       const isEducational = op.counterpartySource === 'educational_unverified';
       issues.push({
@@ -865,6 +1064,9 @@ export function runAuditDiagnostics(params: {
     } else if (
       needsCp &&
       !isMatchedIn1C &&
+      !trimmedCpName.includes(';') &&
+      op.counterpartyKind !== 'ФизическоеЛицо' &&
+      !isFounderContributionText(op.description) &&
       isValidRussianInnFormat(op.counterpartyInn) &&
       op.counterpartySource === 'manual'
     ) {
@@ -898,6 +1100,7 @@ export function runAuditDiagnostics(params: {
     if (
       needsCp &&
       !isMatchedIn1C &&
+      !trimmedCpName.includes(';') &&
       trimmedCpName.length >= 2 &&
       op.counterpartyKind === 'ЮридическоеЛицо' &&
       isValidRussianInnFormat(op.counterpartyInn) &&
@@ -1042,6 +1245,7 @@ export function runAuditDiagnostics(params: {
     if (
       op.entries.length === 0 &&
       op.category !== 'hr_hire' &&
+      op.category !== 'writ_of_execution' &&
       op.category !== 'closing' &&
       ((!op.needsAmount && op.amount >= 0.01) || op.amountMode === 'calculated_by_1c')
     ) {
@@ -1825,7 +2029,22 @@ export function autoFixAllBy1CDb(params: {
 
     // 0b. Extract inline requisites (ИНН/КПП/р/сч/БИК/количество/цена) from description if missing
     const inlineReq = extractRequisitesFromFreeText(op.description, reportingYear);
-    if (!op.counterpartyInn && inlineReq.inn) {
+    const naturalPreCheck = detectOperationClassification({
+      description: op.description,
+      nomenclatureName: op.nomenclatureName || inlineReq.nomenclatureHint,
+      counterpartyName: op.counterpartyName || inlineReq.counterparty,
+    });
+    const opRequiresCommercialCp =
+      doesOperationRequireCounterparty(op.category) &&
+      doesOperationRequireCounterparty(naturalPreCheck.category);
+
+    if (
+      (op.category === 'alimony_payout' || naturalPreCheck.category === 'alimony_payout') &&
+      !op.alimonyRecipientInn &&
+      (inlineReq.alimonyRecipientInnHint || inlineReq.inn)
+    ) {
+      op.alimonyRecipientInn = inlineReq.alimonyRecipientInnHint || inlineReq.inn;
+    } else if (opRequiresCommercialCp && !op.counterpartyInn && inlineReq.inn) {
       op.counterpartyInn = inlineReq.inn;
       op.counterpartySource = 'excel_explicit';
       fixedCount++;
@@ -1838,7 +2057,7 @@ export function autoFixAllBy1CDb(params: {
         op.id
       );
     }
-    if (!op.counterpartyKpp && inlineReq.kpp) {
+    if (opRequiresCommercialCp && !op.counterpartyKpp && inlineReq.kpp) {
       op.counterpartyKpp = inlineReq.kpp;
       fixedCount++;
       recordChange(
@@ -1908,7 +2127,7 @@ export function autoFixAllBy1CDb(params: {
       }
     }
 
-    // Build chronological prior operations (both already-enriched ops and any earlier-dated ops in queue)
+    // Build chronological prior operations (both already-enriched ops and any earlier-dated ops in queue, including HR/writ registrations with 0 balance amount!)
     const buildChronoPriors = (targetOp: QueuedOperation): QueuedOperation[] => {
       const byId = new Map<string, QueuedOperation>();
       for (const p of enrichedOps) {
@@ -1921,7 +2140,9 @@ export function autoFixAllBy1CDb(params: {
           other.id !== targetOp.id &&
           !byId.has(other.id) &&
           other.includeInProcessing &&
-          other.amount >= 0.01 &&
+          (other.amount >= 0.01 ||
+            other.category === 'hr_hire' ||
+            other.category === 'writ_of_execution') &&
           (!targetOp.date || !other.date || other.date <= targetOp.date)
         ) {
           byId.set(other.id, other);
@@ -1991,6 +2212,15 @@ export function autoFixAllBy1CDb(params: {
               ? op.nomenclatureGroupName
               : inlineReq.productionObjectHint,
           employeeName: op.employeeName || inlineReq.employeeHint,
+          monthlySalary: op.monthlySalary ?? inlineReq.monthlySalaryHint,
+          employeePosition: op.employeePosition || inlineReq.employeePositionHint,
+          usefulLifeMonths: op.usefulLifeMonths ?? inlineReq.usefulLifeMonthsHint,
+          depreciationBaseAmount: op.depreciationBaseAmount,
+          alimonyRecipientName: op.alimonyRecipientName || inlineReq.alimonyRecipientHint,
+          alimonyRecipientInn: op.alimonyRecipientInn || inlineReq.alimonyRecipientInnHint,
+          alimonyRatePercent: op.alimonyRatePercent ?? inlineReq.alimonyRatePercentHint,
+          alimonyShareLabel: op.alimonyShareLabel || inlineReq.alimonyShareLabelHint,
+          financialNotesSummary: op.financialNotesSummary || inlineReq.financialNotesSummaryHint,
           warehouseName: op.warehouseName,
           warehouseToHint: op.warehouseToName,
           expenseItemName: op.expenseItemName,
@@ -2115,9 +2345,18 @@ export function autoFixAllBy1CDb(params: {
           amount: 0,
           quantity: op.quantity ?? inlineReq.quantity,
           unitPrice: op.unitPrice ?? inlineReq.unitPrice,
-          counterpartyName: op.counterpartyName || inlineReq.counterparty,
-          counterpartyInn: op.counterpartyInn,
-          counterpartyKpp: op.counterpartyKpp,
+          counterpartyName:
+            op.category === 'bank_out' && op.counterpartyName.includes(';')
+              ? ''
+              : op.counterpartyName || inlineReq.counterparty,
+          counterpartyInn:
+            op.category === 'bank_out' && op.counterpartyName.includes(';')
+              ? ''
+              : op.counterpartyInn,
+          counterpartyKpp:
+            op.category === 'bank_out' && op.counterpartyName.includes(';')
+              ? ''
+              : op.counterpartyKpp,
           counterpartyBankAccount: op.counterpartyBankAccount,
           counterpartyBik: op.counterpartyBik,
           counterpartyBankName: op.counterpartyBankName,
@@ -2128,6 +2367,15 @@ export function autoFixAllBy1CDb(params: {
           nomenclatureGroupHint:
             op.nomenclatureGroupName || inlineReq.productionObjectHint,
           employeeName: op.employeeName || inlineReq.employeeHint,
+          monthlySalary: op.monthlySalary ?? inlineReq.monthlySalaryHint,
+          employeePosition: op.employeePosition || inlineReq.employeePositionHint,
+          usefulLifeMonths: op.usefulLifeMonths ?? inlineReq.usefulLifeMonthsHint,
+          depreciationBaseAmount: op.depreciationBaseAmount,
+          alimonyRecipientName: op.alimonyRecipientName || inlineReq.alimonyRecipientHint,
+          alimonyRecipientInn: op.alimonyRecipientInn || inlineReq.alimonyRecipientInnHint,
+          alimonyRatePercent: op.alimonyRatePercent ?? inlineReq.alimonyRatePercentHint,
+          alimonyShareLabel: op.alimonyShareLabel || inlineReq.alimonyShareLabelHint,
+          financialNotesSummary: op.financialNotesSummary || inlineReq.financialNotesSummaryHint,
           warehouseName: op.warehouseName,
           warehouseToHint: op.warehouseToName,
           expenseItemName: op.expenseItemName,
@@ -2506,6 +2754,15 @@ export function autoFixAllBy1CDb(params: {
           nomenclatureName: op.nomenclatureName,
           nomenclatureGroupHint: op.nomenclatureGroupName,
           employeeName: op.employeeName,
+          monthlySalary: op.monthlySalary,
+          employeePosition: op.employeePosition,
+          usefulLifeMonths: op.usefulLifeMonths,
+          depreciationBaseAmount: op.depreciationBaseAmount,
+          alimonyRecipientName: op.alimonyRecipientName,
+          alimonyRecipientInn: op.alimonyRecipientInn,
+          alimonyRatePercent: op.alimonyRatePercent,
+          alimonyShareLabel: op.alimonyShareLabel,
+          financialNotesSummary: op.financialNotesSummary,
           warehouseName: op.warehouseName,
           warehouseToHint: op.warehouseToName,
           expenseItemName: op.expenseItemName,
@@ -2581,11 +2838,12 @@ export function autoFixAllBy1CDb(params: {
     }
 
     // Refresh mentor guide & readiness status after all enrichments
-    if (op.amountMode === 'calculated_by_1c') {
+    if (op.category === 'hr_hire' || op.category === 'writ_of_execution') {
+      op.needsAmount = undefined;
+      op.readinessStatus = 'ready';
+    } else if (op.amountMode === 'calculated_by_1c') {
       op.needsAmount = undefined;
       op.readinessStatus = 'calculated_1c';
-    } else if (op.category === 'hr_hire') {
-      op.readinessStatus = 'ready';
     } else {
       const requiresCp = doesOperationRequireCounterparty(op.category);
       const hasValidCp =
@@ -2617,27 +2875,41 @@ export function autoFixAllBy1CDb(params: {
     enrichedOps.push(op);
   }
 
-  // 7. Reclassify red 60.01 / 62.01 balances to advance accounts 60.02 / 62.02
+  // 7. Reclassify red 60.01 / 62.01 balances to advance accounts 60.02 / 62.02 (scoped to red subcontos when available)
   let intermediateOsv = calculateCurrentOsv(enrichedOps);
   const row6001 = intermediateOsv.leafRows.find((r) => r.code === '60.01');
   if (row6001 && row6001.hasRedEnd) {
+    const redSubs6001 = (intermediateOsv.subcontoRowsByAccount?.['60.01'] ?? []).filter(
+      (s) => s.endCredit < -0.01 || s.endDebit > 0.01
+    );
     for (const op of enrichedOps) {
       if (op.category === 'bank_out') {
         for (const e of op.entries) {
           if (e.debit === '60.01' && e.credit === '51') {
-            e.debit = '60.02';
-            e.description = 'Перечислен аванс поставщику (переклассифицировано с 60.01)';
-            fixedCount++;
-            log.push(
-              `Устранена краснота по 60.01: оплата «${op.counterpartyName}» перенесена на счёт авансов 60.02`
-            );
-            recordChange(
-              `Проводка оплаты «${op.counterpartyName}»: Дт 60.01 Кт 51`,
-              'Дт 60.02 Кт 51 (выданный аванс поставщику)',
-              'Устранение отрицательного сальдо по пассивному расчётному субсчёту 60.01',
-              'advance_offset',
-              op.id
-            );
+            const subMatchesRed =
+              redSubs6001.length === 0 ||
+              redSubs6001.some((rs) => {
+                const rsKey = normalizeEntityKey(rs.subcontoLabel.split('/')[0] ?? '');
+                const eKey = normalizeEntityKey(
+                  (e.debitSubconto || op.counterpartyName || '').split('/')[0] ?? ''
+                );
+                return !rsKey || !eKey || rsKey === eKey;
+              });
+            if (subMatchesRed) {
+              e.debit = '60.02';
+              e.description = 'Перечислен аванс поставщику (переклассифицировано с 60.01)';
+              fixedCount++;
+              log.push(
+                `Устранена краснота по 60.01: оплата «${op.counterpartyName}» перенесена на счёт авансов 60.02`
+              );
+              recordChange(
+                `Проводка оплаты «${op.counterpartyName}»: Дт 60.01 Кт 51`,
+                'Дт 60.02 Кт 51 (выданный аванс поставщику)',
+                'Устранение отрицательного сальдо по пассивному расчётному субсчёту 60.01',
+                'advance_offset',
+                op.id
+              );
+            }
           }
         }
       }
@@ -2686,8 +2958,13 @@ export function autoFixAllBy1CDb(params: {
     structuredChanges.push(...closeChanges);
   }
 
+  const finalOperationsWithStep00 = attachVirtualStateStep00ToOperations(
+    [...enrichedOps, ...newOperations],
+    db1C
+  );
+
   return {
-    operations: [...enrichedOps, ...newOperations],
+    operations: finalOperationsWithStep00,
     fixedCount,
     log,
     structuredChanges,

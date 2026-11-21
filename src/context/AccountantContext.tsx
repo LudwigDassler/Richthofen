@@ -27,6 +27,7 @@ import {
   OsvReport,
   OsvSourceMode,
   QueuedOperation,
+  Virtual1CStateTimelineResult,
   WorkspaceTab,
 } from '@/types/accounting';
 import {
@@ -39,12 +40,14 @@ import {
   validateRussianInnChecksum,
 } from '@/lib/egrul/egrulLookup';
 import {
+  attachVirtualStateStep00ToOperations,
   autoFixAllBy1CDb,
   autoFixSingleOperation,
   BatchSequentialContext,
   bindAndGenerateOperation,
   buildAccompanyingActions1C,
   buildOperationMentorGuide1C,
+  buildVirtual1CStateTimeline,
   calculateOsvReport,
   computePendingNewCounterparties,
   doesOperationRequireCounterparty,
@@ -129,6 +132,7 @@ interface AccountantContextValue {
   periodFilter: { dateFrom: string; dateTo: string };
   setPeriodFilter: (filter: { dateFrom: string; dateTo: string }) => void;
   operations: QueuedOperation[];
+  virtual1CState: Virtual1CStateTimelineResult;
   osvReport: OsvReport;
   auditIssues: AuditIssue[];
   directoryOptions1C: DirectoryAutocompleteOption1C[];
@@ -438,7 +442,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
         if (!doesOperationRequireCounterparty(op.category)) continue;
 
         const trimmedName = op.counterpartyName.trim();
-        if (trimmedName.length < 2) continue;
+        if (trimmedName.length < 2 || trimmedName.includes(';')) continue;
         if (op.counterpartyKind === 'ФизическоеЛицо') continue;
         if (op.bindings.counterparty.status === 'matched_1c') continue;
 
@@ -783,13 +787,17 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
         setDb1C(nextDb);
         setSyncStatus('connected');
         setPeriodFilter(buildDefaultPeriodForYear(nextDb, reportingYear));
-        mergedOps = [
-          ...rebindOperationsAgainst1CDb(operations, nextDb),
-          ...result.operations,
-        ];
+        mergedOps = attachVirtualStateStep00ToOperations(
+          [...rebindOperationsAgainst1CDb(operations, nextDb), ...result.operations],
+          nextDb
+        );
         setOperations(mergedOps);
       } else if (result.operations.length > 0) {
-        mergedOps = [...operations, ...result.operations];
+        mergedOps = recalculateOperationsChronologically(
+          [...operations, ...result.operations],
+          db1C,
+          { reportingYear }
+        );
         setOperations(mergedOps);
       }
 
@@ -889,7 +897,11 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
         generated.push(op);
       });
 
-      const nextOps = [...operations, ...generated];
+      const nextOps = recalculateOperationsChronologically(
+        [...operations, ...generated],
+        db1C,
+        { reportingYear, defaultBik }
+      );
       setOperations(nextOps);
 
       const addedPostings = generated.reduce((s, o) => s + o.entries.length, 0);
@@ -951,7 +963,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
         },
       ];
     }
-    setOperations((prev) => [op, ...prev]);
+    setOperations((prev) => attachVirtualStateStep00ToOperations([op, ...prev], db1C));
   }, [db1C, reportingYear]);
 
   const updateOperation = useCallback(
@@ -992,7 +1004,17 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
             date: normalizeOperationDateToReportingYear(op.date, reportingYear) || op.date,
             docNumber: op.docNumber,
             description: op.description,
-            amount: op.amount,
+            amount: nextNeedsCp || nextCategory === 'alimony_payout' || nextCategory === 'financial_investment' ? op.amount : op.amount,
+            monthlySalary: op.monthlySalary,
+            employeePosition: op.employeePosition,
+            injuryInsuranceRate: op.injuryInsuranceRate,
+            usefulLifeMonths: op.usefulLifeMonths,
+            depreciationBaseAmount: op.depreciationBaseAmount,
+            alimonyRecipientName: op.alimonyRecipientName,
+            alimonyRecipientInn: op.alimonyRecipientInn,
+            alimonyRatePercent: op.alimonyRatePercent,
+            alimonyShareLabel: op.alimonyShareLabel,
+            financialNotesSummary: op.financialNotesSummary,
             vatRate: nextNeedsCp ? op.vatRate : 0,
             vatRule: nextNeedsCp ? op.vatRule : 'none',
             hasInvoiceSF: nextNeedsCp ? op.hasInvoiceSF : false,
@@ -1029,9 +1051,13 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
           }
         );
 
-        return prev.map((item, i) =>
+        const updatedList = prev.map((item, i) =>
           i === idx ? { ...rebuilt, includeInProcessing: op.includeInProcessing } : item
         );
+        return recalculateOperationsChronologically(updatedList, db1C, {
+          reportingYear,
+          defaultBik,
+        });
       });
     },
     [db1C, reportingYear, lastImportStats]
@@ -1066,6 +1092,16 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
             docNumber: op.docNumber,
             description: op.description,
             amount: op.amount,
+            monthlySalary: op.monthlySalary,
+            employeePosition: op.employeePosition,
+            injuryInsuranceRate: op.injuryInsuranceRate,
+            usefulLifeMonths: op.usefulLifeMonths,
+            depreciationBaseAmount: op.depreciationBaseAmount,
+            alimonyRecipientName: op.alimonyRecipientName,
+            alimonyRecipientInn: op.alimonyRecipientInn,
+            alimonyRatePercent: op.alimonyRatePercent,
+            alimonyShareLabel: op.alimonyShareLabel,
+            financialNotesSummary: op.financialNotesSummary,
             vatRate: op.vatRate,
             vatRule: op.vatRule,
             hasInvoiceSF: op.hasInvoiceSF,
@@ -1316,6 +1352,11 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     pushNotice('info', 'Очередь загруженных операций очищена.');
   }, [pushNotice]);
 
+  const virtual1CState = useMemo(
+    () => buildVirtual1CStateTimeline(db1C, operations),
+    [db1C, operations]
+  );
+
   const osvReport = useMemo(
     () =>
       calculateOsvReport({
@@ -1547,7 +1588,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
         if (!op.includeInProcessing || op.autoGeneratedKind) continue;
         if (!doesOperationRequireCounterparty(op.category)) continue;
         const trimmed = op.counterpartyName.trim();
-        if (trimmed.length < 2) continue;
+        if (trimmed.length < 2 || trimmed.includes(';')) continue;
         if (op.counterpartyKind === 'ФизическоеЛицо') continue;
         if (op.bindings.counterparty.status === 'matched_1c') continue;
 
@@ -1576,13 +1617,13 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
         return 0;
       }
 
-      setOperations((prev) =>
-        prev.map((op) => {
+      setOperations((prev) => {
+        const mapped = prev.map((op) => {
           if (!op.includeInProcessing || op.autoGeneratedKind) return op;
           if (!doesOperationRequireCounterparty(op.category)) return op;
 
           const trimmed = op.counterpartyName.trim();
-          if (trimmed.length < 2) return op;
+          if (trimmed.length < 2 || trimmed.includes(';')) return op;
           if (op.counterpartyKind === 'ФизическоеЛицо') return op;
           if (op.bindings.counterparty.status === 'matched_1c') return op;
 
@@ -1633,8 +1674,9 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
           };
           nextOp.mentorGuide1C = buildOperationMentorGuide1C(nextOp, db1C);
           return nextOp;
-        })
-      );
+        });
+        return attachVirtualStateStep00ToOperations(mapped, db1C);
+      });
 
       const count = generatedByGroup.size;
       const changes: AutoFixChangeRecord[] = Array.from(generatedByGroup.entries()).map(
@@ -1687,7 +1729,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       osv: currentOsv,
       periodEndDate: endDate,
     });
-    setOperations([...baseOps, ...newOperations]);
+    setOperations(attachVirtualStateStep00ToOperations([...baseOps, ...newOperations], db1C));
     setAutoFixLogs(log);
     setAutoFixChanges(structuredChanges);
     pushNotice(
@@ -2296,6 +2338,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       periodFilter,
       setPeriodFilter,
       operations,
+      virtual1CState,
       osvReport,
       auditIssues,
       directoryOptions1C,
@@ -2354,6 +2397,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       jumpToOperation,
       periodFilter,
       operations,
+      virtual1CState,
       osvReport,
       auditIssues,
       directoryOptions1C,

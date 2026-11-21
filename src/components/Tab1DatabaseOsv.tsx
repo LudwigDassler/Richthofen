@@ -26,10 +26,13 @@ import {
   BalanceAnchorOverride,
   OsvAccountMovement,
   OsvSourceMode,
+  Virtual1CStateSnapshot,
+  VirtualEntityOriginSource1C,
+  VirtualEntityUsageRef1C,
 } from '@/types/accounting';
 import { formatDateRu, formatMoney, formatMoneyWithCurrency } from '@/lib/formatters';
 
-type SubView = 'osv' | 'explorer';
+type SubView = 'osv' | 'virtual_clot' | 'explorer';
 type ExplorerSection = 'org_policy' | 'directories' | 'documents' | 'postings' | 'raw_balances';
 
 const MONTH_OPTIONS = [
@@ -63,6 +66,7 @@ export function Tab1DatabaseOsv() {
     reportingYear,
     operations,
     osvReport,
+    virtual1CState,
     balanceAnchorOverride,
     setBalanceAnchorOverride,
     osvSourceMode,
@@ -105,6 +109,19 @@ export function Tab1DatabaseOsv() {
   const activeOpsCount = operations.filter(
     (o) => o.includeInProcessing && !o.isDuplicateIn1C
   ).length;
+
+  const totalVirtualEntities = useMemo(() => {
+    const s = virtual1CState.finalState;
+    return (
+      s.counterparties.length +
+      s.employees.length +
+      s.nomenclature.length +
+      s.contracts.length +
+      s.fixedAssets.length +
+      s.writsOfExecution.length +
+      s.financialInvestments.length
+    );
+  }, [virtual1CState]);
 
   const directoryKeys = useMemo(
     () => (db1C ? Object.keys(db1C.rawDirectories) : []),
@@ -544,7 +561,7 @@ export function Tab1DatabaseOsv() {
             <button
               type="button"
               onClick={() => setSubView('osv')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
                 subView === 'osv'
                   ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
@@ -556,16 +573,28 @@ export function Tab1DatabaseOsv() {
             </button>
             <button
               type="button"
+              onClick={() => setSubView('virtual_clot')}
+              disabled={!db1C && operations.length === 0}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium tabular-nums whitespace-nowrap shrink-0 transition-colors disabled:opacity-40 ${
+                subView === 'virtual_clot'
+                  ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+              }`}
+            >
+              <span>Сгусток данных 1С ({totalVirtualEntities})</span>
+            </button>
+            <button
+              type="button"
               onClick={() => setSubView('explorer')}
               disabled={!db1C}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors disabled:opacity-40 ${
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors disabled:opacity-40 ${
                 subView === 'explorer'
                   ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <Database className="w-3.5 h-3.5" strokeWidth={1.6} />
-              Справочники, Документы и Регистры 1С
+              <Database className="w-3.5 h-3.5 shrink-0" strokeWidth={1.6} />
+              <span>Справочники, Документы и Регистры 1С</span>
             </button>
           </div>
 
@@ -1323,6 +1352,15 @@ export function Tab1DatabaseOsv() {
         </div>
       )}
 
+      {/* SUBVIEW 1.5: CHRONOLOGICAL VIRTUAL 1C STATE ("СГУСТОК ДАННЫХ 1С") */}
+      {subView === 'virtual_clot' && (
+        <Virtual1CClotPanel
+          state={virtual1CState.finalState}
+          onJumpToOperation={jumpToOperation}
+          onGoToImport={() => setActiveTab('import_postings')}
+        />
+      )}
+
       {/* SUBVIEW 2: FULL 1C DATABASE EXPLORER */}
       {subView === 'explorer' && db1C && (
         <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.04)] overflow-hidden">
@@ -1774,3 +1812,471 @@ function DirectoryDynamicTable({
     </div>
   );
 }
+
+type VirtualClotRegistryKey =
+  | 'counterparties'
+  | 'employees'
+  | 'nomenclature'
+  | 'contracts'
+  | 'fixedAssets'
+  | 'writsOfExecution'
+  | 'financialInvestments';
+
+interface NormalizedClotRow {
+  key: string;
+  title: string;
+  subtitle: string;
+  details: string;
+  metricLabel: string;
+  source: VirtualEntityOriginSource1C;
+  firstSeenOpId?: string;
+  firstSeenOpNumber?: number;
+  firstSeenDate?: string;
+  usages: VirtualEntityUsageRef1C[];
+}
+
+function Virtual1CClotPanel({
+  state,
+  onJumpToOperation,
+  onGoToImport,
+}: {
+  state: Virtual1CStateSnapshot;
+  onJumpToOperation: (opId: string) => void;
+  onGoToImport: () => void;
+}) {
+  const [activeRegistry, setActiveRegistry] =
+    useState<VirtualClotRegistryKey>('counterparties');
+  const [originFilter, setOriginFilter] = useState<'all' | VirtualEntityOriginSource1C>('all');
+  const [query, setQuery] = useState('');
+
+  const summary = useMemo(() => {
+    const allItems: Array<{ source: VirtualEntityOriginSource1C }> = [
+      ...state.counterparties,
+      ...state.employees,
+      ...state.nomenclature,
+      ...state.contracts,
+      ...state.fixedAssets,
+      ...state.writsOfExecution,
+      ...state.financialInvestments,
+    ];
+    const fromBase = allItems.filter((x) => x.source === 'from_1c_base').length;
+    const createdNew = allItems.filter((x) => x.source === 'created_in_operation').length;
+    const open6001 = state.openSettlements
+      .filter((s) => s.account === '60.01' && s.remainingAmount > 0.009)
+      .reduce((sum, s) => sum + s.remainingAmount, 0);
+    const open7641 = state.writsOfExecution.reduce(
+      (sum, w) => sum + Math.max(0, w.balance7641),
+      0
+    );
+    return {
+      total: allItems.length,
+      fromBase,
+      createdNew,
+      open6001,
+      open7641,
+    };
+  }, [state]);
+
+  const registryTabs: Array<{ key: VirtualClotRegistryKey; label: string; count: number }> = [
+    { key: 'counterparties', label: 'Контрагенты', count: state.counterparties.length },
+    { key: 'employees', label: 'Сотрудники', count: state.employees.length },
+    { key: 'nomenclature', label: 'Номенклатура', count: state.nomenclature.length },
+    { key: 'contracts', label: 'Договоры', count: state.contracts.length },
+    { key: 'fixedAssets', label: 'Основные средства', count: state.fixedAssets.length },
+    {
+      key: 'writsOfExecution',
+      label: 'Исп. листы (76.41)',
+      count: state.writsOfExecution.length,
+    },
+    {
+      key: 'financialInvestments',
+      label: 'Векселя / ЦБ (58.02)',
+      count: state.financialInvestments.length,
+    },
+  ];
+
+  const normalizedRows = useMemo<NormalizedClotRow[]>(() => {
+    switch (activeRegistry) {
+      case 'counterparties':
+        return state.counterparties.map((c) => ({
+          key: c.key,
+          title: c.name,
+          subtitle: [
+            c.kind === 'ЮридическоеЛицо'
+              ? 'Юрлицо'
+              : c.kind === 'ИндивидуальныйПредприниматель'
+                ? 'ИП'
+                : 'Физлицо',
+            c.roleHint,
+          ]
+            .filter(Boolean)
+            .join(' · '),
+          details: [
+            c.inn ? `ИНН ${c.inn}` : 'ИНН не указан',
+            c.kpp ? `КПП ${c.kpp}` : '',
+            c.bik ? `БИК ${c.bik}` : '',
+          ]
+            .filter(Boolean)
+            .join(' · '),
+          metricLabel: `Операций: ${c.usages.length}`,
+          source: c.source,
+          firstSeenOpId: c.firstSeenOpId,
+          firstSeenOpNumber: c.firstSeenOpNumber,
+          firstSeenDate: c.firstSeenDate,
+          usages: c.usages,
+        }));
+      case 'employees':
+        return state.employees.map((e) => ({
+          key: e.key,
+          title: e.fullName,
+          subtitle: [e.position || 'Штатный сотрудник', e.subdivision]
+            .filter(Boolean)
+            .join(' · '),
+          details: [
+            e.hireDate ? `Принят ${formatDateRu(e.hireDate)}` : '',
+            e.inn ? `ИНН ${e.inn}` : '',
+            e.isStaffEmployee ? 'В штате' : 'Подотчёт / физлицо',
+          ]
+            .filter(Boolean)
+            .join(' · '),
+          metricLabel:
+            e.monthlySalary > 0
+              ? `Оклад ${formatMoney(e.monthlySalary, true)} ₽/мес`
+              : 'Без оклада',
+          source: e.source,
+          firstSeenOpId: e.firstSeenOpId,
+          firstSeenOpNumber: e.firstSeenOpNumber,
+          firstSeenDate: e.firstSeenDate,
+          usages: e.usages,
+        }));
+      case 'nomenclature':
+        return state.nomenclature.map((n) => ({
+          key: n.key,
+          title: n.name,
+          subtitle: `${n.itemKind} · Ед. изм.: ${n.unit}`,
+          details: `Счёт учёта ${n.defaultAccount} · НДС ${n.vatRateLabel}`,
+          metricLabel: `Движений: ${n.usages.length}`,
+          source: n.source,
+          firstSeenOpId: n.firstSeenOpId,
+          firstSeenOpNumber: n.firstSeenOpNumber,
+          firstSeenDate: n.firstSeenDate,
+          usages: n.usages,
+        }));
+      case 'contracts':
+        return state.contracts.map((ct) => ({
+          key: ct.key,
+          title: ct.name,
+          subtitle: `${ct.counterpartyName} · ${
+            ct.contractKind === 'СПоставщиком'
+              ? 'С поставщиком (60)'
+              : ct.contractKind === 'СПокупателем'
+                ? 'С покупателем (62)'
+                : 'Прочее (76)'
+          }`,
+          details: [
+            ct.number ? `№ ${ct.number}` : '',
+            ct.date ? `от ${formatDateRu(ct.date)}` : '',
+          ]
+            .filter(Boolean)
+            .join(' '),
+          metricLabel: `Операций: ${ct.usages.length}`,
+          source: ct.source,
+          firstSeenOpId: ct.firstSeenOpId,
+          firstSeenOpNumber: ct.firstSeenOpNumber,
+          firstSeenDate: ct.firstSeenDate,
+          usages: ct.usages,
+        }));
+      case 'fixedAssets':
+        return state.fixedAssets.map((fa) => ({
+          key: fa.key,
+          title: fa.name,
+          subtitle: fa.status,
+          details: [
+            fa.usefulLifeMonths > 0 ? `СПИ ${fa.usefulLifeMonths} мес.` : 'СПИ не задан',
+            fa.monthlyDepreciation > 0
+              ? `Амортизация ${formatMoney(fa.monthlyDepreciation, true)} ₽/мес`
+              : '',
+            fa.commissioningDate ? `Ввод ${formatDateRu(fa.commissioningDate)}` : '',
+          ]
+            .filter(Boolean)
+            .join(' · '),
+          metricLabel:
+            fa.initialCost > 0
+              ? `${formatMoney(fa.initialCost, true)} ₽ (без НДС)`
+              : 'Ожидает поступления',
+          source: fa.source,
+          firstSeenOpId: fa.firstSeenOpId,
+          firstSeenOpNumber: fa.firstSeenOpNumber,
+          firstSeenDate: fa.firstSeenDate,
+          usages: fa.usages,
+        }));
+      case 'writsOfExecution':
+        return state.writsOfExecution.map((w) => ({
+          key: w.key,
+          title: `Должник: ${w.debtorEmployeeName}`,
+          subtitle: `Получатель: ${w.recipientName}${
+            w.recipientInn ? ` · ИНН ${w.recipientInn}` : ''
+          }`,
+          details: `Удержание ${w.shareLabel} (${w.ratePercent}% от дохода после НДФЛ) · Удержано ${formatMoney(
+            w.accumulatedAccrued7641,
+            true
+          )} ₽ · Перечислено ${formatMoney(w.accumulatedPaid7641, true)} ₽`,
+          metricLabel: `Остаток 76.41: ${formatMoney(w.balance7641, true)} ₽`,
+          source: w.source,
+          firstSeenOpId: w.firstSeenOpId,
+          firstSeenOpNumber: w.firstSeenOpNumber,
+          firstSeenDate: w.firstSeenDate,
+          usages: w.usages,
+        }));
+      case 'financialInvestments':
+        return state.financialInvestments.map((fi) => ({
+          key: fi.key,
+          title: fi.name,
+          subtitle: [
+            `Счёт ${fi.account}`,
+            fi.counterpartyName ? `Продавец: ${fi.counterpartyName}` : 'Без НДС (ст. 149 НК РФ)',
+          ]
+            .filter(Boolean)
+            .join(' · '),
+          details: fi.notesBreakdown || `Дата приобретения ${formatDateRu(fi.acquisitionDate)}`,
+          metricLabel: `${formatMoney(fi.totalAmount, true)} ₽`,
+          source: fi.source,
+          firstSeenOpId: fi.firstSeenOpId,
+          firstSeenOpNumber: fi.firstSeenOpNumber,
+          firstSeenDate: fi.firstSeenDate,
+          usages: fi.usages,
+        }));
+    }
+  }, [activeRegistry, state]);
+
+  const filteredRows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return normalizedRows.filter((row) => {
+      if (originFilter !== 'all' && row.source !== originFilter) return false;
+      if (!q) return true;
+      return (
+        row.title.toLowerCase().includes(q) ||
+        row.subtitle.toLowerCase().includes(q) ||
+        row.details.toLowerCase().includes(q)
+      );
+    });
+  }, [normalizedRows, originFilter, query]);
+
+  if (summary.total === 0) {
+    return (
+      <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-8 text-center space-y-3">
+        <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+          Хронологическая модель «Сгусток данных 1С» пока пуста
+        </div>
+        <p className="text-xs text-slate-500 dark:text-slate-400 max-w-xl mx-auto">
+          Загрузите выгрузку базы 1С (.json) выше или добавьте журнал хозяйственных операций — система построит живой реестр контрагентов, сотрудников, ТМЦ, ОС, исполнительных листов (76.41) и векселей (58.02) с точной историей появления каждого объекта.
+        </p>
+        <div>
+          <button
+            type="button"
+            onClick={onGoToImport}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white dark:bg-slate-100 dark:text-slate-950 text-xs font-medium whitespace-nowrap transition-colors"
+          >
+            Перейти к операциям →
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+      {/* Top Explanation + Summary Metrics Strip */}
+      <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 space-y-3.5">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+              Сгусток данных 1С — живая хронологическая модель справочников и расчётов
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Отслеживает каждый объект от выгрузки 1С через операции #1..#N: показывает, что нужно нажать через «Создать» впервые, а что уже заведено ранее.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs shrink-0">
+            {(
+              [
+                ['all', `Все (${summary.total})`],
+                ['created_in_operation', `Создать в 1С (${summary.createdNew})`],
+                ['from_1c_base', `Уже в базе 1С (${summary.fromBase})`],
+              ] as Array<['all' | VirtualEntityOriginSource1C, string]>
+            ).map(([val, label]) => (
+              <button
+                key={val}
+                type="button"
+                onClick={() => setOriginFilter(val)}
+                className={`px-3 py-1.5 rounded-lg font-medium tabular-nums whitespace-nowrap shrink-0 transition-colors ${
+                  originFilter === val
+                    ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 pt-3 border-t border-slate-100 dark:border-slate-800 text-xs tabular-nums">
+          <div>
+            <div className="text-slate-500 dark:text-slate-400">Всего сущностей</div>
+            <div className="text-sm font-semibold text-slate-900 dark:text-white">
+              {summary.total}
+            </div>
+          </div>
+          <div>
+            <div className="text-slate-500 dark:text-slate-400">Загружено из базы 1С</div>
+            <div className="text-sm font-semibold text-slate-900 dark:text-white">
+              {summary.fromBase}
+            </div>
+          </div>
+          <div>
+            <div className="text-slate-500 dark:text-slate-400">Новые (Создать в 1С)</div>
+            <div className="text-sm font-semibold text-amber-700 dark:text-amber-400">
+              {summary.createdNew}
+            </div>
+          </div>
+          <div>
+            <div className="text-slate-500 dark:text-slate-400">Открытая оплата 60.01</div>
+            <div className="text-sm font-semibold text-slate-900 dark:text-white">
+              {formatMoney(summary.open6001, true)} ₽
+            </div>
+          </div>
+          <div>
+            <div className="text-slate-500 dark:text-slate-400">Остаток алиментов 76.41</div>
+            <div className="text-sm font-semibold text-slate-900 dark:text-white">
+              {formatMoney(summary.open7641, true)} ₽
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Registry Tabs + Search */}
+      <div className="px-5 py-3 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+          {registryTabs.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setActiveRegistry(tab.key)}
+              className={`px-3 py-1.5 rounded-lg font-medium tabular-nums whitespace-nowrap shrink-0 transition-colors ${
+                activeRegistry === tab.key
+                  ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-950'
+                  : 'text-slate-700 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800'
+              }`}
+            >
+              {tab.label} ({tab.count})
+            </button>
+          ))}
+        </div>
+
+        <div className="relative w-full sm:w-64">
+          <Search
+            strokeWidth={1.6}
+            className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"
+          />
+          <input
+            type="text"
+            aria-label="Поиск в сгустке данных 1С"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Поиск по наименованию, ИНН, счёту..."
+            className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-slate-100"
+          />
+        </div>
+      </div>
+
+      {/* Registry Table */}
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="bg-slate-50 dark:bg-slate-800/70 border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400">
+            <tr>
+              <th className="py-2.5 px-4 text-left font-medium">Элемент справочника / Регистр</th>
+              <th className="py-2.5 px-4 text-left font-medium">Реквизиты и параметры учёта 1С</th>
+              <th className="py-2.5 px-4 text-right font-medium">Сумма / Показатель</th>
+              <th className="py-2.5 px-4 text-left font-medium">Статус в базе 1С</th>
+              <th className="py-2.5 px-4 text-right font-medium">Операции (#N)</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+            {filteredRows.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="py-10 text-center text-slate-500 dark:text-slate-400">
+                  В выбранном реестре нет записей по текущему фильтру.
+                </td>
+              </tr>
+            ) : (
+              filteredRows.map((row) => (
+                <tr key={row.key} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40">
+                  <td className="py-2.5 px-4 align-top">
+                    <div className="font-semibold text-slate-900 dark:text-slate-100">
+                      {row.title}
+                    </div>
+                    {row.subtitle && (
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                        {row.subtitle}
+                      </div>
+                    )}
+                  </td>
+                  <td className="py-2.5 px-4 align-top tabular-nums text-slate-700 dark:text-slate-300">
+                    {row.details || '—'}
+                  </td>
+                  <td className="py-2.5 px-4 align-top text-right tabular-nums font-medium text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                    {row.metricLabel}
+                  </td>
+                  <td className="py-2.5 px-4 align-top whitespace-nowrap">
+                    {row.source === 'from_1c_base' ? (
+                      <span className="text-emerald-700 dark:text-emerald-400 font-medium">
+                        Уже в базе 1С (из выгрузки)
+                      </span>
+                    ) : (
+                      <div className="space-y-0.5">
+                        <div className="text-amber-700 dark:text-amber-400 font-medium">
+                          Создать в 1С (оп. #{row.firstSeenOpNumber ?? 1})
+                        </div>
+                        {row.firstSeenDate && (
+                          <div className="text-[11px] tabular-nums text-slate-500 dark:text-slate-400">
+                            впервые {formatDateRu(row.firstSeenDate)}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </td>
+                  <td className="py-2.5 px-4 align-top text-right">
+                    {row.usages.length === 0 ? (
+                      <span className="text-slate-400">База 1С</span>
+                    ) : (
+                      <div className="inline-flex flex-wrap justify-end gap-1">
+                        {row.usages.slice(0, 6).map((u) => (
+                          <button
+                            key={`${row.key}-${u.opId}`}
+                            type="button"
+                            onClick={() => onJumpToOperation(u.opId)}
+                            title={`Перейти к операции #${u.opNumber} от ${formatDateRu(u.date)}`}
+                            className="px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-[11px] font-medium tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap transition-colors"
+                          >
+                            #{u.opNumber}
+                          </button>
+                        ))}
+                        {row.usages.length > 6 && (
+                          <span className="text-[11px] tabular-nums text-slate-400 self-center">
+                            +{row.usages.length - 6}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+

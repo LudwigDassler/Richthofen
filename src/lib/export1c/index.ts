@@ -627,7 +627,7 @@ function generateBslModule(params: {
     lines.push(`\t// --- Документ #${idx}: ${op.docType1C} (${descEsc.slice(0, 70)}) ---`);
     lines.push('\tПопытка');
 
-    if (op.docType1C === 'СписаниеСРасчетногоСчета') {
+    if (op.docType1C === 'СписаниеСРасчетногоСчета' && op.entries.length <= 1) {
       lines.push('\t\tДок = Документы.СписаниеСРасчетногоСчета.СоздатьДокумент();');
       lines.push(`\t\tДок.Дата = ${dateExpr};`);
       lines.push('\t\tДок.Организация = ОрганизацияСсылка;');
@@ -637,6 +637,13 @@ function generateBslModule(params: {
         lines.push('\t\tДок.ВидОперации = Перечисления.ВидыОперацийСписаниеДенежныхСредств.КомиссияБанка;');
       } else if (op.category === 'payroll_payout') {
         lines.push('\t\tДок.ВидОперации = Перечисления.ВидыОперацийСписаниеДенежныхСредств.ПеречислениеЗаработнойПлатыПоВедомостям;');
+      } else if (op.category === 'alimony_payout') {
+        lines.push('\t\tПопытка Док.ВидОперации = Перечисления.ВидыОперацийСписаниеДенежныхСредств.ПрочееСписание; Исключение КонецПопытки;');
+        const recipEsc = escapeBsl(op.alimonyRecipientName || 'Получатель алиментов');
+        const recipInnEsc = escapeBsl(op.alimonyRecipientInn || '');
+        lines.push(
+          `\t\tПопытка Док.Контрагент = НайтиИлиСоздатьКонтрагента("${recipEsc}", "${recipEsc}", "${recipInnEsc}", "", "ФизическоеЛицо"); Исключение КонецПопытки;`
+        );
       } else if (op.category === 'accountable_issue') {
         lines.push('\t\tПопытка Док.ВидОперации = Перечисления.ВидыОперацийСписаниеДенежныхСредств.ПеречислениеПодотчетномуЛицу; Исключение КонецПопытки;');
         if (op.employeeName) {
@@ -647,7 +654,7 @@ function generateBslModule(params: {
       } else {
         lines.push('\t\tДок.ВидОперации = Перечисления.ВидыОперацийСписаниеДенежныхСредств.ОплатаПоставщику;');
       }
-      if (cpEsc) {
+      if (cpEsc && op.category !== 'alimony_payout') {
         lines.push(
           `\t\tДок.Контрагент = НайтиИлиСоздатьКонтрагента("${cpEsc}", "${cpEsc}", "${innEsc}", "${kppEsc}", "${op.counterpartyKind}");`
         );
@@ -659,9 +666,14 @@ function generateBslModule(params: {
       }
       lines.push(`\t\tДок.СуммаДокумента = ${op.amount.toFixed(2)};`);
       lines.push('\t\tДок.СчетУчета = ПланыСчетов.Хозрасчетный.НайтиПоКоду("51");');
-      const targetDebit = op.entries[0]?.debit || '60.01';
+      const targetDebit = op.entries[0]?.debit || (op.category === 'alimony_payout' ? '76.41' : '60.01');
       lines.push(
         `\t\tПопытка Док.СчетРасчетов = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${escapeBsl(
+          targetDebit
+        )}"); Исключение КонецПопытки;`
+      );
+      lines.push(
+        `\t\tПопытка Док.СчетДебета = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${escapeBsl(
           targetDebit
         )}"); Исключение КонецПопытки;`
       );
@@ -983,6 +995,9 @@ function generateBslModule(params: {
       lines.push('\t\tДок.СчетНачисленияАмортизацииБУ = ПланыСчетов.Хозрасчетный.НайтиПоКоду("02.01");');
       lines.push(`\t\tСтрОС = Док.ОсновныеСредства.Добавить();`);
       lines.push(`\t\tСтрОС.ОсновноеСредство = НайтиИлиСоздатьОсновноеСредство("${osItem}");`);
+      if (op.usefulLifeMonths && op.usefulLifeMonths > 0) {
+        lines.push(`\t\tПопытка Док.СрокПолезногоИспользования = ${Math.round(op.usefulLifeMonths)}; Исключение КонецПопытки;`);
+      }
       lines.push(`\t\tДок.Комментарий = "${descEsc}";`);
       lines.push('\t\tДок.Записать(РежимЗаписиДокумента.Проведение);');
     } else if (op.docType1C === 'ПриемНаРаботу') {
@@ -1001,6 +1016,26 @@ function generateBslModule(params: {
       lines.push('\t\t\tДокКадр.Записать(РежимЗаписиДокумента.Проведение);');
       lines.push('\t\tИсключение');
       lines.push(`\t\t\tСообщить("Справочник Физлиц обновлён для ${empFio} (кадровый приказ требует ручного выбора должности в 1С)");`);
+      lines.push('\t\tКонецПопытки;');
+    } else if (op.docType1C === 'ИсполнительныйЛист') {
+      const debtorFio = escapeBsl(op.employeeName || 'Сотрудник');
+      const recipientName = escapeBsl(op.alimonyRecipientName || 'Получатель по исполнительному листу');
+      const recipientInn = escapeBsl(op.alimonyRecipientInn || '');
+      lines.push(`\t\tДолжникФизЛицо = НайтиИлиСоздатьФизлицо("${debtorFio}");`);
+      lines.push(
+        `\t\tПолучательСсылка = НайтиИлиСоздатьКонтрагента("${recipientName}", "${recipientName}", "${recipientInn}", "", "ФизическоеЛицо");`
+      );
+      lines.push('\t\tПопытка');
+      lines.push('\t\t\tДокИЛ = Документы.ИсполнительныйЛист.СоздатьДокумент();');
+      lines.push(`\t\t\tДокИЛ.Дата = ${dateExpr};`);
+      lines.push('\t\t\tДокИЛ.Организация = ОрганизацияСсылка;');
+      lines.push('\t\t\tПопытка ДокИЛ.Получатель = ПолучательСсылка; Исключение КонецПопытки;');
+      lines.push(`\t\t\tДокИЛ.Комментарий = "${descEsc}";`);
+      lines.push('\t\t\tДокИЛ.Записать(РежимЗаписиДокумента.Запись);');
+      lines.push('\t\tИсключение');
+      lines.push(
+        `\t\t\tСообщить("Зарегистрированы физлицо ${debtorFio} и получатель ${recipientName} для исполнительного листа (76.41)");`
+      );
       lines.push('\t\tКонецПопытки;');
     } else {
       // Universal ОперацияБух for НачислениеЗарплаты, КорректировкаДолга, ЗакрытиеМесяца, СФ на аванс, Касса, ручные операции

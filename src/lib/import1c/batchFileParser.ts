@@ -7,10 +7,15 @@ import {
   parseRussianNumber,
 } from '@/lib/import1c/json1CSyncNormalizer';
 import {
+  attachVirtualStateStep00ToOperations,
   BatchSequentialContext,
   bindAndGenerateOperation,
   RawDraftOperationInput,
 } from '@/lib/engine/postingEngine';
+import {
+  advanceVirtual1CStateWithOperation,
+  createInitialVirtual1CState,
+} from '@/lib/engine/virtual1CState';
 import { resolveBankInfoByBik } from '@/lib/egrul/egrulLookup';
 import {
   BatchImportCompletenessStats,
@@ -240,6 +245,12 @@ export interface ExtractedFreeTextRequisites {
   monthlySalaryHint?: number;
   usefulLifeMonthsHint?: number;
   productionObjectHint?: string;
+  alimonyRecipientHint?: string;
+  alimonyRatePercentHint?: number;
+  alimonyShareLabelHint?: string;
+  financialNotesSummaryHint?: string;
+  multiSumTotal?: number;
+  multiSumNote?: string;
 }
 
 const DATIVE_ROLE_TO_NOMINATIVE: Array<{ re: RegExp; label: string }> = [
@@ -298,6 +309,8 @@ function normalizeRussianItemPhraseToNominative(rawPhrase: string): string {
       пленку: 'пленка',
       плёнку: 'плёнка',
       бумагу: 'бумага',
+      смазку: 'смазка',
+      бетономешалку: 'бетономешалка',
       продукцию: 'продукция',
       упаковку: 'упаковка',
       рабочую: 'рабочая',
@@ -313,6 +326,96 @@ function normalizeRussianItemPhraseToNominative(rawPhrase: string): string {
   });
 
   return words.join(' ').trim();
+}
+
+function normalizeInflectedPersonPhrase(raw: string): string {
+  const cleaned = raw.replace(/\s+/g, ' ').trim();
+  if (!cleaned) return '';
+
+  // Handle "супруге Валеева" / "супруги Валеева" -> "Супруга Валеева"
+  const spouseMatch = cleaned.match(/^супруг[еиуой]\s+([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ]\.?\s*[А-ЯЁ]\.?)?)$/iu);
+  if (spouseMatch) {
+    return `Супруга ${spouseMatch[1].trim()}`;
+  }
+
+  // Handle masculine genitive/dative surname + initials (with optional trailing dot: "Валеева В.В" or "Валеева В.В.")
+  const mascInit = cleaned.match(
+    /^([А-ЯЁ][а-яё]+(?:ова|ева|ёва|ина|ына|ову|еву|ёву|ину|ыну))\s+([А-ЯЁ])\.\s*([А-ЯЁ])\.?$/u
+  );
+  if (mascInit) {
+    const surNom = mascInit[1].slice(0, -1);
+    return `${surNom} ${mascInit[2]}.${mascInit[3]}.`;
+  }
+
+  // Handle feminine genitive/dative surname + optional initials ("Валеевой" -> "Валеева", "Валеевой А.С." -> "Валеева А.С.")
+  const femMatch = cleaned.match(
+    /^([А-ЯЁ][а-яё]+(?:овой|евой|ёвой|иной|ыной|ской|цкой))(?:\s+([А-ЯЁ])\.\s*([А-ЯЁ])\.?)?$/u
+  );
+  if (femMatch) {
+    const surNom = /(?:ской|цкой)$/iu.test(femMatch[1])
+      ? femMatch[1].replace(/ой$/iu, 'ая')
+      : femMatch[1].replace(/ой$/iu, 'а');
+    if (femMatch[2] && femMatch[3]) {
+      return `${surNom} ${femMatch[2]}.${femMatch[3]}.`;
+    }
+    return surNom;
+  }
+
+  return normalizeDativeEmployeeHint(cleaned);
+}
+
+function extractMultiSumAndFinancialNotes(text: string): {
+  multiSumTotal?: number;
+  multiSumNote?: string;
+  financialNotesSummaryHint?: string;
+} {
+  const isMultiValueContext =
+    /вексел|облигац|ценн\p{L}*\s+бумаг|(?:два|две|три|четыре|несколько)\s+\p{L}+.*(?:один|одн[ао]|перв\p{L}*).*(?:второ\p{L}*|друг\p{L}*)|(?:один|перв\p{L}*)\s+(?:на|за|по|номиналом|-|—)\s*\d[\d\s\u00A0]*.*(?:второ\p{L}*)\s*(?:на|за|по|номиналом|-|—)?\s*\d/iu.test(
+      text
+    );
+  if (!isMultiValueContext) return {};
+
+  // Scrub dates, requisite codes, doc numbers, percentages, and physical quantities/months
+  const scrubbed = text
+    .replace(/\b\d{1,2}[./]\d{1,2}[./]\d{2,4}\b/g, ' ')
+    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' ')
+    .replace(/(?:инн|кпп|огрн|бик|р\/сч?|к\/сч?|сч[её]т)[\s.:№-]*\d{5,20}/giu, ' ')
+    .replace(/№\s*[А-Яа-яA-Za-z0-9/_-]+/gu, ' ')
+    .replace(/\d+(?:[.,]\d+)?\s*%/g, ' ')
+    .replace(
+      /\d+(?:[.,]\d+)?\s*(?:шт\.?|ед\.?|компл\.?|упак\.?|мес\p{L}*|лет|год\p{L}*|дн\p{L}*)/giu,
+      ' '
+    );
+
+  const rawMatches = Array.from(
+    scrubbed.matchAll(/(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\b\d{4,9}(?:[.,]\d{1,2})?\b)/g)
+  );
+  const amounts = rawMatches
+    .map((m) => parseRussianNumber(m[1]))
+    .filter((n) => Number.isFinite(n) && n >= 100);
+
+  if (amounts.length < 2) return {};
+
+  const sum = Math.round((amounts.reduce((a, b) => a + b, 0) + Number.EPSILON) * 100) / 100;
+  const pctMatches = Array.from(text.matchAll(/(\d+(?:[.,]\d+)?)\s*%/g)).map((m) => m[1]);
+
+  let financialNotesSummaryHint: string | undefined;
+  if (/вексел|облигац|ценн\p{L}*\s+бумаг/iu.test(text)) {
+    const labelBase = /облигац/iu.test(text) ? 'Облигация' : 'Вексель';
+    financialNotesSummaryHint = amounts
+      .map((amt, idx) => {
+        const pct = pctMatches[idx] ? ` (под ${pctMatches[idx]}%)` : '';
+        return `${labelBase} №${idx + 1}: ${amt.toLocaleString('ru-RU')} ₽${pct}`;
+      })
+      .join(', ');
+  }
+
+  const partsText = amounts.map((a) => `${a.toLocaleString('ru-RU')} ₽`).join(' + ');
+  return {
+    multiSumTotal: sum,
+    multiSumNote: `Суммированы номиналы / части из условия: ${partsText} = ${sum.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`,
+    financialNotesSummaryHint,
+  };
 }
 
 function normalizeDativeEmployeeHint(rawEmp: string): string {
@@ -585,13 +688,22 @@ export function extractRequisitesFromFreeText(
     }
   }
 
-  // C. Fixed asset commissioning / Production output
+  // C. Fixed asset commissioning / Production output (supports both "Введен в эксплуатацию X" and "Введен бетоносмеситель в эксплуатацию (СПИ 28 мес)")
   if (!nomenclatureHint) {
-    const osCommMatch = text.match(
-      /(?:введ[её]н\p{L}*\s+в\s+эксплуатац\p{L}*|принят\p{L}*\s+к\s+уч[её]ту(?:\s+объект\s+ОС)?)\s+([А-Яа-яЁё][А-Яа-яЁё0-9\s«»"'-]{2,45}?)(?=\s*(?:[,.;()]|$|\s+и\s+принят|\s+принят\p{L}*\s+к\s+уч|\s+в\s+состав|\s+на\s+сч[её]т|\s+по\s+акту|\s+по\s+первоначальн|\s+стоимост|\s+на\s+сумму|\s+инв))/iu
+    const osCommBetweenMatch = text.match(
+      /(?:введ[её]н[аоы]?|передан[аоы]?)\s+(?:объект\s+ос\s+|основн\p{L}*\s+средств\p{L}*\s+)?([А-Яа-яЁё][А-Яа-яЁё0-9\s«»"'-]{2,45}?)\s+в\s+эксплуатац/iu
     );
-    if (osCommMatch && osCommMatch[1]) {
-      nomenclatureHint = normalizeRussianItemPhraseToNominative(osCommMatch[1]);
+    const osCommAfterMatch = !osCommBetweenMatch
+      ? text.match(
+          /(?:введ[её]н\p{L}*\s+в\s+эксплуатац\p{L}*|ввод\s+в\s+эксплуатац\p{L}*|принят\p{L}*\s+к\s+уч[её]ту(?:\s+объект\s+ОС)?)\s+([А-Яа-яЁё][А-Яа-яЁё0-9\s«»"'-]{2,45}?)(?=\s*(?:[,.;()]|$|\s+и\s+принят|\s+принят\p{L}*\s+к\s+уч|\s+в\s+состав|\s+на\s+сч[её]т|\s+по\s+акту|\s+по\s+первоначальн|\s+стоимост|\s+на\s+сумму|\s+инв))/iu
+        )
+      : null;
+    const rawOsItem = (osCommBetweenMatch?.[1] || osCommAfterMatch?.[1] || '').trim();
+    if (
+      rawOsItem &&
+      !/^(?:спецодежд|спецоснастк|спецобув|инвентар|хозпринадлежност)/iu.test(rawOsItem)
+    ) {
+      nomenclatureHint = normalizeRussianItemPhraseToNominative(rawOsItem);
     }
   }
 
@@ -608,7 +720,7 @@ export function extractRequisitesFromFreeText(
   // D. Extract nomenclature hint before quantity (purchases & sales: "за оконные блоки 133 шт", "Поставлена продукция Панель ПВХ 226 шт", "Отгружены товары ...")
   if (!nomenclatureHint) {
     const nomBeforeQty = text.match(
-      /(?:за\s+|поставлен[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|отгружен[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|реализован[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|продан[аыо]?(?:\s+товар\p{L}*|\s+продукци[яию])?\s+|поступил[аио]?(?:\s+от\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|приобретен[аыо]?(?:\s+у\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|оприходован[аыо]?\s+)([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{2,55}?)\s+\d+(?:[.,]\d+)?\s*(?:шт|ед|компл|упак|рул|м2|м3|кг|т)/iu
+      /(?:за\s+|поставлен[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|отгружен[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|реализован[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|продан[аыо]?(?:\s+товар\p{L}*|\s+продукци[яию])?\s+|поступил[аио]?(?:\s+от\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|приобретен[аыо]?(?:\s+у\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|оприходован[аыо]?\s+)([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{2,55}?)\s+\d+(?:[.,]\d+)?\s*(?:шт|ед|компл|упак|рул|м2|м3|кг|т|л)/iu
     );
     if (nomBeforeQty && nomBeforeQty[1]) {
       const cleanedNom = nomBeforeQty[1]
@@ -620,15 +732,15 @@ export function extractRequisitesFromFreeText(
     }
   }
 
-  // E. Purchase or sale of named item without explicit quantity right after item
+  // E. Purchase or sale of named item without explicit quantity right after item (including "Поступила смазка для автомобилей")
   if (!nomenclatureHint) {
     const nomPurchaseSimple = text.match(
-      /(?:поступил[аио]?|приобретен[аыо]?|купил[аи]?|закуплен[аыо]?|поставлен[аыо]?|отгружен[аыо]?|реализован[аыо]?)\s+(?:продукци[яию]\s+|товар[ыа]?\s+)?([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{2,45}?)\s+(?:от|у|покупател\p{L}*|заказчик\p{L}*|по\s+накладн|по\s+упд|по\s+цене|на\s+сумму|за\s+\d)/iu
+      /(?:поступил[аио]?|приобретен[аыо]?|купил[аи]?|закуплен[аыо]?|поставлен[аыо]?|отгружен[аыо]?|реализован[аыо]?)\s+(?:продукци[яию]\s+|товар[ыа]?\s+|материал[ыа]?\s+)?([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{2,50}?)(?=\s*(?:[,.;()]|$|\s+(?:от|у|покупател\p{L}*|заказчик\p{L}*|поставщик\p{L}*|на\s+склад|по\s+накладн|по\s+счет|по\s+упд|по\s+цене|на\s+сумму|в\s+сумме|за\s+\d|стоимост)))/iu
     );
     if (
       nomPurchaseSimple &&
       nomPurchaseSimple[1] &&
-      !/^(?:на\s+р\/с|на\s+расч|оплата|аванс|выручка|денежные|доля|вклад)/iu.test(
+      !/^(?:на\s+р\/с|на\s+расч|оплата|аванс|выручка|денежные|доля|вклад|исполнительн\p{L}*\s+лист|(?:два|три|четыре|несколько)?\s*вексел|облигац)/iu.test(
         nomPurchaseSimple[1].trim()
       )
     ) {
@@ -707,6 +819,70 @@ export function extractRequisitesFromFreeText(
     }
   }
 
+  // H. Writ of Execution (Исполнительный лист) & Alimony Remittance (76.41)
+  let alimonyRecipientHint: string | undefined;
+  let alimonyRatePercentHint: number | undefined;
+  let alimonyShareLabelHint: string | undefined;
+
+  const isWritText =
+    /исполнительн\p{L}*\s+лист/iu.test(text) &&
+    !/перечислен|выплачен|уплачен|списан|погашен/iu.test(text);
+  const isAlimonyPayoutText =
+    /(?:перечислен|выплачен|уплачен|списан|погашен)\p{L}*.*(?:алимент|по\s+исполнительн\p{L}*\s+лист\p{L}*\s+(?:алимент|супруг|в\s+пользу))/iu.test(
+      text
+    );
+
+  if (isWritText) {
+    const debtorMatch = text.match(
+      /(?:взыскан\p{L}*|удержан\p{L}*)\s+(?:алимент\p{L}*\s+)?с\s+(?:сотрудника\s+|работника\s+)?([А-ЯЁ][а-яё]{2,}(?:\s+[А-ЯЁ]\.?\s*[А-ЯЁ]\.?)?)/u
+    );
+    if (debtorMatch && debtorMatch[1]) {
+      employeeHint = normalizeInflectedPersonPhrase(debtorMatch[1]);
+    }
+    const benefitMatch = text.match(
+      /в\s+пользу\s+([А-Яа-яЁё][А-Яа-яЁё.\s-]{2,45}?)(?=\s*(?:[,;()]|\.{2,}|$|\s+в\s+размер|\s+на\s+содержан|\s+по\s+|\s+от\s+|\s+инн|\s+\d))/iu
+    );
+    if (benefitMatch && benefitMatch[1]) {
+      const cleanedRec = benefitMatch[1].replace(/\.+$/, '').trim();
+      alimonyRecipientHint = normalizeInflectedPersonPhrase(cleanedRec);
+    } else if (employeeHint) {
+      alimonyRecipientHint = `Получатель алиментов (${employeeHint})`;
+    }
+
+    const pctExplicit = text.match(/(\d{1,2}(?:[.,]\d{1,2})?)\s*%/);
+    if (pctExplicit) {
+      alimonyRatePercentHint = Number(pctExplicit[1].replace(',', '.'));
+      alimonyShareLabelHint = `${pctExplicit[1]}%`;
+    } else if (/\b1\s*\/\s*4\b|четверт|одного\s+реб[её]нк/iu.test(text)) {
+      alimonyRatePercentHint = 25;
+      alimonyShareLabelHint = '1/4 (25%)';
+    } else if (/\b1\s*\/\s*3\b|трет\p{L}*|двух\s+дет/iu.test(text)) {
+      alimonyRatePercentHint = 33.33;
+      alimonyShareLabelHint = '1/3 (33,33%)';
+    } else if (/\b1\s*\/\s*2\b|половин|тр[её]х\s+дет/iu.test(text)) {
+      alimonyRatePercentHint = 50;
+      alimonyShareLabelHint = '1/2 (50%)';
+    } else if (/алимент/iu.test(text)) {
+      alimonyRatePercentHint = 25;
+      alimonyShareLabelHint = '1/4 (25%)';
+    }
+  } else if (isAlimonyPayoutText) {
+    const recPayoutMatch = text.match(
+      /алимент\p{L}*\s+([А-Яа-яЁё][А-Яа-яЁё.\s-]{2,45}?)(?=\s*(?:[,;()]|$|\s+инн|\s+р\/с|\s+бик|\s+на\s+сумму|\s+в\s+сумме))/iu
+    );
+    if (recPayoutMatch && recPayoutMatch[1]) {
+      alimonyRecipientHint = normalizeInflectedPersonPhrase(recPayoutMatch[1].trim());
+    }
+  }
+
+  // I. Multi-sum promissory notes / securities ("Приобретено два векселя (один на 280 000 под 13% , второй - 540 000 под 11%)")
+  const multiSum = extractMultiSumAndFinancialNotes(text);
+  if (!nomenclatureHint && multiSum.financialNotesSummaryHint) {
+    nomenclatureHint = /облигац/iu.test(text)
+      ? 'Долговые ценные бумаги (облигации)'
+      : 'Векселя третьих лиц';
+  }
+
   const cleanBik = bikMatch ? bikMatch[1] : '';
   const bankInfo = cleanBik ? resolveBankInfoByBik(cleanBik) : undefined;
 
@@ -729,6 +905,12 @@ export function extractRequisitesFromFreeText(
     monthlySalaryHint,
     usefulLifeMonthsHint,
     productionObjectHint,
+    alimonyRecipientHint,
+    alimonyRatePercentHint,
+    alimonyShareLabelHint,
+    financialNotesSummaryHint: multiSum.financialNotesSummaryHint,
+    multiSumTotal: multiSum.multiSumTotal,
+    multiSumNote: multiSum.multiSumNote,
   };
 }
 
@@ -1150,13 +1332,18 @@ function mapTabularRowToDraft(params: {
 
   let effectiveAmount = Math.abs(amount);
   let amountCalculationNote: string | undefined;
-  if (effectiveAmount < 0.01 && qtyParsed > 0 && unitPriceParsed > 0) {
+  if (effectiveAmount < 0.01 && extracted.multiSumTotal && extracted.multiSumTotal > 0) {
+    effectiveAmount = extracted.multiSumTotal;
+    amountCalculationNote = extracted.multiSumNote;
+  } else if (effectiveAmount < 0.01 && qtyParsed > 0 && unitPriceParsed > 0) {
     effectiveAmount = Math.round((qtyParsed * unitPriceParsed + Number.EPSILON) * 100) / 100;
     amountCalculationNote = `Рассчитано из текста операции: ${qtyParsed} × ${unitPriceParsed.toFixed(2)} ₽ = ${effectiveAmount.toFixed(2)} ₽`;
   } else if (
     effectiveAmount < 0.01 &&
     description &&
-    !/принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу|оформлен\p{L}*\s+в\s+штат/iu.test(description)
+    !/принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу|оформлен\p{L}*\s+в\s+штат|поступил\p{L}*\s+исполнительн\p{L}*\s+лист/iu.test(
+      description
+    )
   ) {
     const inlineSumMatch =
       description.match(
@@ -1215,6 +1402,11 @@ function mapTabularRowToDraft(params: {
       employeePosition: extracted.employeePositionHint,
       monthlySalary: extracted.monthlySalaryHint,
       usefulLifeMonths: extracted.usefulLifeMonthsHint,
+      alimonyRecipientName: extracted.alimonyRecipientHint,
+      alimonyRecipientInn: extracted.alimonyRecipientHint ? finalInn || undefined : undefined,
+      alimonyRatePercent: extracted.alimonyRatePercentHint,
+      alimonyShareLabel: extracted.alimonyShareLabelHint,
+      financialNotesSummary: extracted.financialNotesSummaryHint,
       directionHint,
       explicitDebit: debitCell || undefined,
       explicitCredit: creditCell || undefined,
@@ -1426,12 +1618,17 @@ function parseRowsMatrixDetailed(params: {
       const req = extractRequisitesFromFreeText(desc, reportingYear);
       let effectiveAmt = amount;
       let amountNote: string | undefined;
-      if (effectiveAmt < 0.01 && req.quantity && req.unitPrice) {
+      if (effectiveAmt < 0.01 && req.multiSumTotal && req.multiSumTotal > 0) {
+        effectiveAmt = req.multiSumTotal;
+        amountNote = req.multiSumNote;
+      } else if (effectiveAmt < 0.01 && req.quantity && req.unitPrice) {
         effectiveAmt = Math.round((req.quantity * req.unitPrice + Number.EPSILON) * 100) / 100;
         amountNote = `Рассчитано из текста: ${req.quantity} × ${req.unitPrice.toFixed(2)} ₽ = ${effectiveAmt.toFixed(2)} ₽`;
       } else if (
         effectiveAmt < 0.01 &&
-        !/принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу|оформлен\p{L}*\s+в\s+штат/iu.test(desc)
+        !/принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу|оформлен\p{L}*\s+в\s+штат|поступил\p{L}*\s+исполнительн\p{L}*\s+лист/iu.test(
+          desc
+        )
       ) {
         const inlineSumMatch =
           desc.match(
@@ -1469,6 +1666,11 @@ function parseRowsMatrixDetailed(params: {
         employeePosition: req.employeePositionHint,
         monthlySalary: req.monthlySalaryHint,
         usefulLifeMonths: req.usefulLifeMonthsHint,
+        alimonyRecipientName: req.alimonyRecipientHint,
+        alimonyRecipientInn: req.alimonyRecipientHint ? req.inn || undefined : undefined,
+        alimonyRatePercent: req.alimonyRatePercentHint,
+        alimonyShareLabel: req.alimonyShareLabelHint,
+        financialNotesSummary: req.financialNotesSummaryHint,
         counterpartyName: req.counterparty,
         counterpartyInn: req.inn,
         counterpartyKpp: req.kpp,
@@ -1645,10 +1847,14 @@ export function parseFreeTextOrDelimitedOperations(
     const req = extractRequisitesFromFreeText(line, options?.reportingYear);
 
     let amount = trailingTabAmount;
+    let lineAmountNote: string | undefined;
     if (amount <= 0) {
-      if (req.quantity && req.unitPrice && req.quantity > 0 && req.unitPrice > 0) {
+      if (req.multiSumTotal && req.multiSumTotal > 0) {
+        amount = req.multiSumTotal;
+        lineAmountNote = req.multiSumNote;
+      } else if (req.quantity && req.unitPrice && req.quantity > 0 && req.unitPrice > 0) {
         amount = Math.round((req.quantity * req.unitPrice + Number.EPSILON) * 100) / 100;
-      } else {
+      } else if (!/поступил\p{L}*\s+исполнительн\p{L}*\s+лист/iu.test(line)) {
         const rubMatch = line.match(
           /(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р(?=$|[^\p{L}]))/iu
         );
@@ -1668,7 +1874,8 @@ export function parseFreeTextOrDelimitedOperations(
     const looksLikeAccountingOp =
       amount > 0 ||
       Boolean(req.monthlySalaryHint) ||
-      /перечислен|поступил|оплачен|реализован|отгружен|начислен|выда[лн]|выплат|уплат|списан|принят|при[её]м\s+на\s+работу|оформлен\p{L}*\s+в\s+штат|оказан|передан|отпущен|израсходован|введ[её]н|выпущен|оприходован|перемещ|снят|внесен|закрыт|амортизац/iu.test(
+      Boolean(req.alimonyRecipientHint) ||
+      /перечислен|поступил|оплачен|реализован|отгружен|начислен|выда[лн]|выплат|уплат|списан|принят|при[её]м\s+на\s+работу|оформлен\p{L}*\s+в\s+штат|оказан|передан|отпущен|израсходован|введ[её]н|выпущен|оприходован|перемещ|снят|внесен|закрыт|амортизац|приобретен|исполнительн\p{L}*\s+лист|вексел/iu.test(
         line
       );
 
@@ -1683,6 +1890,7 @@ export function parseFreeTextOrDelimitedOperations(
       docNumber: req.docNumber,
       description: line,
       amount,
+      amountCalculationNote: lineAmountNote,
       vatRate: inferredLineVat.vatRate,
       vatRule: inferredLineVat.vatRule,
       needsAmount: amount <= 0 ? true : undefined,
@@ -1694,6 +1902,11 @@ export function parseFreeTextOrDelimitedOperations(
       employeePosition: req.employeePositionHint,
       monthlySalary: req.monthlySalaryHint,
       usefulLifeMonths: req.usefulLifeMonthsHint,
+      alimonyRecipientName: req.alimonyRecipientHint,
+      alimonyRecipientInn: req.alimonyRecipientHint ? req.inn || undefined : undefined,
+      alimonyRatePercent: req.alimonyRatePercentHint,
+      alimonyShareLabel: req.alimonyShareLabelHint,
+      financialNotesSummary: req.financialNotesSummaryHint,
       counterpartyName: req.counterparty,
       counterpartyInn: req.inn,
       counterpartyKpp: req.kpp,
@@ -2039,12 +2252,20 @@ export function processBatchFiles(
   });
 
   const priorExistingOps = options?.priorOperations ?? [];
-  const generatedOperations: QueuedOperation[] = [];
+  let runningVirtualState = createInitialVirtual1CState(workingDb);
+  priorExistingOps.forEach((pOp, idx) => {
+    if (pOp.includeInProcessing) {
+      advanceVirtual1CStateWithOperation(runningVirtualState, pOp, idx + 1);
+    }
+  });
+
+  const rawGeneratedOperations: QueuedOperation[] = [];
   const generatedByFileIndex = new Map<number, QueuedOperation[]>();
 
   indexedDrafts.forEach(({ draft, fIdx }, globalIdx) => {
     const seqContext: BatchSequentialContext = {
-      priorOperations: [...priorExistingOps, ...generatedOperations],
+      priorOperations: [...priorExistingOps, ...rawGeneratedOperations],
+      virtualStateBefore: runningVirtualState,
       reportingYear,
       defaultBik: detectedDefaultBik,
       defaultBankName: detectedDefaultBankName,
@@ -2055,10 +2276,24 @@ export function processBatchFiles(
       .toString(36)
       .slice(2, 6)}`;
     const op = bindAndGenerateOperation(draft, workingDb, deterministicId, seqContext);
-    generatedOperations.push(op);
+    rawGeneratedOperations.push(op);
+    if (op.includeInProcessing) {
+      advanceVirtual1CStateWithOperation(
+        runningVirtualState,
+        op,
+        priorExistingOps.length + rawGeneratedOperations.length
+      );
+    }
+  });
 
-    // Track per-file summary
-    if (fIdx > 0 && fIdx < 999) {
+  const allCombinedWithStep00 = attachVirtualStateStep00ToOperations(
+    [...priorExistingOps, ...rawGeneratedOperations],
+    workingDb
+  );
+  const generatedOperations = allCombinedWithStep00.slice(priorExistingOps.length);
+  indexedDrafts.forEach(({ fIdx }, idx) => {
+    const op = generatedOperations[idx];
+    if (op && fIdx > 0 && fIdx < 999) {
       const list = generatedByFileIndex.get(fIdx) ?? [];
       list.push(op);
       generatedByFileIndex.set(fIdx, list);

@@ -23,10 +23,12 @@ export const DOC_TYPE_LABELS_1C: Record<DocType1CBP30, string> = {
   ВыдачаНаличных: 'Выдача наличных (РКО)',
   НачислениеЗарплаты: 'Начисление зарплаты и взносов',
   ПриемНаРаботу: 'Приём на работу (кадровый приказ)',
+  ИсполнительныйЛист: 'Исполнительный лист',
   ВедомостьВБанк: 'Ведомость в банк',
   ВедомостьВКассу: 'Ведомость в кассу',
   АвансовыйОтчет: 'Авансовый отчёт',
   КорректировкаДолга: 'Корректировка долга (зачёт авансов)',
+  ФинансовыеВложения: 'Финансовые вложения (векселя, ценные бумаги)',
   ОперацияБух: 'Операция, введённая вручную',
   ЗакрытиеМесяца: 'Регламентная операция (Закрытие месяца)',
   ВводОстатков: 'Ввод начальных остатков',
@@ -45,9 +47,12 @@ const INTERNAL_NO_COUNTERPARTY_CATEGORIES = new Set<OperationCategory>([
   'loan_received',
   'loan_repaid',
   'founder_contribution',
+  'financial_investment',
   'depreciation_accrual',
   'insurance_accrual',
   'hr_hire',
+  'writ_of_execution',
+  'alimony_payout',
   'payroll_accrual',
   'payroll_payout',
   'bank_fee',
@@ -106,10 +111,12 @@ export function getOperationCardProfile(
 
   if (
     op.category === 'hr_hire' ||
+    op.category === 'writ_of_execution' ||
     op.category === 'payroll_accrual' ||
     op.category === 'insurance_accrual' ||
     op.category === 'payroll_payout' ||
     op.docType1C === 'ПриемНаРаботу' ||
+    op.docType1C === 'ИсполнительныйЛист' ||
     op.docType1C === 'НачислениеЗарплаты' ||
     op.docType1C === 'ВедомостьВБанк' ||
     op.docType1C === 'ВедомостьВКассу'
@@ -135,6 +142,9 @@ export function getOperationCardProfile(
     op.category === 'tax_payment' ||
     op.category === 'bank_fee' ||
     op.category === 'founder_contribution' ||
+    op.category === 'alimony_payout' ||
+    op.category === 'financial_investment' ||
+    op.docType1C === 'ФинансовыеВложения' ||
     op.category === 'cash_bank_internal' ||
     op.category === 'loan_received' ||
     op.category === 'loan_repaid'
@@ -157,6 +167,15 @@ export function getOperationStatusBadgeText(
   }
   if (op.category === 'manual' && op.readinessStatus === 'needs_clarification') {
     return 'Уточните счёт Дт/Кт';
+  }
+  if (op.category === 'writ_of_execution' || op.docType1C === 'ИсполнительныйЛист') {
+    return 'Исполнительный лист 1С';
+  }
+  if (op.category === 'alimony_payout') {
+    return 'Уплата алиментов 76.41';
+  }
+  if (op.category === 'financial_investment' || op.docType1C === 'ФинансовыеВложения') {
+    return 'Учёт ценных бумаг 58.02';
   }
   if (profile === 'accountable_71') {
     if (op.category === 'expense_report') return 'Авансовый отчёт 71.01';
@@ -205,6 +224,10 @@ export function mapDocTypeToDefaultCategory(
       return 'warehouse_transfer';
     case 'ПриемНаРаботу':
       return 'hr_hire';
+    case 'ИсполнительныйЛист':
+      return 'writ_of_execution';
+    case 'ФинансовыеВложения':
+      return 'financial_investment';
     case 'НачислениеЗарплаты':
       return prevCategory === 'insurance_accrual' ? 'insurance_accrual' : 'payroll_accrual';
     case 'ВедомостьВБанк':
@@ -226,7 +249,16 @@ export function mapDocTypeToDefaultCategory(
       }
       return 'purchase_goods';
     case 'СписаниеСРасчетногоСчета':
-      if (['tax_payment', 'bank_fee', 'payroll_payout', 'accountable_issue', 'loan_repaid'].includes(prevCategory)) {
+      if (
+        [
+          'tax_payment',
+          'bank_fee',
+          'payroll_payout',
+          'accountable_issue',
+          'loan_repaid',
+          'alimony_payout',
+        ].includes(prevCategory)
+      ) {
         return prevCategory;
       }
       return 'bank_out';
@@ -248,7 +280,9 @@ export function mapDocTypeToDefaultCategory(
     case 'АвансовыйОтчет':
       return 'expense_report';
     case 'ОперацияБух':
-      return prevCategory === 'penalty_claim' ? 'penalty_claim' : 'manual';
+      return prevCategory === 'penalty_claim' || prevCategory === 'financial_investment'
+        ? prevCategory
+        : 'manual';
     default:
       return prevCategory;
   }
@@ -327,7 +361,7 @@ export function buildOperationMentorGuide1C(
       tabularAndTabsSteps: [
         {
           tabName: 'Вкладка «Материалы»',
-          instruction: `Нажмите «Добавить» (или «Подбор») → выберите номенклатуру «${nom}», укажите Количество (${qtyStr}) и проверьте колонку «Счёт учёта» = ${matAcc} (${matAcc === '10.08' ? 'Строительные материалы' : 'Сырьё и материалы'}). Сумму вручную вводить не нужно.`,
+          instruction: `Нажмите «Добавить» (или «Подбор») → выберите номенклатуру «${nom}», укажите Количество (${qtyStr}) и проверьте колонку «Счёт учёта» = ${matAcc} (${matAcc === '10.08' ? 'Строительные материалы' : matAcc === '10.03' ? 'Топливо' : 'Сырьё и материалы'}). Сумму вручную вводить не нужно.`,
         },
         {
           tabName: 'Вкладка «Счёт затрат»',
@@ -462,7 +496,7 @@ export function buildOperationMentorGuide1C(
         },
         {
           tabName: 'Вкладки «Бухгалтерский учёт» и «Налоговый учёт»',
-          instruction: `Счёт учёта = 01.01, Порядок учёта = «Начисление амортизации», галочка «Начислять амортизацию» установлена, Способ = Линейный, Счёт начисления амортизации = 02.01, Способ отражения расходов по амортизации = Счёт ${costAcc}, Статья затрат «Амортизация», Срок полезного использования (СПИ) = в месяцах по классификатору ОС (например, 37 или 60 мес.).`,
+          instruction: `Счёт учёта = 01.01, Порядок учёта = «Начисление амортизации», галочка «Начислять амортизацию» установлена, Способ = Линейный, Счёт начисления амортизации = 02.01, Способ отражения расходов по амортизации = Счёт ${costAcc}, Статья затрат «Амортизация», Срок полезного использования (СПИ) = ${op.usefulLifeMonths && op.usefulLifeMonths > 0 ? `${op.usefulLifeMonths} мес.` : 'в месяцах по классификатору ОС (например, 37 мес.)'}.`,
         },
       ],
       referencePostings:
@@ -743,6 +777,124 @@ export function buildOperationMentorGuide1C(
       commonStudentMistakes: [
         'Попытка вручную ввести проводку Дт 20/26 Кт 70 в день приёма сотрудника на работу (зарплата начисляется последним днём месяца за фактически отработанное время).',
         'Пропуск кадрового документа «Приём на работу» — из-за этого кнопка «Заполнить» в «Начислении зарплаты» оставляет таблицу пустой.',
+      ],
+    };
+  }
+
+  // 8b. Исполнительный лист (регистрация удержания алиментов — без собственных проводок)
+  if (op.category === 'writ_of_execution' || op.docType1C === 'ИсполнительныйЛист') {
+    const recName = op.alimonyRecipientName || op.counterpartyName || 'Получатель алиментов';
+    const shareTxt =
+      op.alimonyShareLabel ||
+      (op.alimonyRatePercent ? `${op.alimonyRatePercent}%` : '25% (1/4 дохода)');
+    return {
+      accountingMeaning: `Регистрация поступившего исполнительного листа на удержание алиментов из дохода сотрудника «${emp}» в пользу получателя «${recName}» (${shareTxt}). В 1С:Бухгалтерия 8.3 сам документ «Исполнительный лист» бухгалтерских проводок Дт/Кт НЕ формирует — он делает запись в регистр плановых удержаний!`,
+      whyAmountOrVatRule: `НДС (0%) и внешний коммерческий контрагент отсутствуют. Сумма удержания рассчитывается автоматически в конце каждого месяца документом «Начисление зарплаты» строго с дохода работника ЗА ВЫЧЕТОМ НДФЛ 13% (ч. 1 ст. 99 Закона № 229-ФЗ): Дт 70 (${emp}) Кт 76.41 (${recName}).`,
+      navigationPath1C:
+        'Раздел «Зарплата и кадры» → «Зарплата» → «Исполнительные листы» → кнопка «Создать»',
+      documentOperationKind1C: 'Исполнительный лист (регистрация планового удержания)',
+      headerFieldsSteps: [
+        { field: 'От (Дата регистрации)', value: dateRu },
+        { field: 'Организация', value: orgName },
+        { field: 'Сотрудник', value: emp, hint: 'Выберите работника из справочника «Сотрудники»' },
+        {
+          field: 'Получатель',
+          value: recName,
+          hint: 'Создайте/выберите в справочнике «Контрагенты» с видом «Физическое лицо»',
+        },
+        { field: 'Удерживать с', value: dateRu },
+      ],
+      tabularAndTabsSteps: [
+        {
+          tabName: 'Способ расчёта удержания',
+          instruction: `Установите переключатель «Процентом» (или «Долей») от заработка, укажите размер ${shareTxt} и нажмите «Провести и закрыть».`,
+        },
+      ],
+      referencePostings: [
+        {
+          debit: '— (Регистр плановых удержаний)',
+          credit: '— (Без проводок в день регистрации)',
+          amountRule: `${shareTxt} от чистого дохода (Оклад − НДФЛ 13%)`,
+          purpose: `При следующем «Начислении зарплаты» 1С автоматически сформирует проводку Дт 70 Кт 76.41 в пользу «${recName}»`,
+        },
+      ],
+      selfCheckOsv: [
+        'В самом документе «Исполнительный лист» проводок Дт/Кт нет — это эталонное поведение 1С:БП 3.0.',
+        `Проверьте следующий документ «Начисление зарплаты»: на вкладке «Удержания» автоматически появится строка по сотруднику «${emp}» и проводка Дт 70 Кт 76.41.`,
+      ],
+      commonStudentMistakes: [
+        'Ошибочный ввод исполнительного листа как «Поступление товаров/услуг» или ручной проводки в день получения листа до начисления зарплаты.',
+        'Расчёт алиментов от полного оклада до вычета НДФЛ 13% (по закону алименты считаются строго от суммы после удержания НДФЛ!).',
+      ],
+    };
+  }
+
+  // 8c. Перечисление удержанных алиментов получателю (Дт 76.41 Кт 51)
+  if (op.category === 'alimony_payout') {
+    const recName = op.alimonyRecipientName || op.counterpartyName || 'Получатель алиментов';
+    const recInn = op.alimonyRecipientInn || op.counterpartyInn || '';
+    return {
+      accountingMeaning: `Перечисление с расчётного счёта удержанной из зарплаты суммы алиментов получателю «${recName}»${recInn ? ` (ИНН ${recInn})` : ''}: погашается кредиторская задолженность организации по счёту 76.41 «Расчёты по исполнительным документам работников» (Дт 76.41 Кт 51).`,
+      whyAmountOrVatRule: `Перечисление алиментов НДС не облагается (Без НДС). Если сумма в условии явно не названа, перечисляется вся накопленная кредитовая задолженность по счёту 76.41, удержанная при начислении зарплаты (${formatMoneyRu(op.amount)}).`,
+      navigationPath1C:
+        'Раздел «Банк и касса» → «Банковские выписки» → кнопка «Списание»',
+      documentOperationKind1C:
+        'Списание с расчётного счёта — Вид операции: «Прочее списание» (или «Перечисление по исполнительному листу»)',
+      headerFieldsSteps: [
+        { field: 'Вид операции', value: 'Прочее списание (счёт 76.41)' },
+        { field: 'От (Дата)', value: dateRu, hint: 'Установите галочку «Подтверждено выпиской банка»' },
+        {
+          field: 'Получатель',
+          value: `${recName}${recInn ? ` (ИНН ${recInn})` : ''}`,
+          hint: 'Физлицо в справочнике «Контрагенты»',
+        },
+        { field: 'Сумма', value: formatMoneyRu(op.amount) },
+        { field: 'Счёт дебета', value: '76.41', hint: `Субконто «Контрагенты»: «${recName}»` },
+      ],
+      tabularAndTabsSteps: [
+        {
+          tabName: 'Реквизиты списания и проведение',
+          instruction: `Проверьте Счёт дебета = 76.41, Контрагент = «${recName}», Статья ДДС = «Оплата труда / Прочие выплаты» и проведите документ.`,
+        },
+      ],
+      referencePostings: buildRefPostingsFromEntries(formatMoneyRu(op.amount)),
+      selfCheckOsv: [
+        `Откройте «ОСВ по счёту 76.41»: кредитовое сальдо по получателю «${recName}» должно закрыться в 0,00 ₽.`,
+      ],
+      commonStudentMistakes: [
+        'Выбор вида операции «Оплата поставщику» (счёт 60.01) с НДС вместо счёта 76.41 «Расчёты по исполнительным документам работников».',
+      ],
+    };
+  }
+
+  // 8d. Приобретение векселей / долговых ценных бумаг (Финансовые вложения — счёт 58.02)
+  if (op.category === 'financial_investment' || op.docType1C === 'ФинансовыеВложения') {
+    const notesSummary = op.financialNotesSummary || op.nomenclatureName || 'Процентные векселя третьих лиц';
+    return {
+      accountingMeaning: `Приобретение процентных векселей (долговых ценных бумаг третьих лиц): принятие к учёту финансовых вложений по первоначальной стоимости на счёт 58.02 «Долговые ценные бумаги» (${notesSummary}) в корреспонденции со счётом расчётов с продавцом 76.09 (ПБУ 19/02).`,
+      whyAmountOrVatRule: `Операции с ценными бумагами и векселями НЕ облагаются НДС (пп. 12 п. 2 ст. 149 НК РФ — строго 0% / Без НДС). При покупке нескольких векселей одной операцией общая сумма вложения складывается из стоимости каждого векселя (${formatMoneyRu(op.amount)}). Проценты, указанные на векселях (например, 13%), не уменьшают и не увеличивают цену покупки в день приобретения — они служат ставкой для последующего начисления процентного дохода (Дт 76.09 Кт 91.01).`,
+      navigationPath1C:
+        'Раздел «Операции» → «Операции, введённые вручную» → кнопка «Создать» → «Операция»',
+      documentOperationKind1C: 'Операция, введённая вручную (учёт финансовых вложений на счёте 58.02)',
+      headerFieldsSteps: [
+        { field: 'От (Дата)', value: dateRu },
+        { field: 'Организация', value: orgName },
+        { field: 'Содержание', value: op.description },
+        { field: 'Сумма операции', value: formatMoneyRu(op.amount) },
+      ],
+      tabularAndTabsSteps: [
+        {
+          tabName: 'Табличная часть проводок (по каждому векселю)',
+          instruction: `Добавьте проводку(и) Дт 58.02 «Долговые ценные бумаги» — Кт 76.09 «Прочие расчёты с разными дебиторами и кредиторами». В субконто счёта 58.02 укажите контрагента-эмитента и карточку каждого векселя (${notesSummary}) на общую сумму ${formatMoneyRu(op.amount)}.`,
+        },
+      ],
+      referencePostings: buildRefPostingsFromEntries(formatMoneyRu(op.amount)),
+      selfCheckOsv: [
+        `Откройте «ОСВ по счёту 58.02»: в дебетовом сальдо должна отразиться полная стоимость приобретённых векселей (${formatMoneyRu(op.amount)}) в разрезе ценных бумаг.`,
+      ],
+      commonStudentMistakes: [
+        'Ошибочное оформление покупки векселей документом «Поступление товаров» на счёт 41.01 с выделением НДС 20%.',
+        'Потеря суммы в Excel, когда номиналы векселей написаны текстом внутри описания операции («один на 280 000..., второй - 540 000»).',
       ],
     };
   }

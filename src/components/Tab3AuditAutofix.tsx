@@ -5,7 +5,6 @@ import {
   AlertCircle,
   AlertTriangle,
   ArrowRight,
-  BookOpenCheck,
   Building2,
   Calculator,
   Check,
@@ -22,7 +21,7 @@ import {
 } from 'lucide-react';
 import { useAccountant } from '@/context/AccountantContext';
 import { validateRussianInnChecksum } from '@/lib/egrul/egrulLookup';
-import { doesOperationRequireCounterparty, getCounterpartyGroupKey } from '@/lib/engine';
+import { computeContextCounterpartySuggestions } from '@/lib/engine';
 import {
   DirectoryAutocompleteOption1C,
   InlineFieldTarget,
@@ -192,45 +191,6 @@ export function Tab3AuditAutofix() {
       0
     ) +
     otherManualTargets.length;
-
-  // Quick-pick commercial counterparties from queue & 1C DB for missing counterparty rows
-  const quickPickCommercialOptions = useMemo<QuickCounterpartyOption[]>(() => {
-    const seen = new Set<string>();
-    const list: QuickCounterpartyOption[] = [];
-    const pushOpt = (name: string, inn: string, kpp: string, hint: string) => {
-      const clean = name.trim();
-      if (clean.length < 2) return;
-      const key = getCounterpartyGroupKey(clean);
-      if (!key || seen.has(key)) return;
-      seen.add(key);
-      list.push({ name: clean, inn: inn || '', kpp: kpp || '', hint });
-    };
-
-    for (const op of operations) {
-      if (!op.includeInProcessing || !doesOperationRequireCounterparty(op.category)) continue;
-      if (op.counterpartyKind === 'ФизическоеЛицо') continue;
-      if (op.counterpartyName.trim().length >= 2) {
-        const isBuyer =
-          op.category === 'bank_in' ||
-          op.category === 'sale_goods' ||
-          op.category === 'sale_services';
-        pushOpt(
-          op.counterpartyName,
-          op.counterpartyInn,
-          op.counterpartyKpp,
-          isBuyer ? 'покупатель' : 'контрагент'
-        );
-      }
-    }
-
-    for (const dir of directoryOptions1C) {
-      if (dir.source !== 'Контрагенты') continue;
-      pushOpt(dir.name, dir.inn, dir.kpp, 'БД 1С');
-      if (list.length >= 8) break;
-    }
-
-    return list.slice(0, 8);
-  }, [operations, directoryOptions1C]);
 
   // 6-Step Coursework Readiness Checklist computation
   const checklistSteps = useMemo(() => {
@@ -533,9 +493,9 @@ export function Tab3AuditAutofix() {
               type="button"
               disabled={newCounterpartiesNeedingRequisites.length === 0}
               onClick={() => fillEducationalRequisitesForUnverified()}
-              className="inline-flex items-center justify-center px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white dark:bg-slate-100 dark:hover:bg-slate-200 dark:text-slate-950 text-xs font-medium disabled:opacity-45 whitespace-nowrap transition-colors"
+              className="inline-flex items-center justify-center px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white dark:bg-slate-100 dark:hover:bg-slate-200 dark:text-slate-950 text-xs font-medium tabular-nums disabled:opacity-45 whitespace-nowrap shrink-0 transition-colors"
             >
-              Подставить учебные валидные ИНН/КПП (ФНС checksum)
+              Подставить учебные валидные ИНН/КПП ({newCounterpartiesNeedingRequisites.length})
             </button>
           </div>
         </div>
@@ -549,7 +509,7 @@ export function Tab3AuditAutofix() {
           </div>
         ) : (
           <div className="divide-y divide-slate-100 dark:divide-slate-800">
-            {/* A. Operations missing counterparty name — with live 1C Combobox + Quick-Pick Chips */}
+            {/* A. Operations missing counterparty name — with live 1C Combobox + Context-Only Suggestions */}
             {missingCounterpartyNameIssues.map((issue) => {
               const target = issue.inlineTarget!;
               const draftKey = `cp-name:${target.operationId}`;
@@ -558,6 +518,15 @@ export function Tab3AuditAutofix() {
                   ? draftValues[draftKey]
                   : target.currentValue;
               const errorMsg = fieldErrors[draftKey];
+              const targetOp = operations.find((o) => o.id === target.operationId);
+              const contextualOptions: QuickCounterpartyOption[] = targetOp
+                ? computeContextCounterpartySuggestions(targetOp, operations, db1C).map((s) => ({
+                    name: s.name,
+                    inn: s.inn,
+                    kpp: s.kpp,
+                    hint: s.provenanceLabel,
+                  }))
+                : [];
 
               return (
                 <CounterpartyComboboxDraftRow
@@ -568,7 +537,7 @@ export function Tab3AuditAutofix() {
                   value={draftVal}
                   errorMsg={errorMsg}
                   directoryOptions1C={directoryOptions1C}
-                  quickPickOptions={quickPickCommercialOptions}
+                  quickPickOptions={contextualOptions}
                   onChangeDraft={(val) => setDraft(draftKey, val)}
                   onCommitManual={() => commitTargetValue(draftKey, target, target.currentValue)}
                   onSelect1CItem={(opt) => {
@@ -1154,7 +1123,6 @@ export function Tab3AuditAutofix() {
                   {issue.guide1C && (
                     <div className="ml-6 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-800/40 p-3.5 space-y-1.5 text-[11px]">
                       <div className="flex flex-wrap items-center gap-2 font-semibold text-slate-800 dark:text-slate-200">
-                        <BookOpenCheck className="w-3.5 h-3.5 text-amber-600 shrink-0" strokeWidth={1.6} />
                         <span>Как исправить в 1С:Бухгалтерия 8.3:</span>
                         <span className="font-normal text-slate-600 dark:text-slate-300">
                           {issue.guide1C.menuPath} · {issue.guide1C.documentKind}
@@ -1231,13 +1199,13 @@ function CounterpartyComboboxDraftRow({
         <div className="text-slate-500">{description}</div>
         {quickPickOptions.length > 0 && (
           <div className="pt-0.5 flex flex-wrap items-center gap-1.5">
-            <span className="text-[11px] text-slate-500">Подставить в 1 клик:</span>
+            <span className="text-[11px] text-slate-500">По контексту расчётов:</span>
             {quickPickOptions.map((opt) => (
               <button
                 key={`${opt.name}-${opt.inn}`}
                 type="button"
                 onClick={() => onQuickAssign(opt)}
-                className="px-2.5 py-0.5 rounded-full border border-amber-300/80 dark:border-amber-800 bg-amber-50/70 dark:bg-amber-950/30 hover:bg-amber-100 dark:hover:bg-amber-950/60 text-[11px] font-medium text-amber-900 dark:text-amber-200 transition-colors"
+                className="px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-[11px] font-medium text-slate-800 dark:text-slate-200 transition-colors"
               >
                 {opt.name}
                 {opt.hint ? ` (${opt.hint})` : ''}
