@@ -1,3 +1,6 @@
+export * from './textHygiene1C';
+export * from './documentSpecs1C';
+export * from './entityNormalizer1C';
 export * from './osvCalculator';
 export * from './virtual1CState';
 export * from './amountAndLinkResolver';

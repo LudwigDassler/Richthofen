@@ -1,4 +1,8 @@
-import { getAccountInfo, isOffBalanceAccountCode } from '@/data/chartOfAccounts';
+import {
+  getAccountInfo,
+  isOffBalanceAccountCode,
+  normalizeAccountToLeaf1C,
+} from '@/data/chartOfAccounts';
 import {
   AuditGuide1CBP30,
   AuditIssue,
@@ -14,10 +18,16 @@ import {
   QueuedOperation,
 } from '@/types/accounting';
 import {
+  doesSpecAllowZeroPostings,
+  getDocumentSpecByDocType,
+  getDocumentSpecForOperation,
+} from '@/lib/engine/documentSpecs1C';
+import {
   DOC_TYPE_LABELS_1C,
   buildOperationMentorGuide1C,
   doesOperationRequireCounterparty,
 } from '@/lib/engine/mentorGuide1C';
+import { sanitizeAuditIssue1C } from '@/lib/engine/textHygiene1C';
 import {
   attachVirtualStateStep00ToOperations,
   BatchSequentialContext,
@@ -379,63 +389,114 @@ export function computeContextCounterpartySuggestions(
     }
   }
 
-  // 2. Sale / shipment: check prior buyer advances on 62.02
+  // 2. Sale / shipment: check prior AND forward buyer payments / advances on 62.02 / 62.01
   if (isSaleSide && (op.category === 'sale_goods' || op.category === 'sale_services')) {
     for (const other of operations) {
       if (other.id === op.id || !other.includeInProcessing) continue;
-      if (op.date && other.date && other.date > op.date) continue;
       if (other.counterpartyName.trim().length < 2) continue;
-      const has6202 = other.entries.some((e) => e.credit === '62.02');
-      if (has6202) {
-        const num = displayNumMap[other.id];
-        const datePart = other.date ? ` от ${formatShortRuDate(other.date)}` : '';
-        pushSuggestion({
-          name: other.counterpartyName,
-          inn: other.counterpartyInn,
-          kpp: other.counterpartyKpp,
-          contractName: other.contractName,
-          provenanceLabel: `${num ? `оп. #${num}${datePart}` : 'аванс'} · аванс 62.02`,
-          sourceOperationId: other.id,
-        });
+      const has6202OrBankIn =
+        other.category === 'bank_in' ||
+        other.entries.some((e) => e.credit === '62.02' || e.credit === '62.01');
+      if (has6202OrBankIn) {
+        const isExactAmt = op.amount >= 0.01 && Math.abs(other.amount - op.amount) < 0.02;
+        const isPrior = !op.date || !other.date || other.date <= op.date;
+        if (isPrior || isExactAmt) {
+          const num = displayNumMap[other.id];
+          const datePart = other.date ? ` от ${formatShortRuDate(other.date)}` : '';
+          pushSuggestion({
+            name: other.counterpartyName,
+            inn: other.counterpartyInn,
+            kpp: other.counterpartyKpp,
+            contractName: other.contractName,
+            provenanceLabel: `${num ? `оп. #${num}${datePart}` : 'оплата покупателя'} · ${isPrior ? 'аванс 62.02' : 'последующая оплата'}`,
+            sourceOperationId: other.id,
+          });
+        }
+      }
+    }
+    if (suggestions.length === 0 && db1C) {
+      const bal6202List = db1C.rawBalances.filter(
+        (b) => b.account === '62.02' && b.subconto && (b.rawCredit > 0.01 || b.startCredit > 0.01)
+      );
+      if (bal6202List.length === 1 && bal6202List[0]?.subconto) {
+        const subName = bal6202List[0].subconto.split('/')[0].trim();
+        const m1c = matchPersonOrCounterpartyIn1C(subName, '', db1C);
+        if (m1c) {
+          pushSuggestion({
+            name: m1c.name,
+            inn: m1c.inn,
+            kpp: m1c.kpp,
+            contractName: m1c.defaultContract || '',
+            provenanceLabel: 'БД 1С · сальдо 62.02',
+          });
+        }
+      }
+      if (suggestions.length === 0) {
+        const buyerContracts = db1C.contracts.filter(
+          (c) => /покупател/iu.test(c.contractKind ?? '') && c.counterpartyName.trim().length >= 2
+        );
+        const uniq = new Set(buyerContracts.map((c) => normalizeEntityKey(c.counterpartyName)));
+        if (uniq.size === 1 && buyerContracts[0]) {
+          const bc = buyerContracts[0];
+          const m1c = matchPersonOrCounterpartyIn1C(bc.counterpartyName, bc.counterpartyInn ?? '', db1C);
+          pushSuggestion({
+            name: m1c?.name || bc.counterpartyName,
+            inn: m1c?.inn || bc.counterpartyInn || '',
+            kpp: m1c?.kpp || '',
+            contractName: bc.name || '',
+            provenanceLabel: 'БД 1С · договор с покупателем',
+          });
+        }
       }
     }
   }
 
-  // 3. Stem overlap with prior operations on the same commercial side (strictly >= 1 meaningful stem match)
+  // 3. Stem or exact-amount overlap with prior OR forward operations on the same commercial side
   const opStems = extractKeywordStems1C(`${op.description} ${op.nomenclatureName ?? ''}`);
-  if (opStems.length > 0) {
-    for (const other of operations) {
-      if (other.id === op.id || !other.includeInProcessing) continue;
-      if (op.date && other.date && other.date > op.date) continue;
-      if (!doesOperationRequireCounterparty(other.category)) continue;
-      if (other.counterpartyKind === 'ФизическоеЛицо') continue;
-      if (other.counterpartyName.trim().length < 2) continue;
+  for (const other of operations) {
+    if (other.id === op.id || !other.includeInProcessing) continue;
+    if (
+      !doesOperationRequireCounterparty(other.category) &&
+      other.category !== 'contract_event'
+    ) {
+      continue;
+    }
+    if (other.counterpartyKind === 'ФизическоеЛицо') continue;
+    if (other.counterpartyName.trim().length < 2) continue;
 
-      const otherIsSaleSide =
-        other.category === 'sale_goods' ||
-        other.category === 'sale_services' ||
-        other.category === 'bank_in' ||
-        other.category === 'cash_in';
-      if (otherIsSaleSide !== isSaleSide) continue;
+    const otherIsSaleSide =
+      other.category === 'sale_goods' ||
+      other.category === 'sale_services' ||
+      other.category === 'bank_in' ||
+      other.category === 'cash_in' ||
+      (other.category === 'contract_event' &&
+        /покупател|заказчик|выставлен\p{L}*\s+счет/iu.test(other.description));
+    if (otherIsSaleSide !== isSaleSide) continue;
 
-      const otherStems = extractKeywordStems1C(
-        `${other.description} ${other.nomenclatureName ?? ''}`
-      );
-      const matched = opStems.filter((st) =>
+    const otherStems = extractKeywordStems1C(
+      `${other.description} ${other.nomenclatureName ?? ''}`
+    );
+    const matched =
+      opStems.length > 0 &&
+      opStems.filter((st) =>
         otherStems.some((ost) => ost.startsWith(st) || st.startsWith(ost))
       );
-      if (matched.length > 0) {
-        const num = displayNumMap[other.id];
-        const datePart = other.date ? ` от ${formatShortRuDate(other.date)}` : '';
-        pushSuggestion({
-          name: other.counterpartyName,
-          inn: other.counterpartyInn,
-          kpp: other.counterpartyKpp,
-          contractName: other.contractName,
-          provenanceLabel: `${num ? `оп. #${num}${datePart}` : 'связь по предмету'}`,
-          sourceOperationId: other.id,
-        });
-      }
+    const exactAmountMatch =
+      op.amount >= 0.01 &&
+      (Math.abs(other.amount - op.amount) < 0.02 ||
+        (other.periodicPaymentAmount !== undefined &&
+          Math.abs(other.periodicPaymentAmount - op.amount) < 0.02));
+    if ((matched && matched.length > 0) || exactAmountMatch) {
+      const num = displayNumMap[other.id];
+      const datePart = other.date ? ` от ${formatShortRuDate(other.date)}` : '';
+      pushSuggestion({
+        name: other.counterpartyName,
+        inn: other.counterpartyInn,
+        kpp: other.counterpartyKpp,
+        contractName: other.contractName,
+        provenanceLabel: `${num ? `оп. #${num}${datePart}` : 'связь по контуру задания'}`,
+        sourceOperationId: other.id,
+      });
     }
   }
 
@@ -567,7 +628,7 @@ export function runAuditDiagnostics(params: {
       title: 'Нарушено равенство оборотов за период',
       description: `Обороты Дт (${osv.totals.turnoverDebit.toFixed(2)} ₽) не равны оборотам Кт (${osv.totals.turnoverCredit.toFixed(2)} ₽). Проверьте незаполненные счета проводок.`,
       accountingReason: `Обороты по Дебету и Кредиту за отчётный период расходятся на ${osv.totals.turnoverDiff.toFixed(2)} ₽ из-за односторонней проводки (не указан счёт Дт или Кт в ручной операции).`,
-      quickFixLabel: 'Заполните пустой счёт проводки в карточке ниже',
+      quickFixLabel: 'Заполните пустой счёт проводки в карточке операции',
       guide1C: {
         menuPath: 'Операции → Операции, введенные вручную',
         documentKind: 'Операция (бухгалтерский и налоговый учет)',
@@ -932,6 +993,40 @@ export function runAuditDiagnostics(params: {
     });
   }
 
+  const hasDecemberActivity = operations.some(
+    (o) => o.includeInProcessing && (o.date ?? '').slice(5, 7) === '12'
+  );
+  if ((osv.dateTo ?? '').endsWith('-12-31') && hasDecemberActivity) {
+    const row99YearEnd = osv.leafRows.find((r) => r.code === '99.01.1' || r.code === '99');
+    if (row99YearEnd && (row99YearEnd.endCredit > 0.01 || row99YearEnd.endDebit > 0.01)) {
+      const bal99 = row99YearEnd.endCredit > 0.01 ? row99YearEnd.endCredit : -row99YearEnd.endDebit;
+      issues.push({
+        id: 'unclosed-99-reformation',
+        fixId: 'close_period_accounts',
+        severity: 'warning',
+        category: 'unclosed_period',
+        accountCode: '99.01.1',
+        title: 'На 31 декабря не выполнена реформация баланса (счёт 99 не закрыт на счёт 84)',
+        description: `По состоянию на 31.12 на счёте 99.01.1 сохраняется сальдо ${Math.abs(bal99).toFixed(2)} ₽.`,
+        accountingReason:
+          'Заключительными записями декабря (регламентная операция «Реформация баланса») сальдо счёта 99 списывается на счёт 84 «Нераспределённая прибыль (непокрытый убыток)», а внутренние субсчета 90 и 91 закрываются на 90.09 и 91.09.',
+        quickFixLabel: 'Выполнить реформацию баланса кнопкой «Исправить»',
+        guide1C: {
+          menuPath: 'Операции → Закрытие месяца',
+          documentKind: 'Регламентная операция декабря «Реформация баланса»',
+          checkPoints: [
+            'Откройте «Операции → Закрытие месяца» за декабрь отчётного года',
+            'Убедитесь, что выполнена строка «Реформация баланса» и конечное сальдо счёта 99 равно 0,00 ₽',
+          ],
+          repostInstruction: 'Операции → Закрытие месяца → Декабрь → Выполнить закрытие месяца',
+          verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость за год (сальдо по счёту 99 и всем субсчетам 90.*, 91.* = 0,00 ₽)',
+        },
+        canAutoFixBy1C: true,
+        autoFixActionLabel: 'Выполнить реформацию баланса (99 → 84)',
+      });
+    }
+  }
+
   // 5. Per-operation requisite, amount & posting checks
   for (const op of operations) {
     if (op.isDuplicateIn1C && op.includeInProcessing) {
@@ -1008,10 +1103,7 @@ export function runAuditDiagnostics(params: {
     // Missing primary amount check ("Требуется сумма") — NEVER flag HR orders, writs, contract/policy events, payroll calculated_by_1c, neutral manual ops, or reclassifiable operations!
     const isCalculatedBy1C =
       op.amountMode === 'calculated_by_1c' ||
-      op.category === 'hr_hire' ||
-      op.category === 'writ_of_execution' ||
-      op.category === 'contract_event' ||
-      op.category === 'policy_event' ||
+      doesSpecAllowZeroPostings(op.category) ||
       op.category === 'payroll_accrual' ||
       op.category === 'insurance_accrual' ||
       op.category === 'manual' ||
@@ -1020,13 +1112,13 @@ export function runAuditDiagnostics(params: {
     if (
       !isCalculatedBy1C &&
       (op.amountMode === 'required_missing' ||
-        ((op.needsAmount || op.amount < 0.01) && op.category !== 'closing'))
+        ((op.needsAmount || op.amount < 0.01) && !doesSpecAllowZeroPostings(op.category)))
     ) {
       const checkedSources = op.resolverTrace?.checkedSourcesWhenMissing;
       const checkedSummary =
         checkedSources && checkedSources.length > 0
-          ? `Проверены все 7 уровней расчётного контура задания: ${checkedSources.join('; ')}.`
-          : 'Проверены все 7 уровней расчётного контура задания (колонка суммы Excel, формулы в тексте строки, открытые расчёты 60/62, периодические договоры, остатки счетов 68/69/70/76.41/08/10/41/43, регистры ФОТ/ОС/векселей и история базы 1С) — числовое основание во входных файлах не найдено.';
+          ? `Проверены все 7 уровней замкнутого контура задания: ${checkedSources.join('; ')}.`
+          : 'Проверены все 7 уровней замкнутого контура задания (колонка суммы Excel, формулы в тексте строки, встречные расчёты 60/62, периодические договоры, остатки счетов 68/69/70/76.41/08/10/41/43, регистры ФОТ/ОС/НМА/векселей и история базы 1С) — числовое основание во входных файлах не найдено.';
       issues.push({
         id: `missing-amount-${op.id}`,
         severity: 'error',
@@ -1035,15 +1127,10 @@ export function runAuditDiagnostics(params: {
         title: `Требуется уточнить сумму внешней операции: «${op.description.slice(0, 58)}»`,
         description: checkedSummary,
         accountingReason:
-          'Для формирования проводок внешнего расчётного документа в контуре задания должно присутствовать числовое основание (сумма в колонке, количество × цена, условие договора, остаток счёта расчётов или исторический аналог в БД 1С). Поскольку во входных данных сумма не задана, введите её в поле ниже.',
-        quickFixLabel: 'Введите сумму операции в поле ниже и нажмите «Применить»',
+          'Для формирования проводок внешнего расчётного документа в контуре задания должно присутствовать числовое основание (сумма в колонке, количество × цена, условие договора, встречный документ контура или остаток счёта расчётов). Поскольку во входных данных сумма не задана, укажите её в поле ввода.',
+        quickFixLabel: 'Введите сумму операции в поле ввода и нажмите «Применить»',
         guide1C: {
-          menuPath:
-            op.docType1C === 'СписаниеСРасчетногоСчета' || op.docType1C === 'ПоступлениеНаРасчетныйСчет'
-              ? 'Банк и касса → Банковские выписки'
-              : op.docType1C === 'РеализацияТоваровУслуг'
-                ? 'Продажи → Реализация (акты, накладные, УПД)'
-                : 'Покупки → Поступление (акты, накладные, УПД)',
+          menuPath: getDocumentSpecForOperation(op).menuPath1C,
           documentKind: op.docType1C,
           checkPoints: [
             'Проверьте условие учебного задания (таблицу исходных данных или примечание к хозяйственной операции)',
@@ -1079,53 +1166,31 @@ export function runAuditDiagnostics(params: {
           extractFounderFioFromDescription(op.description) ||
             findPersonMentionedInDescription1C(op.description, db1C)
         );
-      const canAutoLinkBuyer =
-        (op.category === 'sale_goods' || op.category === 'sale_services') &&
-        (activeOps.some(
-          (other) =>
-            other.id !== op.id &&
-            other.counterpartyName.trim().length >= 2 &&
-            (other.category === 'bank_in' ||
-              other.entries.some((e) => e.credit === '62.02' || e.debit === '62.01'))
-        ) ||
-          Boolean(
-            db1C?.contracts.some(
-              (c) =>
-                c.counterpartyName.trim().length >= 2 && /покупател/i.test(c.contractKind || '')
-            ) ||
-              db1C?.rawBalances.some(
-                (b) =>
-                  b.account === '62.02' &&
-                  (b.rawCredit || b.startCredit || b.endCredit) > 0.01 &&
-                  (b.subconto || '').trim().length >= 2
-              )
-          ));
       const contextCpMatches = computeContextCounterpartySuggestions(op, operations, db1C);
-      const canAutoLinkSupplierByContext =
-        (op.category === 'bank_out' || op.category === 'cash_out') &&
-        contextCpMatches.length > 0;
-      const canAutoLinkCp = canAutoLinkBuyer || canAutoLinkSupplierByContext;
-      const canFixCpName = canResolveFounder || canAutoLinkCp;
+      // Provable Autofix Contract: mark canAutoFixBy1C === true ONLY when there is a UNIQUE deterministic match
+      const canAutoLinkUniqueCp = contextCpMatches.length === 1;
+      const canFixCpName = canResolveFounder || canAutoLinkUniqueCp;
       issues.push({
         id: `missing-cp-name-${op.id}`,
         fixId: canFixCpName ? 'resolve_amount_and_links' : undefined,
-        severity: canAutoLinkCp ? 'warning' : 'error',
+        severity: canAutoLinkUniqueCp ? 'warning' : 'error',
         category: 'missing_requisite',
         operationId: op.id,
         title: 'Не указано наименование контрагента',
-        description: canAutoLinkSupplierByContext
-          ? `Документ «${op.description.slice(0, 70)}»: поставщик (${contextCpMatches
-              .map((c) => c.name)
-              .join(', ')}) определяется по неоплаченному поступлению 60.01 — нажмите «Исправить».`
-          : canAutoLinkBuyer
-            ? `Документ «${op.description.slice(0, 70)}» (${op.amount.toFixed(2)} ₽): покупатель может быть привязан автоматически по авансу 62.02 / договору кнопкой «Исправить».`
+        description: canAutoLinkUniqueCp
+          ? `Документ «${op.description.slice(0, 70)}»: контрагент «${contextCpMatches[0].name}» однозначно определяется по связанным расчётам (${contextCpMatches[0].provenanceLabel}) — нажмите «Исправить».`
+          : contextCpMatches.length > 1
+            ? `Документ «${op.description.slice(0, 70)}»: найдено несколько кандидатов (${contextCpMatches
+                .map((c) => c.name)
+                .join(', ')}) — выберите нужного контрагента.`
             : `Документ «${op.description.slice(0, 70)}» (${op.amount.toFixed(2)} ₽): выберите контрагента из базы 1С или введите наименование (от 2 символов).`,
-        accountingReason: `Субконто «Контрагенты» является обязательным аналитическим разрезом по счетам 60, 62 и 76 в 1С БП 3.0. Без указания контрагента невозможна сверка расчётов и заполнение книг покупок/продаж.`,
+        accountingReason:
+          'Субконто «Контрагенты» является обязательным аналитическим разрезом по счетам 60, 62 и 76 в 1С БП 3.0. Без указания контрагента невозможна сверка расчётов и заполнение книг покупок/продаж.',
         quickFixLabel: canFixCpName
           ? 'Нажмите «Исправить» для автопривязки контрагента по связанным расчётам'
           : 'Выберите контрагента из базы 1С или введите наименование и нажмите «Применить»',
         guide1C: {
-          menuPath: 'Справочники → Покупки и продажи → Контрагенты',
+          menuPath: getDocumentSpecForOperation(op).menuPath1C,
           documentKind: op.docType1C,
           checkPoints: [
             'В поле «Контрагент» документа выберите существующий элемент или создайте новую карточку по ИНН («Заполнить по ИНН»)',
@@ -1376,12 +1441,7 @@ export function runAuditDiagnostics(params: {
 
     if (
       op.entries.length === 0 &&
-      op.category !== 'hr_hire' &&
-      op.category !== 'writ_of_execution' &&
-      op.category !== 'contract_event' &&
-      op.category !== 'policy_event' &&
-      op.category !== 'closing' &&
-      op.category !== 'manual' &&
+      !doesSpecAllowZeroPostings(op.category) &&
       ((!op.needsAmount && op.amount >= 0.01) || op.amountMode === 'calculated_by_1c')
     ) {
       issues.push({
@@ -1395,7 +1455,7 @@ export function runAuditDiagnostics(params: {
         accountingReason: `Непроведённый документ не отражается в регистре бухгалтерии и искажает ОСВ.`,
         quickFixLabel: 'Нажмите «Исправить» для генерации проводок РСБУ',
         guide1C: {
-          menuPath: 'Операции → Журнал операций',
+          menuPath: getDocumentSpecForOperation(op).menuPath1C,
           documentKind: op.docType1C,
           checkPoints: ['Откройте документ и нажмите «Провести» (проверьте движения по кнопке Дт/Кт)'],
           repostInstruction: 'Провести и закрыть',
@@ -1426,9 +1486,9 @@ export function runAuditDiagnostics(params: {
           title: `Не указан счёт ${!dtOk ? 'Дебета' : 'Кредита'} в проводке`,
           description: `Операция «${op.description.slice(0, 60)}» на сумму ${entry.amount.toFixed(2)} ₽ содержит незаполненный счёт.`,
           accountingReason: `Проводка без корреспондирующего счёта нарушает принцип двойной записи и разрывает баланс ОСВ.`,
-          quickFixLabel: 'Укажите рабочий субсчёт Плана счетов в поле ниже',
+          quickFixLabel: 'Укажите рабочий субсчёт Плана счетов в поле ввода',
           guide1C: {
-            menuPath: 'Операции → Операции, введенные вручную',
+            menuPath: getDocumentSpecForOperation(op).menuPath1C,
             documentKind: op.docType1C,
             checkPoints: ['Заполните Счет Дт и Счет Кт конечными субсчетами Плана счетов 1С БП 3.0'],
             repostInstruction: 'Записать и закрыть',
@@ -1516,7 +1576,33 @@ export function runAuditDiagnostics(params: {
     }
   }
 
-  return issues;
+  const opMapById = new Map(operations.map((o) => [o.id, o]));
+  return issues.map((issue) => {
+    let nextIssue = issue;
+    if (issue.operationId && issue.guide1C) {
+      const linkedOp = opMapById.get(issue.operationId);
+      if (linkedOp) {
+        const canonicalMenuPath = issue.id.startsWith('misclassified-doc-')
+          ? getDocumentSpecByDocType(
+              detectOperationClassification({
+                description: linkedOp.description,
+                nomenclatureName: linkedOp.nomenclatureName,
+                counterpartyName: linkedOp.counterpartyName,
+                explicitCorrespondences: linkedOp.explicitCorrespondences,
+              }).docType1C
+            ).menuPath1C
+          : getDocumentSpecForOperation(linkedOp).menuPath1C;
+        nextIssue = {
+          ...issue,
+          guide1C: {
+            ...issue.guide1C,
+            menuPath: canonicalMenuPath,
+          },
+        };
+      }
+    }
+    return sanitizeAuditIssue1C(nextIssue);
+  });
 }
 
 const DEFAULT_SUBACCOUNT_MAP: Record<string, string> = {
@@ -2036,6 +2122,7 @@ export function generatePeriodClosingOperations(params: {
       o.date.slice(0, 7) === closeDate.slice(0, 7) &&
       o.entries.some((e) => e.debit.startsWith('99') && e.credit === '68.04.1')
   );
+  let profitTaxApplied = 0;
   if (isOsno && isQuarterEnd && !alreadyHasProfitTax) {
     const existing99Row = osv.leafRows.find((r) => r.code === '99.01.1' || r.code === '99');
     const existingNetCredit99 = existing99Row
@@ -2052,6 +2139,7 @@ export function generatePeriodClosingOperations(params: {
     if (totalProfitBeforeTax > 0.01) {
       const profitTax20 = round2(totalProfitBeforeTax * 0.2);
       if (profitTax20 >= 0.01) {
+        profitTaxApplied = profitTax20;
         closingEntries.push({
           id: nextAutoFixId('close-profit-tax'),
           debit: '99.01.1',
@@ -2070,6 +2158,155 @@ export function generatePeriodClosingOperations(params: {
           whatBecame: `Проводка Дт 99.01.1 Кт 68.04.1 = ${profitTax20.toFixed(2)} ₽ (ставка 20% ОСНО)`,
           basis: 'Ст. 284 НК РФ — регламентная операция «Расчёт налога на прибыль» 1С:БП 3.0',
           category: 'closing',
+        });
+      }
+    }
+  }
+
+  // Year-end Реформация баланса on December 31: close 90.* -> 90.09, 91.* -> 91.09, and 99.01.1 -> 84.01 / 84.02
+  if (closeDate.endsWith('-12-31')) {
+    const alreadyHasReformation = operations.some(
+      (o) =>
+        o.includeInProcessing &&
+        o.date === closeDate &&
+        o.entries.some(
+          (e) =>
+            (e.debit.startsWith('99') && e.credit.startsWith('84')) ||
+            (e.debit.startsWith('84') && e.credit.startsWith('99'))
+        )
+    );
+    if (!alreadyHasReformation) {
+      const codes90 = new Set<string>([
+        ...osv.leafRows.filter((r) => r.code.startsWith('90.') && r.code !== '90.09').map((r) => r.code),
+        ...closingEntries
+          .flatMap((e) => [e.debit, e.credit])
+          .filter((c) => c.startsWith('90.') && c !== '90.09'),
+      ]);
+      for (const code90 of codes90) {
+        const r90 = osv.leafRows.find((r) => r.code === code90);
+        const extraDt = closingEntries
+          .filter((e) => e.debit === code90)
+          .reduce((s, e) => s + e.amount, 0);
+        const extraKt = closingEntries
+          .filter((e) => e.credit === code90)
+          .reduce((s, e) => s + e.amount, 0);
+        const netCr = round2(((r90?.endCredit ?? 0) + extraKt) - ((r90?.endDebit ?? 0) + extraDt));
+        if (netCr > 0.01) {
+          closingEntries.push({
+            id: nextAutoFixId('ref-90'),
+            debit: code90,
+            credit: '90.09',
+            debitSubconto: nomGroup,
+            creditSubconto: nomGroup,
+            amount: netCr,
+            description: `Реформация баланса: закрытие субсчёта ${code90} на 90.09`,
+          });
+        } else if (netCr < -0.01) {
+          closingEntries.push({
+            id: nextAutoFixId('ref-90'),
+            debit: '90.09',
+            credit: code90,
+            debitSubconto: nomGroup,
+            creditSubconto: nomGroup,
+            amount: Math.abs(netCr),
+            description: `Реформация баланса: закрытие субсчёта ${code90} на 90.09`,
+          });
+        }
+      }
+
+      const codes91 = new Set<string>([
+        ...osv.leafRows.filter((r) => r.code.startsWith('91.') && r.code !== '91.09').map((r) => r.code),
+        ...closingEntries
+          .flatMap((e) => [e.debit, e.credit])
+          .filter((c) => c.startsWith('91.') && c !== '91.09'),
+      ]);
+      for (const code91 of codes91) {
+        const r91 = osv.leafRows.find((r) => r.code === code91);
+        const extraDt = closingEntries
+          .filter((e) => e.debit === code91)
+          .reduce((s, e) => s + e.amount, 0);
+        const extraKt = closingEntries
+          .filter((e) => e.credit === code91)
+          .reduce((s, e) => s + e.amount, 0);
+        const netCr = round2(((r91?.endCredit ?? 0) + extraKt) - ((r91?.endDebit ?? 0) + extraDt));
+        if (netCr > 0.01) {
+          closingEntries.push({
+            id: nextAutoFixId('ref-91'),
+            debit: code91,
+            credit: '91.09',
+            debitSubconto: 'Прочие доходы и расходы',
+            creditSubconto: 'Прочие доходы и расходы',
+            amount: netCr,
+            description: `Реформация баланса: закрытие субсчёта ${code91} на 91.09`,
+          });
+        } else if (netCr < -0.01) {
+          closingEntries.push({
+            id: nextAutoFixId('ref-91'),
+            debit: '91.09',
+            credit: code91,
+            debitSubconto: 'Прочие доходы и расходы',
+            creditSubconto: 'Прочие доходы и расходы',
+            amount: Math.abs(netCr),
+            description: `Реформация баланса: закрытие субсчёта ${code91} на 91.09`,
+          });
+        }
+      }
+
+      const existing99Row = osv.leafRows.find((r) => r.code === '99.01.1' || r.code === '99');
+      const existingNetCredit99 = existing99Row
+        ? round2(existing99Row.endCredit - existing99Row.endDebit)
+        : 0;
+      const closingDeltaCredit99AfterTax = round2(
+        closingEntries.reduce((acc, e) => {
+          if (e.credit === '99.01.1') return acc + e.amount;
+          if (e.debit === '99.01.1') return acc - e.amount;
+          return acc;
+        }, 0)
+      );
+      const netProfitYearEnd = round2(existingNetCredit99 + closingDeltaCredit99AfterTax);
+      void profitTaxApplied;
+      if (netProfitYearEnd > 0.01) {
+        closingEntries.push({
+          id: nextAutoFixId('ref-99-profit'),
+          debit: '99.01.1',
+          credit: '84.01',
+          debitSubconto: 'Прибыль (убыток) от продаж',
+          creditSubconto: 'Прибыль, подлежащая распределению',
+          amount: netProfitYearEnd,
+          description: 'Реформация баланса: зачисление чистой прибыли отчётного года на счёт 84.01',
+        });
+        log.push(
+          `Реформация баланса на ${closeDate}: чистая прибыль ${netProfitYearEnd.toFixed(2)} ₽ перенесена проводкой Дт 99.01.1 Кт 84.01`
+        );
+        structuredChanges.push({
+          id: nextAutoFixId('chg-reformation-84'),
+          whatWas: `Сальдо счёта 99.01.1 на 31.12 = ${netProfitYearEnd.toFixed(2)} ₽`,
+          whatBecame: `Проводка Дт 99.01.1 Кт 84.01 = ${netProfitYearEnd.toFixed(2)} ₽ (счета 90, 91, 99 закрыты в ноль)`,
+          basis: 'Инструкция к Плану счетов РСБУ — заключительные записи декабря («Реформация баланса»)',
+          category: 'closing',
+          ruleId: 'close_period_accounts',
+        });
+      } else if (netProfitYearEnd < -0.01) {
+        const netLoss = Math.abs(netProfitYearEnd);
+        closingEntries.push({
+          id: nextAutoFixId('ref-99-loss'),
+          debit: '84.02',
+          credit: '99.01.1',
+          debitSubconto: 'Убыток, подлежащий покрытию',
+          creditSubconto: 'Прибыль (убыток) от продаж',
+          amount: netLoss,
+          description: 'Реформация баланса: списание чистого убытка отчётного года на счёт 84.02',
+        });
+        log.push(
+          `Реформация баланса на ${closeDate}: чистый убыток ${netLoss.toFixed(2)} ₽ перенесён проводкой Дт 84.02 Кт 99.01.1`
+        );
+        structuredChanges.push({
+          id: nextAutoFixId('chg-reformation-84-loss'),
+          whatWas: `Дебетовое сальдо убытка на счёте 99.01.1 на 31.12 = ${netLoss.toFixed(2)} ₽`,
+          whatBecame: `Проводка Дт 84.02 Кт 99.01.1 = ${netLoss.toFixed(2)} ₽ (счета 90, 91, 99 закрыты в ноль)`,
+          basis: 'Инструкция к Плану счетов РСБУ — заключительные записи декабря («Реформация баланса»)',
+          category: 'closing',
+          ruleId: 'close_period_accounts',
         });
       }
     }
@@ -2542,10 +2779,10 @@ export function autoFixAllBy1CDb(params: {
         }
       }
 
-      // Context-link missing supplier on bank_out / cash_out when proven by open 60.01 settlements
+      // Context-link missing counterparty when uniquely proven by closed-world settlements (prior or forward)
       if (
         !shouldReclassify &&
-        (op.category === 'bank_out' || op.category === 'cash_out') &&
+        doesOperationRequireCounterparty(op.category) &&
         !op.counterpartyName.trim()
       ) {
         const ctxMatches = computeContextCounterpartySuggestions(
@@ -3226,9 +3463,9 @@ export function autoFixAllBy1CDb(params: {
         }
         let dt = entry.debit;
         let kt = entry.credit;
-        if (DEFAULT_SUBACCOUNT_MAP[dt] || getAccountInfo(dt).isGroup) {
+        if (getAccountInfo(dt).isGroup) {
           const oldDt = dt;
-          dt = DEFAULT_SUBACCOUNT_MAP[dt] || `${dt}.01`;
+          dt = normalizeAccountToLeaf1C(dt, 'debit', opItem.description);
           entriesChanged = true;
           fixedCount++;
           recordChange(
@@ -3240,9 +3477,9 @@ export function autoFixAllBy1CDb(params: {
             opItem.id
           );
         }
-        if (DEFAULT_SUBACCOUNT_MAP[kt] || getAccountInfo(kt).isGroup) {
+        if (getAccountInfo(kt).isGroup) {
           const oldKt = kt;
-          kt = DEFAULT_SUBACCOUNT_MAP[kt] || `${kt}.01`;
+          kt = normalizeAccountToLeaf1C(kt, 'credit', opItem.description);
           entriesChanged = true;
           fixedCount++;
           recordChange(
@@ -3576,22 +3813,28 @@ export function autoFixSingleOperation(params: {
     };
   }
 
-  const replacedList = params.operations.map((o) =>
-    o.id === params.operationId ? fixedTarget : o
+  const cashCovers = full.operations.filter(
+    (o) => o.id.startsWith('op-cash-cover') && !params.operations.some((p) => p.id === o.id)
   );
+  const replacedList = [
+    ...cashCovers,
+    ...params.operations.map((o) => (o.id === params.operationId ? fixedTarget : o)),
+  ];
   const recalcOps = recalculateOperationsChronologically(replacedList, params.db1C, {
     reportingYear: params.reportingYear,
   });
   const opChanges = full.structuredChanges.filter((c) => c.operationId === params.operationId);
+  const effectiveChanges =
+    opChanges.length > 0 ? opChanges : full.structuredChanges.slice(0, 1);
   const summary =
-    opChanges.length > 0
-      ? `Исправлено (${opChanges.length}): ${opChanges[0].whatBecame}`
+    effectiveChanges.length > 0
+      ? `Исправлено (${effectiveChanges.length}): ${effectiveChanges[0].whatBecame}`
       : `Проверено: 1С ${fixedTarget.docType1C} (${fixedTarget.readinessNote || 'проводки синхронизированы'})`;
 
   return {
     operations: recalcOps,
-    fixedCount: Math.max(1, opChanges.length),
-    structuredChanges: opChanges,
+    fixedCount: Math.max(1, effectiveChanges.length),
+    structuredChanges: effectiveChanges,
     summary,
   };
 }

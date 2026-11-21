@@ -8,74 +8,23 @@ import {
   Step01CalculationBreakdown1C,
   Step02AccountingLogic1C,
 } from '@/types/accounting';
+import {
+  DOC_TYPE_LABELS_1C,
+  DOC_TYPE_TO_DEFAULT_CATEGORY_1C,
+  doesSpecRequireCommercialCounterparty,
+  getDocumentSpecForOperation,
+  resolveCardProfileFromSpec,
+} from './documentSpecs1C';
+import { sanitizeMentorGuide1C } from './textHygiene1C';
 
-export const DOC_TYPE_LABELS_1C: Record<DocType1CBP30, string> = {
-  СписаниеСРасчетногоСчета: 'Списание с расчётного счёта',
-  ПоступлениеНаРасчетныйСчет: 'Поступление на расчётный счёт',
-  ПоступлениеТоваровУслуг: 'Поступление (акт, накладная, УПД)',
-  РеализацияТоваровУслуг: 'Реализация (акт, накладная, УПД)',
-  РасходМатериалов: 'Расход материалов (Требование-накладная)',
-  ПередачаМатериаловВЭксплуатацию: 'Передача материалов в эксплуатацию',
-  ПринятиеКУчетуОС: 'Принятие к учёту ОС',
-  ВыпускПродукции: 'Выпуск продукции (Отчёт производства)',
-  ПеремещениеТоваров: 'Перемещение товаров',
-  СчетФактураПолученный: 'Счёт-фактура полученный',
-  СчетФактураВыданный: 'Счёт-фактура выданный',
-  ПоступлениеНаличных: 'Поступление наличных (ПКО)',
-  ВыдачаНаличных: 'Выдача наличных (РКО)',
-  НачислениеЗарплаты: 'Начисление зарплаты и взносов',
-  ПриемНаРаботу: 'Приём на работу (кадровый приказ)',
-  ИсполнительныйЛист: 'Исполнительный лист',
-  ВедомостьВБанк: 'Ведомость в банк',
-  ВедомостьВКассу: 'Ведомость в кассу',
-  АвансовыйОтчет: 'Авансовый отчёт',
-  КорректировкаДолга: 'Корректировка долга (зачёт авансов)',
-  ФинансовыеВложения: 'Финансовые вложения (векселя, ценные бумаги)',
-  ОперацияБух: 'Операция, введённая вручную',
-  ЗакрытиеМесяца: 'Регламентная операция (Закрытие месяца)',
-  ВводОстатков: 'Ввод начальных остатков',
-};
-
-const INTERNAL_NO_COUNTERPARTY_CATEGORIES = new Set<OperationCategory>([
-  'contract_event',
-  'policy_event',
-  'materials_writeoff',
-  'workwear_issue',
-  'os_commissioning',
-  'os_disposal',
-  'production_output',
-  'warehouse_transfer',
-  'cash_bank_internal',
-  'accountable_issue',
-  'expense_report',
-  'accountable_return',
-  'loan_received',
-  'loan_repaid',
-  'loan_issued',
-  'loan_interest_accrual',
-  'founder_contribution',
-  'financial_investment',
-  'financial_interest_accrual',
-  'financial_disposal',
-  'vat_deduction',
-  'depreciation_accrual',
-  'insurance_accrual',
-  'hr_hire',
-  'writ_of_execution',
-  'alimony_payout',
-  'payroll_accrual',
-  'payroll_payout',
-  'bank_fee',
-  'tax_payment',
-  'closing',
-  'manual',
-]);
+export { DOC_TYPE_LABELS_1C };
 
 const WAREHOUSE_PRODUCTION_CATEGORIES = new Set<OperationCategory>([
   'materials_writeoff',
   'workwear_issue',
   'production_output',
   'warehouse_transfer',
+  'inventory_result',
 ]);
 
 const WAREHOUSE_PRODUCTION_DOC_TYPES = new Set<DocType1CBP30>([
@@ -83,10 +32,11 @@ const WAREHOUSE_PRODUCTION_DOC_TYPES = new Set<DocType1CBP30>([
   'ПередачаМатериаловВЭксплуатацию',
   'ВыпускПродукции',
   'ПеремещениеТоваров',
+  'ИнвентаризацияТоваров',
 ]);
 
 export function doesOperationRequireCounterparty(category: OperationCategory): boolean {
-  return !INTERNAL_NO_COUNTERPARTY_CATEGORIES.has(category);
+  return doesSpecRequireCommercialCounterparty(category);
 }
 
 /**
@@ -108,68 +58,11 @@ export function isInternalWarehouseOrProductionOp(
  * 5. 'taxes_bank_founders' — Уплата налогов и взносов / Комиссия банка РКО / Вклад учредителя 75.01 / Касса<->Банк
  */
 export function getOperationCardProfile(
-  op: Pick<QueuedOperation, 'category' | 'docType1C'>
+  op: Pick<QueuedOperation, 'category' | 'docType1C'> & {
+    entries?: QueuedOperation['entries'];
+  }
 ): OperationCardProfile {
-  if (
-    op.category === 'accountable_issue' ||
-    op.category === 'expense_report' ||
-    op.category === 'accountable_return' ||
-    op.docType1C === 'АвансовыйОтчет'
-  ) {
-    return 'accountable_71';
-  }
-
-  if (
-    op.category === 'hr_hire' ||
-    op.category === 'writ_of_execution' ||
-    op.category === 'payroll_accrual' ||
-    op.category === 'insurance_accrual' ||
-    op.category === 'payroll_payout' ||
-    op.docType1C === 'ПриемНаРаботу' ||
-    op.docType1C === 'ИсполнительныйЛист' ||
-    op.docType1C === 'НачислениеЗарплаты' ||
-    op.docType1C === 'ВедомостьВБанк' ||
-    op.docType1C === 'ВедомостьВКассу'
-  ) {
-    return 'hr_payroll';
-  }
-
-  if (
-    op.category === 'os_commissioning' ||
-    op.category === 'os_disposal' ||
-    op.category === 'policy_event' ||
-    op.category === 'depreciation_accrual' ||
-    op.category === 'closing' ||
-    op.docType1C === 'ПринятиеКУчетуОС' ||
-    op.docType1C === 'ЗакрытиеМесяца'
-  ) {
-    return 'os_regulatory';
-  }
-
-  if (isInternalWarehouseOrProductionOp(op)) {
-    return 'warehouse_production';
-  }
-
-  if (
-    op.category === 'tax_payment' ||
-    op.category === 'vat_deduction' ||
-    op.category === 'bank_fee' ||
-    op.category === 'founder_contribution' ||
-    op.category === 'alimony_payout' ||
-    op.category === 'financial_investment' ||
-    op.category === 'financial_interest_accrual' ||
-    op.category === 'financial_disposal' ||
-    op.docType1C === 'ФинансовыеВложения' ||
-    op.category === 'cash_bank_internal' ||
-    op.category === 'loan_received' ||
-    op.category === 'loan_repaid' ||
-    op.category === 'loan_issued' ||
-    op.category === 'loan_interest_accrual'
-  ) {
-    return 'taxes_bank_founders';
-  }
-
-  return 'trade_services';
+  return resolveCardProfileFromSpec(op);
 }
 
 export function getOperationStatusBadgeText(
@@ -243,6 +136,19 @@ export function getOperationStatusBadgeText(
   if (profile === 'warehouse_production') {
     return op.amount >= 0.01 ? 'Списано по партиям 1С' : 'Авто по себестоимости 1С';
   }
+  if (op.category === 'charter_capital') return 'Уставный капитал 75.01 / 80.09';
+  if (op.category === 'dividends_accrual') return 'Дивиденды 84.01 / 75.02';
+  if (op.category === 'dividends_payout') return 'Выплата дивидендов 75.02';
+  if (op.category === 'intangible_acquisition') return 'Поступление НМА 08.05';
+  if (op.category === 'intangible_commissioning') return 'Принятие к учёту НМА 04.01';
+  if (op.category === 'intangible_amortization') return 'Амортизация НМА 05';
+  if (op.category === 'inventory_result') return 'Инвентаризация ТМЦ 94';
+  if (op.category === 'acquiring_receipt') return 'Эквайринг 51 / 57.03';
+  if (op.category === 'special_bank_55') return 'Спецсчёт в банке 55';
+  if (op.category === 'employee_settlement_73') return 'Расчёты с персоналом 73';
+  if (op.category === 'deferred_expense_97') return 'РБП 97.21';
+  if (op.category === 'reserve_doubtful_63') return 'Резерв сомнит. долгов 63';
+  if (op.category === 'off_balance_op') return 'Забалансовый учёт 001–009';
   if (op.readinessStatus === 'needs_clarification') {
     return 'Нужно уточнение';
   }
@@ -260,6 +166,15 @@ export function mapDocTypeToDefaultCategory(
       return 'workwear_issue';
     case 'ПринятиеКУчетуОС':
       return 'os_commissioning';
+    case 'ПринятиеКУчетуНМА':
+      return 'intangible_commissioning';
+    case 'ПередачаОС':
+    case 'СписаниеОС':
+      return 'os_disposal';
+    case 'ИнвентаризацияТоваров':
+      return 'inventory_result';
+    case 'ОперацияПоПлатежнойКарте':
+      return 'acquiring_receipt';
     case 'ВыпускПродукции':
       return 'production_output';
     case 'ПеремещениеТоваров':
@@ -276,7 +191,9 @@ export function mapDocTypeToDefaultCategory(
     case 'ВедомостьВКассу':
       return 'payroll_payout';
     case 'ЗакрытиеМесяца':
-      return prevCategory === 'depreciation_accrual' ? 'depreciation_accrual' : 'closing';
+      return prevCategory === 'depreciation_accrual' || prevCategory === 'intangible_amortization'
+        ? prevCategory
+        : 'closing';
     case 'КорректировкаДолга':
       return 'advance_offset';
     case 'РеализацияТоваровУслуг':
@@ -285,33 +202,40 @@ export function mapDocTypeToDefaultCategory(
       if (
         prevCategory === 'purchase_materials' ||
         prevCategory === 'purchase_services' ||
-        prevCategory === 'purchase_equipment'
+        prevCategory === 'purchase_equipment' ||
+        prevCategory === 'intangible_acquisition' ||
+        prevCategory === 'deferred_expense_97'
       ) {
         return prevCategory;
       }
       return 'purchase_goods';
     case 'СписаниеСРасчетногоСчета':
-      return prevCategory === 'tax_payment' ||
-        prevCategory === 'bank_fee' ||
-        prevCategory === 'payroll_payout' ||
-        prevCategory === 'accountable_issue' ||
-        prevCategory === 'loan_repaid' ||
-        prevCategory === 'loan_issued' ||
-        prevCategory === 'alimony_payout'
+      return [
+        'tax_payment',
+        'bank_fee',
+        'payroll_payout',
+        'accountable_issue',
+        'loan_repaid',
+        'loan_issued',
+        'alimony_payout',
+        'dividends_payout',
+        'special_bank_55',
+        'employee_settlement_73',
+      ].includes(prevCategory)
         ? prevCategory
         : 'bank_out';
     case 'ПоступлениеНаРасчетныйСчет':
-      if (['founder_contribution', 'loan_received'].includes(prevCategory)) {
+      if (['founder_contribution', 'loan_received', 'acquiring_receipt', 'special_bank_55'].includes(prevCategory)) {
         return prevCategory;
       }
       return 'bank_in';
     case 'ПоступлениеНаличных':
-      if (['cash_bank_internal', 'accountable_return', 'founder_contribution'].includes(prevCategory)) {
+      if (['cash_bank_internal', 'accountable_return', 'founder_contribution', 'employee_settlement_73'].includes(prevCategory)) {
         return prevCategory;
       }
       return 'cash_in';
     case 'ВыдачаНаличных':
-      if (['cash_bank_internal', 'accountable_issue', 'payroll_payout'].includes(prevCategory)) {
+      if (['cash_bank_internal', 'accountable_issue', 'payroll_payout', 'dividends_payout', 'employee_settlement_73'].includes(prevCategory)) {
         return prevCategory;
       }
       return 'cash_out';
@@ -329,11 +253,16 @@ export function mapDocTypeToDefaultCategory(
         'os_disposal',
         'contract_event',
         'policy_event',
+        'charter_capital',
+        'dividends_accrual',
+        'employee_settlement_73',
+        'reserve_doubtful_63',
+        'off_balance_op',
       ].includes(prevCategory)
         ? prevCategory
         : 'manual';
     default:
-      return prevCategory;
+      return DOC_TYPE_TO_DEFAULT_CATEGORY_1C[docType1C] ?? prevCategory;
   }
 }
 
@@ -491,12 +420,64 @@ function buildStep02Logic(
     case 'vat_deduction':
       norms.push('Ст. 171, 172 НК РФ (принятие входного НДС к вычету со счёта 19 в дебет 68.02)');
       break;
+    case 'charter_capital':
     case 'founder_contribution':
-      norms.push('Пп. 4 п. 3 ст. 39, пп. 1 п. 2 ст. 146 НК РФ (вклады в уставный капитал не признаются реализацией и не облагаются НДС)');
+      norms.push(
+        'Ст. 14–16 ФЗ «Об ООО» / ст. 25–34 ФЗ «Об АО» (формирование уставного капитала — Дт 75.01 Кт 80.09)',
+        'Пп. 4 п. 3 ст. 39, пп. 1 п. 2 ст. 146 НК РФ (вклады в уставный капитал не признаются реализацией и не облагаются НДС)'
+      );
+      break;
+    case 'dividends_accrual':
+    case 'dividends_payout':
+      norms.push(
+        'Ст. 28 ФЗ «Об ООО» / ст. 42 ФЗ «Об АО» (распределение чистой прибыли прошлых лет со счёта 84.01 в кредит 75.02 / 70)',
+        'Ст. 214, 224, 275 НК РФ (удержание НДФЛ / налога на прибыль налоговым агентом при выплате дивидендов)'
+      );
+      break;
+    case 'intangible_acquisition':
+    case 'intangible_commissioning':
+    case 'intangible_amortization':
+      norms.push(
+        'ФСБУ 26/2020 и ФСБУ 14/2022 «Нематериальные активы» (вложения на счёте 08.05, принятие на 04.01, амортизация на счёте 05)',
+        'Пп. 26 п. 2 ст. 149 НК РФ (особенности освобождения от НДС прав на программы для ЭВМ и базы данных из реестра РФ)'
+      );
+      break;
+    case 'inventory_result':
+      norms.push(
+        'ФСБУ 28/2023 «Инвентаризация» и ФСБУ 5/2019 (отражение недостач в Дт 94, списание на виновных лиц Дт 73.02 или в прочие расходы Дт 91.02; излишки Дт 10/41 Кт 91.01)'
+      );
+      break;
+    case 'acquiring_receipt':
+    case 'special_bank_55':
+      norms.push(
+        'Инструкция к Плану счетов № 94н (счёт 57.03 «Продажи по платёжным картам», счёт 55 «Специальные счета в банках»)',
+        'ПБУ 10/99 (комиссия банка-эквайера отражается в прочих расходах Дт 91.02 Кт 57.03 без НДС по пп. 3–4 п. 3 ст. 149 НК РФ)'
+      );
+      break;
+    case 'employee_settlement_73':
+      norms.push(
+        'Счёт 73 Плана счетов РФ (73.01 — займы работникам, 73.02 — возмещение материального ущерба по ст. 238–248 ТК РФ)'
+      );
+      break;
+    case 'deferred_expense_97':
+      norms.push(
+        'П. 65 Положения № 34н и ФСБУ 14/2022 (равномерное признание краткосрочных неисключительных прав / страховок через счёт 97.21)'
+      );
+      break;
+    case 'reserve_doubtful_63':
+      norms.push(
+        'П. 70 Положения по ведению БУ № 34н (обязательное создание резерва по сомнительным долгам в бухгалтерском учёте — Дт 91.02 Кт 63)',
+        'Ст. 266 НК РФ (порядок формирования резерва в налоговом учёте)'
+      );
+      break;
+    case 'off_balance_op':
+      norms.push(
+        'Раздел «Забалансовые счета» Плана счетов РФ № 94н (односторонняя запись Дт или Кт по счетам 001–009 и МЦ без двойной записи по балансу)'
+      );
       break;
     case 'closing':
       norms.push(
-        'ПБУ 9/99, ПБУ 10/99, ПБУ 18/02 (закрытие счетов 20, 25, 26, 44 и определение финансового результата на счёте 99.01.1)',
+        'ПБУ 9/99, ПБУ 10/99, ПБУ 18/02 (закрытие счетов 20, 25, 26, 44 и определение финансового результата на счёте 99.01.1; 31 декабря — реформация баланса на счёт 84)',
         'Ст. 284 НК РФ (ставка налога на прибыль организаций — 20%)'
       );
       break;
@@ -531,11 +512,15 @@ function enrichMentorGuideForDefense(
   guide: OperationMentorGuide1C,
   op: QueuedOperation
 ): OperationMentorGuide1C {
-  return {
+  const spec = getDocumentSpecForOperation(op);
+  return sanitizeMentorGuide1C({
     ...guide,
+    // Invariant 1: 100% single-source-of-truth navigationPath1C from DOCUMENT_SPECS!
+    navigationPath1C: spec.menuPath1C,
+    documentOperationKind1C: op.documentSubKind1C || guide.documentOperationKind1C || spec.documentKind1C,
     step01CalculationBreakdown: guide.step01CalculationBreakdown ?? buildStep01Fallback(op),
     step02AccountingLogic: guide.step02AccountingLogic ?? buildStep02Logic(op, guide),
-  };
+  });
 }
 
 export function buildOperationMentorGuide1C(
@@ -1598,27 +1583,40 @@ function buildOperationMentorGuideCore(
     };
   }
 
-  // 13. Универсальная инструкция для Закрытия месяца / Корректировки долга / Кассы / Ручных операций
+  // 13. Специализированное пояснение для всех расширенных разделов Плана счетов и Регламентного закрытия (УК 80, дивиденды 84/75.02, НМА 04/05/08.05, инвентаризация 94, эквайринг 57.03, спецсчета 55, расчёты с персоналом 73, РБП 97, резервы 63, забалансовые 001–009)
+  const specFallback = getDocumentSpecForOperation(op);
+  const specialMeaningMap: Partial<Record<OperationCategory, string>> = {
+    charter_capital: `Формирование объявленного уставного капитала организации согласно решению учредителей / уставу: отражается задолженность участников по вкладам (Дт 75.01 Кт 80.09)${op.entries.length > 1 ? ' и одновременное внесение вклада учредителя в счёт погашения доли (Кт 75.01)' : ''}.`,
+    dividends_accrual: `Начисление дивидендов участникам (акционерам) за счёт нераспределённой чистой прибыли по решению общего собрания (Дт 84.01 Кт 75.02 / 70)${op.entries.some((e) => e.credit === '68.01') ? ' с удержанием НДФЛ налоговым агентом' : ''}.`,
+    dividends_payout: `Выплата начисленных дивидендов участникам за вычетом удержанного налога (Дт 75.02 / 70 Кт 51 / 50.01).`,
+    intangible_acquisition: `Приобретение исключительных прав / нематериального актива у правообладателя «${cp}» с отражением капитальных вложений на счёте 08.05 (ФСБУ 26/2020, ФСБУ 14/2022).`,
+    intangible_commissioning: `Принятие к бухгалтерскому учёту нематериального актива «${nom}» по сформированной первоначальной стоимости (Дт 04.01 Кт 08.05).`,
+    intangible_amortization: `Ежемесячное начисление амортизации нематериального актива на счёте 05 в состав расходов по обычным видам деятельности.`,
+    inventory_result: `Отражение результатов инвентаризации ТМЦ (ФСБУ 28/2023): выявленные недостачи учитываются на счёте 94 и списываются на виновных лиц (73.02) или прочие расходы (91.02), а излишки приходуются в Кт 91.01.`,
+    acquiring_receipt: `Зачисление банком-эквайером торговой выручки по платёжным картам со счёта 57.03 «Продажи по платёжным картам» на расчётный счёт 51${op.entries.some((e) => e.debit === '91.02') ? ' с одновременным отражением удержанной комиссии эквайринга в Дт 91.02 Кт 57.03' : ''}.`,
+    special_bank_55: `Движение денежных средств по специальным счетам в банках (аккредитивы 55.01, депозитные счета 55.03, корпоративные карты 55.04).`,
+    employee_settlement_73: `Расчёты с персоналом по прочим операциям на счёте 73 (предоставление займов работникам на 73.01 или возмещение материального ущерба на 73.02).`,
+    deferred_expense_97: `Учёт расходов будущих периодов на счёте 97.21 для последующего равномерного списания в расходы в течение срока действия лицензии / полиса.`,
+    reserve_doubtful_63: `Формирование (или корректировка) оценочного резерва по сомнительным долгам покупателей в бухгалтерском учёте (Дт 91.02 Кт 63).`,
+    off_balance_op: `Забалансовый учёт ценностей и обязательств, не принадлежащих организации на праве собственности (счета 001–009, МЦ): проводка формируется простой односторонней записью без двойной корреспонденции по балансу.`,
+    closing:
+      'Регламентное закрытие счетов затрат (20.01, 25, 26, 44.01), сопоставление оборотов по счетам 90 и 91 с выведением финансового результата на счёт 99.01.1 (а в декабре — реформация баланса с переносом чистой прибыли/убытка года на счёт 84).',
+    advance_offset:
+      'Взаимозачёт ранее выданных/полученных авансов и задолженности (60.02 ↔ 60.01, 62.02 ↔ 62.01, 76) документом «Корректировка долга».',
+  };
+
   return {
     accountingMeaning:
-      op.category === 'closing'
-        ? 'Регламентное закрытие счетов затрат (20.01, 25, 26, 44.01) и сопоставление оборотов по счетам 90 «Продажи» и 91 «Прочие доходы и расходы» с выведением чистой прибыли/убытка месяца на счёт 99.01.1.'
-        : op.category === 'advance_offset'
-          ? 'Взаимозачёт ранее выданных/полученных авансов (60.02 ↔ 60.01, 62.02 ↔ 62.01) по договорам контрагентов.'
-          : `Отражение хозяйственной операции «${op.description}» в регистре бухгалтерии 1С:БП 3.0.`,
+      specialMeaningMap[op.category] ||
+      `Отражение хозяйственной операции «${op.description}» в регистре бухгалтерии 1С:БП 3.0.`,
     whyAmountOrVatRule:
       op.category === 'closing'
         ? 'Регламентные операции выполняются строго последним числом месяца в 23:59:59 автоматически обработкой «Закрытие месяца».'
-        : `Сумма операции: ${formatMoneyRu(op.amount)}${op.vatAmount > 0 ? ` (в т.ч. НДС ${formatMoneyRu(op.vatAmount)})` : ' (без НДС)'}.`,
-    navigationPath1C:
-      op.category === 'closing'
-        ? 'Раздел «Операции» → «Закрытие месяца» → кнопка «Выполнить закрытие месяца»'
-        : op.category === 'advance_offset'
-          ? 'Раздел «Покупки» (или «Продажи») → «Корректировка долга» → Вид операции: «Зачёт авансов»'
-          : op.docType1C === 'ПоступлениеНаличных' || op.docType1C === 'ВыдачаНаличных'
-            ? 'Раздел «Банк и касса» → «Кассовые документы»'
-            : 'Раздел «Операции» → «Операции, введённые вручную» → «Создать: Операция»',
-    documentOperationKind1C: DOC_TYPE_LABELS_1C[op.docType1C] || op.docType1C,
+        : op.category === 'off_balance_op'
+          ? `Учёт ведётся в оценке, предусмотренной договором (${formatMoneyRu(op.amount)}), без НДС и без влияния на валюту бухгалтерского баланса.`
+          : `Сумма операции: ${formatMoneyRu(op.amount)}${op.vatAmount > 0 ? ` (в т.ч. НДС ${formatMoneyRu(op.vatAmount)})` : ' (без НДС)'}.`,
+    navigationPath1C: specFallback.menuPath1C,
+    documentOperationKind1C: specFallback.documentKind1C,
     headerFieldsSteps: [
       { field: 'Дата', value: dateRu },
       { field: 'Организация', value: orgName },
@@ -1629,16 +1627,19 @@ function buildOperationMentorGuideCore(
         tabName: 'Табличная часть / Регламентное выполнение',
         instruction:
           op.category === 'closing'
-            ? 'Нажмите «Перепровести документы за месяц», затем «Выполнить закрытие месяца» — все пункты регламентных операций должны загореться зелёным.'
-            : 'Проверьте корреспонденцию счетов Дебета и Кредита, заполнение аналитики (субконто 1–3) и сумму проводки.',
+            ? 'Нажмите «Перепровести документы за месяц», затем «Выполнить закрытие месяца» — все пункты регламентных операций должны стать выполненными.'
+            : specFallback.auditGuidanceTemplate.repostInstruction,
       },
     ],
     referencePostings: buildRefPostingsFromEntries(formatMoneyRu(op.amount)),
     selfCheckOsv: [
-      'Откройте «Отчёты → Оборотно-сальдовая ведомость» за период: проверьте равенство оборотов и сальдо по Дебету и Кредиту, а после Закрытия месяца — нулевые конечные остатки на счетах 26, 44 и свёрнуто по счетам 90 и 91.',
+      specFallback.auditGuidanceTemplate.verifyInOsv,
+      ...specFallback.auditGuidanceTemplate.defaultCheckPoints,
     ],
     commonStudentMistakes: [
-      'Закрытие счетов 20, 26, 90 ручными операциями («Операция, введённая вручную») вместо штатной обработки «Закрытие месяца» в учебной базе 1С.',
+      op.category === 'closing'
+        ? 'Закрытие счетов 20, 26, 90 ручными операциями вместо штатной обработки «Закрытие месяца» в учебной базе 1С.'
+        : 'Незаполненное субконто (аналитика Контрагенты / Договоры / Статьи прочих доходов и расходов) в ручной или регламентной проводке.',
     ],
   };
 }

@@ -967,26 +967,15 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
         sourceFileName: 'Ручной ввод',
         date: defaultDate,
         docNumber: '',
-        description: 'Поступление услуг от поставщика',
+        description: 'Ручная бухгалтерская операция',
         amount: 0,
-        needsAmount: true,
-        counterpartyName: '',
+        vatRate: 0,
+        vatRule: 'none',
+        categoryHint: 'manual',
+        docTypeHint: 'ОперацияБух',
       },
       db1C
     );
-    if (op.entries.length === 0) {
-      op.entries = [
-        {
-          id: `${op.id}-e1`,
-          debit: '26',
-          credit: '60.01',
-          debitSubconto: '',
-          creditSubconto: '',
-          amount: 0,
-          description: 'Ручная проводка',
-        },
-      ];
-    }
     setOperations((prev) => attachVirtualStateStep00ToOperations([op, ...prev], db1C));
   }, [db1C, reportingYear]);
 
@@ -1061,6 +1050,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
             cashFlowItemName: op.cashFlowItemName,
             costAccountHint: op.costAccount,
             materialAccountHint: op.materialAccount,
+            explicitCorrespondences: nextDocType === 'ОперацияБух' ? op.explicitCorrespondences : undefined,
             docTypeHint: nextDocType,
             categoryHint: nextCategory,
           },
@@ -1148,6 +1138,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
             cashFlowItemName: op.cashFlowItemName,
             costAccountHint: op.costAccount,
             materialAccountHint: op.materialAccount,
+            explicitCorrespondences: op.explicitCorrespondences,
             docTypeHint: op.docType1C,
             categoryHint: op.category,
           },

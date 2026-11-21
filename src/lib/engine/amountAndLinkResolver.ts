@@ -13,6 +13,7 @@ import {
   advanceVirtual1CStateWithOperation,
   extractFinancialNotesFromText1C,
   extractKeywordStems1C,
+  extractRecurringContractTerms1C,
   formatRuDateShort,
   matchTargetActiveFinancialNote1C,
   normalizeCounterpartyKey1C,
@@ -21,6 +22,7 @@ import {
   resolveUnpaidSupplier6001ByKeywords,
   stemsMatch1C,
 } from './virtual1CState';
+import { sanitizeBreakdown1C } from './textHygiene1C';
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -61,6 +63,8 @@ export interface UniversalAmountLinkResolutionInput {
   usefulLifeMonths?: number;
   db1C: Database1CSnapshot | null;
   priorOperations: QueuedOperation[];
+  futureOperations?: QueuedOperation[];
+  currentOpNumber?: number;
   virtualStateBefore?: Virtual1CStateSnapshot;
 }
 
@@ -118,9 +122,21 @@ export function buildVirtualStateBeforeFromPriorOps(
 export function resolveOperationAmountAndLinks(
   input: UniversalAmountLinkResolutionInput
 ): UniversalAmountLinkResolutionResult {
+  const rawRes = resolveOperationAmountAndLinksCore(input);
+  return {
+    ...rawRes,
+    step01Breakdown: sanitizeBreakdown1C(rawRes.step01Breakdown) ?? rawRes.step01Breakdown,
+  };
+}
+
+function resolveOperationAmountAndLinksCore(
+  input: UniversalAmountLinkResolutionInput
+): UniversalAmountLinkResolutionResult {
   const stateBefore =
     input.virtualStateBefore ??
     buildVirtualStateBeforeFromPriorOps(input.db1C, input.priorOperations);
+  const futureOps = (input.futureOperations ?? []).filter((f) => f.includeInProcessing !== false);
+  const baseOpNumber = input.currentOpNumber ?? input.priorOperations.length + 1;
 
   const nonPostingCategories: OperationCategory[] = [
     'contract_event',
@@ -209,6 +225,76 @@ export function resolveOperationAmountAndLinks(
           ? `Операция #${chosen.originOpNumber} от ${formatRuDateShort(chosen.originDate)} (счёт ${targetAcc}, ${chosen.counterpartyName})`
           : `База 1С (счёт ${targetAcc}, ${chosen.counterpartyName})`,
       });
+    }
+  }
+
+  // Forward counterparty lookahead (Invariant 4): if a receipt/shipment lacks counterparty on its own row,
+  // check subsequent payment/closing operations in the closed task contour matching by substantive subject stems!
+  if (
+    !linkedCpName &&
+    futureOps.length > 0 &&
+    (input.category.startsWith('purchase_') ||
+      input.category === 'intangible_acquisition' ||
+      input.category === 'sale_goods' ||
+      input.category === 'sale_services' ||
+      input.category === 'bank_out' ||
+      input.category === 'cash_out' ||
+      input.category === 'bank_in' ||
+      input.category === 'cash_in')
+  ) {
+    const isSupplierSide =
+      input.category.startsWith('purchase_') ||
+      input.category === 'intangible_acquisition' ||
+      input.category === 'bank_out' ||
+      input.category === 'cash_out';
+    const qStemsForward = extractKeywordStems1C(
+      `${input.nomenclatureName || ''} ${input.description}`
+    );
+
+    if (qStemsForward.length > 0 || input.explicitColumnAmount >= 0.01) {
+      for (let fIdx = 0; fIdx < futureOps.length; fIdx++) {
+        const fut = futureOps[fIdx];
+        if (!fut.counterpartyName) continue;
+        const futCompatible = isSupplierSide
+          ? fut.category === 'bank_out' ||
+            fut.category === 'cash_out' ||
+            fut.category.startsWith('purchase_') ||
+            fut.category === 'advance_offset' ||
+            fut.category === 'contract_event'
+          : fut.category === 'bank_in' ||
+            fut.category === 'cash_in' ||
+            fut.category === 'sale_goods' ||
+            fut.category === 'sale_services' ||
+            fut.category === 'advance_offset' ||
+            fut.category === 'contract_event';
+        if (!futCompatible) continue;
+
+        const futStems = extractKeywordStems1C(
+          `${fut.nomenclatureName || ''} ${fut.description}`
+        );
+        const shared = qStemsForward.filter((qs) =>
+          futStems.some((fs) => stemsMatch1C(qs, fs))
+        );
+        const exactAmountMatch =
+          input.explicitColumnAmount >= 0.01 &&
+          fut.amount >= 0.01 &&
+          Math.abs(fut.amount - input.explicitColumnAmount) < 0.05;
+
+        if (shared.length >= 1 || (exactAmountMatch && qStemsForward.length === 0)) {
+          linkedCpName = fut.counterpartyName;
+          linkedCpInn = fut.counterpartyInn || linkedCpInn;
+          linkedCpKpp = fut.counterpartyKpp || linkedCpKpp;
+          linkedContract = fut.contractName || linkedContract;
+          const futOpNum = baseOpNumber + fIdx + 1;
+          extraLinks.push({
+            opId: fut.id,
+            opNumber: futOpNum,
+            date: fut.date,
+            label: `Последующая операция #${futOpNum} от ${formatRuDateShort(fut.date)} (${fut.counterpartyName})`,
+          });
+          break;
+        }
+      }
     }
   }
 
@@ -728,6 +814,103 @@ export function resolveOperationAmountAndLinks(
   }
 
   // ============================================================================
+  // LEVEL 3B (Bidirectional Forward Lookahead — Invariant 4):
+  // Unpriced receipt / shipment / advance resolved from subsequent post-payment or closing act!
+  // ============================================================================
+  if (
+    futureOps.length > 0 &&
+    (input.category.startsWith('purchase_') ||
+      input.category === 'intangible_acquisition' ||
+      input.category === 'sale_goods' ||
+      input.category === 'sale_services' ||
+      input.category === 'bank_out' ||
+      input.category === 'cash_out' ||
+      input.category === 'bank_in' ||
+      input.category === 'cash_in')
+  ) {
+    const isSupplierFlow =
+      input.category.startsWith('purchase_') ||
+      input.category === 'intangible_acquisition' ||
+      input.category === 'bank_out' ||
+      input.category === 'cash_out';
+    const isPaymentLookingForFutureAct =
+      input.category === 'bank_out' ||
+      input.category === 'cash_out' ||
+      input.category === 'bank_in' ||
+      input.category === 'cash_in';
+
+    const cpNormFwd = normalizeCounterpartyKey1C(linkedCpName);
+    const qStemsFwd = extractKeywordStems1C(
+      `${input.nomenclatureName || ''} ${input.description}`
+    );
+
+    const candidateFutureMatches: Array<{ fut: QueuedOperation; futNum: number; sharedCount: number }> = [];
+    for (let fIdx = 0; fIdx < futureOps.length; fIdx++) {
+      const fut = futureOps[fIdx];
+      if (fut.amount < 0.01) continue;
+
+      const validOppositeKind = isPaymentLookingForFutureAct
+        ? isSupplierFlow
+          ? fut.category.startsWith('purchase_') || fut.category === 'intangible_acquisition'
+          : fut.category === 'sale_goods' || fut.category === 'sale_services'
+        : isSupplierFlow
+          ? fut.category === 'bank_out' || fut.category === 'cash_out'
+          : fut.category === 'bank_in' || fut.category === 'cash_in';
+      if (!validOppositeKind) continue;
+
+      const futCpNorm = normalizeCounterpartyKey1C(fut.counterpartyName);
+      if (cpNormFwd && futCpNorm && cpNormFwd !== futCpNorm) continue;
+
+      const futStems = extractKeywordStems1C(
+        `${fut.nomenclatureName || ''} ${fut.description}`
+      );
+      const shared = qStemsFwd.filter((qs) => futStems.some((fs) => stemsMatch1C(qs, fs)));
+
+      if ((cpNormFwd && cpNormFwd === futCpNorm) || shared.length >= 1) {
+        candidateFutureMatches.push({
+          fut,
+          futNum: baseOpNumber + fIdx + 1,
+          sharedCount: shared.length,
+        });
+      }
+    }
+
+    if (candidateFutureMatches.length > 0) {
+      // Prefer candidate with strongest stem overlap, then earliest chronological settlement
+      candidateFutureMatches.sort((a, b) =>
+        b.sharedCount !== a.sharedCount ? b.sharedCount - a.sharedCount : a.futNum - b.futNum
+      );
+      const best = candidateFutureMatches[0];
+      const fut = best.fut;
+      return {
+        resolvedAmount: round2(fut.amount),
+        amountMode: 'from_related_doc',
+        counterpartyName: linkedCpName || fut.counterpartyName || undefined,
+        counterpartyInn: linkedCpInn || fut.counterpartyInn || undefined,
+        counterpartyKpp: linkedCpKpp || fut.counterpartyKpp || undefined,
+        contractName: linkedContract || fut.contractName || undefined,
+        step01Breakdown: {
+          resolverLevel: 3,
+          resolverLevelName: `${LEVEL_NAMES[3]} (двунаправленная увязка с последующей оплатой)`,
+          summaryFormula: `Сумма определена по связанной последующей операции #${best.futNum} от ${formatRuDateShort(fut.date)} = ${fmtMoney(fut.amount)}`,
+          steps: [
+            `В текущей строке сумма не была указана явно, но в рамках замкнутого контура найдена закрывающая операция #${best.futNum} от ${formatRuDateShort(fut.date)} («${fut.description}») на сумму ${fmtMoney(fut.amount)}.`,
+            `Контрагент и сумма синхронизированы для полного закрытия расчётов на счёте ${isSupplierFlow ? '60' : '62'}.`,
+          ],
+          sourceLinks: [
+            {
+              opId: fut.id,
+              opNumber: best.futNum,
+              date: fut.date,
+              label: `Последующая операция #${best.futNum} от ${formatRuDateShort(fut.date)} (${fmtMoney(fut.amount)})`,
+            },
+          ],
+        },
+      };
+    }
+  }
+
+  // ============================================================================
   // LEVEL 4: Recurring / periodic operations (lease/rent, telecom, registered contracts)
   // ============================================================================
   const cpNormForRec = normalizeCounterpartyKey1C(linkedCpName);
@@ -772,6 +955,52 @@ export function resolveOperationAmountAndLinks(
         ],
       },
     };
+  }
+
+  // Forward contract scan (when an act/accrual row precedes the contract registration row in the task table)
+  for (let fIdx = 0; fIdx < futureOps.length; fIdx++) {
+    const fut = futureOps[fIdx];
+    if (fut.includeInProcessing === false) continue;
+    const isContractRow =
+      fut.category === 'contract_event' || /заключен\p{L}*\s+договор/iu.test(fut.description);
+    if (!isContractRow) continue;
+    const recTerms = extractRecurringContractTerms1C(fut.description);
+    const futPeriodicAmt = round2(fut.periodicPaymentAmount ?? recTerms?.periodicAmount ?? 0);
+    if (futPeriodicAmt < 0.01) continue;
+    const futCpNorm = normalizeCounterpartyKey1C(fut.counterpartyName);
+    const sameCp = cpNormForRec && futCpNorm && cpNormForRec === futCpNorm;
+    const futStems = extractKeywordStems1C(fut.description);
+    const sharedStems = qStemsRec.filter((qs) => futStems.some((fs) => stemsMatch1C(fs, qs)));
+    if (sameCp || sharedStems.length >= 2) {
+      const futNum = input.priorOperations.length + 2 + fIdx;
+      return {
+        resolvedAmount: futPeriodicAmt,
+        amountMode: 'from_related_doc',
+        counterpartyName: linkedCpName || fut.counterpartyName,
+        counterpartyInn: linkedCpInn || fut.counterpartyInn,
+        counterpartyKpp: linkedCpKpp || fut.counterpartyKpp,
+        contractName: linkedContract || fut.contractName,
+        vatRate: recTerms?.vatRate ?? fut.vatRate ?? input.vatRate,
+        vatRule: recTerms?.vatRule ?? fut.vatRule ?? input.vatRule,
+        step01Breakdown: {
+          resolverLevel: 4,
+          resolverLevelName: LEVEL_NAMES[4],
+          summaryFormula: `Периодический платёж по условиям договора (${fut.counterpartyName || linkedCpName}) = ${fmtMoney(futPeriodicAmt)}`,
+          steps: [
+            `В контуре задания найдена запись о договоре #${futNum} от ${formatRuDateShort(fut.date)} («${fut.description}») с регулярной платой ${fmtMoney(futPeriodicAmt)}.`,
+            `Сумма и параметры НДС подтянуты автоматически из условий договора.`,
+          ],
+          sourceLinks: [
+            {
+              opId: fut.id,
+              opNumber: futNum,
+              date: fut.date,
+              label: `Договор из операции #${futNum} от ${formatRuDateShort(fut.date)} (${fmtMoney(futPeriodicAmt)})`,
+            },
+          ],
+        },
+      };
+    }
   }
 
   // Also check prior periodic operations in priorOperations (e.g. rent / internet / RKO in previous month)
@@ -972,6 +1201,98 @@ export function resolveOperationAmountAndLinks(
             date: u.date,
             label: `Капитальные вложения 08.04.1 — операция #${u.opNumber} от ${formatRuDateShort(u.date)}`,
           })),
+        },
+      };
+    }
+  }
+
+  if (input.category === 'intangible_commissioning') {
+    let balance0805 = 0;
+    const links0805: ResolverSourceLink1C[] = [];
+    if (input.db1C?.rawBalances) {
+      for (const b of input.db1C.rawBalances) {
+        if (b.account === '08.05') {
+          const dr = round2((b.startDebit || b.rawDebit || 0) - (b.startCredit || b.rawCredit || 0));
+          if (dr > 0.01) {
+            balance0805 = round2(balance0805 + dr);
+            links0805.push({ label: `Входящее сальдо 08.05 (${fmtMoney(dr)})` });
+          }
+        }
+      }
+    }
+    input.priorOperations.forEach((p, idx) => {
+      if (p.includeInProcessing === false) return;
+      for (const e of p.entries) {
+        if (e.debit === '08.05') {
+          balance0805 = round2(balance0805 + e.amount);
+          links0805.push({
+            opId: p.id,
+            opNumber: idx + 1,
+            date: p.date,
+            label: `Поступление НМА #${idx + 1} от ${formatRuDateShort(p.date)} (+${fmtMoney(e.amount)})`,
+          });
+        }
+        if (e.credit === '08.05') {
+          balance0805 = round2(balance0805 - e.amount);
+        }
+      }
+    });
+    if (balance0805 >= 0.01) {
+      return {
+        resolvedAmount: balance0805,
+        amountMode: 'from_account_balance',
+        vatRate: 0,
+        vatRule: 'none',
+        step01Breakdown: {
+          resolverLevel: 5,
+          resolverLevelName: LEVEL_NAMES[5],
+          summaryFormula: `Первоначальная стоимость НМА (дебетовый остаток счёта 08.05) = ${fmtMoney(balance0805)}`,
+          steps: [
+            `По ФСБУ 14/2022 и ФСБУ 26/2020 сформированная на счёте 08.05 стоимость нематериального актива (${fmtMoney(balance0805)}) переносится в дебет счёта 04.01.`,
+          ],
+          sourceLinks: links0805,
+        },
+      };
+    }
+  }
+
+  if (input.category === 'intangible_amortization') {
+    let cost0401 = 0;
+    let spiMonths = input.usefulLifeMonths || 0;
+    const links0401: ResolverSourceLink1C[] = [];
+    input.priorOperations.forEach((p, idx) => {
+      if (p.includeInProcessing === false) return;
+      for (const e of p.entries) {
+        if (e.debit === '04.01' || e.debit === '04') {
+          cost0401 = round2(cost0401 + e.amount);
+          if (!spiMonths && p.usefulLifeMonths && p.usefulLifeMonths > 0) {
+            spiMonths = p.usefulLifeMonths;
+          }
+          links0401.push({
+            opId: p.id,
+            opNumber: idx + 1,
+            date: p.date,
+            label: `Принятие к учёту НМА #${idx + 1} от ${formatRuDateShort(p.date)} (${fmtMoney(e.amount)})`,
+          });
+        }
+      }
+    });
+    if (cost0401 >= 0.01) {
+      const effSpi = spiMonths > 0 ? spiMonths : 36;
+      const monthlyAmort = round2(cost0401 / effSpi);
+      return {
+        resolvedAmount: monthlyAmort,
+        amountMode: 'calculated_by_1c',
+        vatRate: 0,
+        vatRule: 'none',
+        step01Breakdown: {
+          resolverLevel: 6,
+          resolverLevelName: LEVEL_NAMES[6],
+          summaryFormula: `${fmtMoney(cost0401)} ÷ ${effSpi} мес. = ${fmtMoney(monthlyAmort)}`,
+          steps: [
+            `Линейная амортизация НМА на счёте 05 (ФСБУ 14/2022): первоначальная стоимость ${fmtMoney(cost0401)} ÷ СПИ ${effSpi} мес. = ${fmtMoney(monthlyAmort)}.`,
+          ],
+          sourceLinks: links0401,
         },
       };
     }

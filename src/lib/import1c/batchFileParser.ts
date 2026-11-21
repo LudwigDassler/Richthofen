@@ -11,6 +11,7 @@ import {
   BatchSequentialContext,
   bindAndGenerateOperation,
   RawDraftOperationInput,
+  recalculateOperationsChronologically,
 } from '@/lib/engine/postingEngine';
 import {
   advanceVirtual1CStateWithOperation,
@@ -18,6 +19,12 @@ import {
   extractFinancialNotesFromText1C,
   extractRecurringContractTerms1C,
 } from '@/lib/engine/virtual1CState';
+import {
+  ExplicitCorrespondenceHint1C,
+  extractCounterpartyFromText1C,
+  extractExplicitCorrespondencesFromText1C,
+  extractPersonFioFromText1C,
+} from '@/lib/engine/entityNormalizer1C';
 import { resolveBankInfoByBik } from '@/lib/egrul/egrulLookup';
 import {
   BatchImportCompletenessStats,
@@ -257,6 +264,7 @@ export interface ExtractedFreeTextRequisites {
   interestRatePercentHint?: number;
   multiSumTotal?: number;
   multiSumNote?: string;
+  explicitCorrespondences?: ExplicitCorrespondenceHint1C[];
 }
 
 export function isNonPostingManagementOrPolicyText(text: string): boolean {
@@ -600,13 +608,15 @@ export function extractRequisitesFromFreeText(
   );
   const bikMatch = text.match(/БИК[\s.:№-]*(\d{9})\b/i);
 
-  let counterparty = '';
-  // 1. Quoted legal entity with Russian or straight/curly quotes
-  const legalQuoted = text.match(
-    /(?:^|[^\p{L}\p{N}])(ООО|АО|ПАО|ЗАО|НАО|ГУП|МУП|ФГУП|АНО|НКО)\s*[«"'„“]([^»"'”]{2,80})[»"'”]/iu
-  );
-  if (legalQuoted) {
-    counterparty = `${legalQuoted[1].toUpperCase()} «${legalQuoted[2].trim()}»`;
+  let counterparty = extractCounterpartyFromText1C(text);
+  // 1. Quoted legal entity with Russian or straight/curly quotes (fallback if not extracted)
+  if (!counterparty) {
+    const legalQuoted = text.match(
+      /(?:^|[^\p{L}\p{N}])(ООО|АО|ПАО|ЗАО|НАО|ГУП|МУП|ФГУП|АНО|НКО)\s*[«"'„“]([^»"'”]{2,80})[»"'”]/iu
+    );
+    if (legalQuoted) {
+      counterparty = `${legalQuoted[1].toUpperCase()} «${legalQuoted[2].trim()}»`;
+    }
   }
 
   // 2. Tax / Treasury / Social Fund agency (e.g. "МИ ФНС №10 по СПб", "ИФНС № 15", "УФК по г. Санкт-Петербургу")
@@ -833,6 +843,12 @@ export function extractRequisitesFromFreeText(
       employeeHint = normalizeDativeEmployeeHint(rawAccFio);
     }
   }
+  if (!employeeHint && !counterparty) {
+    const fallbackPerson = extractPersonFioFromText1C(text);
+    if (fallbackPerson) {
+      employeeHint = fallbackPerson;
+    }
+  }
 
   // F. HR hiring / employment order: e.g. "Принят на работу Иванов И.И. на должность прораба с окладом 80 000 руб."
   let employeePositionHint: string | undefined;
@@ -991,6 +1007,7 @@ export function extractRequisitesFromFreeText(
     interestRatePercentHint,
     multiSumTotal: multiSum.multiSumTotal,
     multiSumNote: multiSum.multiSumNote,
+    explicitCorrespondences: extractExplicitCorrespondencesFromText1C(text),
   };
 }
 
@@ -1492,6 +1509,9 @@ function mapTabularRowToDraft(params: {
       directionHint,
       explicitDebit: debitCell || undefined,
       explicitCredit: creditCell || undefined,
+      explicitCorrespondences: extracted.explicitCorrespondences?.length
+        ? extracted.explicitCorrespondences
+        : undefined,
     },
   };
 }
@@ -1766,6 +1786,9 @@ function parseRowsMatrixDetailed(params: {
         organizationBankAccount: sheetDefaults.orgBankAccount || undefined,
         contractNumber: req.contractNumber || undefined,
         contractDate: req.contractDate || undefined,
+        explicitCorrespondences: req.explicitCorrespondences?.length
+          ? req.explicitCorrespondences
+          : undefined,
       });
     }
   }
@@ -1959,7 +1982,8 @@ export function parseFreeTextOrDelimitedOperations(
       Boolean(req.monthlySalaryHint) ||
       Boolean(req.alimonyRecipientHint) ||
       Boolean(req.periodicPaymentAmountHint) ||
-      /перечислен|поступил|оплачен|реализован|отгружен|начислен|выда[лн]|выплат|уплат|списан|принят|при[её]м\s+на\s+работу|оформлен\p{L}*\s+в\s+штат|оказан|передан|отпущен|израсходован|введ[её]н|выпущен|оприходован|перемещ|снят|внесен|закрыт|амортизац|приобретен|исполнительн\p{L}*\s+лист|вексел|заключен\p{L}*\s+договор|подписан\p{L}*\s+договор|сч[её]т\s+на\s+оплат|учетн\p{L}*\s+политик|лимит\s+(?:остатка\s+)?касс|индоссирован|погашен|выбыл|ликвидирован|продан|за[её]м|процент|вычет\p{L}*\s+ндс/iu.test(
+      Boolean(req.explicitCorrespondences?.length) ||
+      /перечислен|поступил|оплачен|реализован|отгружен|начислен|выда[лн]|выплат|уплат|списан|принят|при[её]м\s+на\s+работу|оформлен\p{L}*\s+в\s+штат|оказан|передан|отпущен|израсходован|введ[её]н|выпущен|оприходован|перемещ|снят|внесен|закрыт|амортизац|приобретен|исполнительн\p{L}*\s+лист|вексел|заключен\p{L}*\s+договор|подписан\p{L}*\s+договор|сч[её]т\s+на\s+оплат|учетн\p{L}*\s+политик|лимит\s+(?:остатка\s+)?касс|индоссирован|погашен|выбыл|ликвидирован|продан|за[её]м|процент|вычет\p{L}*\s+ндс|уставн\p{L}*\s+капитал|дивиденд|нематериальн|(?:^|[^\p{L}])нма(?=$|[^\p{L}])|инвентаризац|недостач|излишк|эквайринг|аккредитив|депозит|(?:^|[^\p{L}])рбп(?=$|[^\p{L}])|будущ\p{L}*\s+период|сомнительн\p{L}*\s+долг|резерв|забаланс|арендован/iu.test(
         line
       );
 
@@ -2005,6 +2029,9 @@ export function parseFreeTextOrDelimitedOperations(
         req.inn.length === 10 || req.inn.length === 12 ? 'excel_explicit' : undefined,
       contractNumber: req.contractNumber || undefined,
       contractDate: req.contractDate || undefined,
+      explicitCorrespondences: req.explicitCorrespondences?.length
+        ? req.explicitCorrespondences
+        : undefined,
     });
   });
 
@@ -2166,6 +2193,9 @@ function parseJsonOperationsArray(
       warehouseName: String(r['Склад'] ?? r['warehouseName'] ?? '').trim(),
       explicitDebit: normalizeAccountCode1C(String(r['Дебет'] ?? r['СчетДт'] ?? '')),
       explicitCredit: normalizeAccountCode1C(String(r['Кредит'] ?? r['СчетКт'] ?? '')),
+      explicitCorrespondences: req.explicitCorrespondences?.length
+        ? req.explicitCorrespondences
+        : undefined,
     });
   });
   return drafts;
@@ -2342,17 +2372,18 @@ export function processBatchFiles(
   let runningVirtualState = createInitialVirtual1CState(workingDb);
   priorExistingOps.forEach((pOp, idx) => {
     if (pOp.includeInProcessing) {
-      advanceVirtual1CStateWithOperation(runningVirtualState, pOp, idx + 1);
+      runningVirtualState = advanceVirtual1CStateWithOperation(runningVirtualState, pOp, idx + 1);
     }
   });
 
   const rawGeneratedOperations: QueuedOperation[] = [];
   const generatedByFileIndex = new Map<number, QueuedOperation[]>();
 
-  indexedDrafts.forEach(({ draft, fIdx }, globalIdx) => {
+  indexedDrafts.forEach(({ draft }, globalIdx) => {
     const seqContext: BatchSequentialContext = {
       priorOperations: [...priorExistingOps, ...rawGeneratedOperations],
       virtualStateBefore: runningVirtualState,
+      currentOpNumber: priorExistingOps.length + rawGeneratedOperations.length + 1,
       reportingYear,
       defaultBik: detectedDefaultBik,
       defaultBankName: detectedDefaultBankName,
@@ -2365,7 +2396,7 @@ export function processBatchFiles(
     const op = bindAndGenerateOperation(draft, workingDb, deterministicId, seqContext);
     rawGeneratedOperations.push(op);
     if (op.includeInProcessing) {
-      advanceVirtual1CStateWithOperation(
+      runningVirtualState = advanceVirtual1CStateWithOperation(
         runningVirtualState,
         op,
         priorExistingOps.length + rawGeneratedOperations.length
@@ -2373,10 +2404,19 @@ export function processBatchFiles(
     }
   });
 
-  const allCombinedWithStep00 = attachVirtualStateStep00ToOperations(
-    [...priorExistingOps, ...rawGeneratedOperations],
-    workingDb
-  );
+  // Two-pass bidirectional convergence: resolves forward references (e.g., invoice before contract,
+  // delivery before supplier payment with full INN/sum) and attaches chronological Step 00 prep steps
+  const allCombinedWithStep00 =
+    rawGeneratedOperations.length > 0
+      ? recalculateOperationsChronologically(
+          [...priorExistingOps, ...rawGeneratedOperations],
+          workingDb,
+          { reportingYear, defaultBik: detectedDefaultBik }
+        )
+      : attachVirtualStateStep00ToOperations(
+          [...priorExistingOps, ...rawGeneratedOperations],
+          workingDb
+        );
   const generatedOperations = allCombinedWithStep00.slice(priorExistingOps.length);
   indexedDrafts.forEach(({ fIdx }, idx) => {
     const op = generatedOperations[idx];

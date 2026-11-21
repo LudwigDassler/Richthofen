@@ -16,6 +16,11 @@ import {
   VirtualOpenSettlement1C,
   VirtualWritOfExecution1C,
 } from '@/types/accounting';
+import {
+  normalizeLegalEntityName1C,
+  normalizeRussianFioToNominative1C,
+} from './entityNormalizer1C';
+import { sanitizePrepSteps1C } from './textHygiene1C';
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -58,13 +63,15 @@ export function normalizeSimpleEntityKey1C(raw: string): string {
  * Preserves gender ending of surname + initials so "Валеев В.В." and "Валеева..." never collide!
  */
 export function normalizePersonIdentityKey1C(raw: string): string {
-  const cleaned = (raw ?? '')
-    .toLowerCase()
-    .replace(/ё/g, 'е')
+  const preClean = (raw ?? '')
     .replace(/\b(сотрудник|работник|физлицо|физическое лицо|получатель|должник|мо[л])\b/giu, ' ')
     .replace(/[«»"'()]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  if (!preClean) return '';
+
+  const nom = normalizeRussianFioToNominative1C(preClean);
+  const cleaned = nom.toLowerCase().replace(/ё/g, 'е').trim();
   if (!cleaned) return '';
 
   // Match "Фамилия И.О." or "Фамилия И. О." or "Фамилия Имя Отчество"
@@ -1142,11 +1149,18 @@ export function advanceVirtual1CStateWithOperation(
         ? 'Поставщик / подрядчик'
         : op.category.startsWith('sale_') || op.category === 'bank_in'
         ? 'Покупатель / заказчик'
-        : op.category === 'founder_contribution'
-        ? 'Учредитель (счёт 75.01)'
-        : 'Контрагент';
+        : op.category === 'founder_contribution' ||
+            op.category === 'charter_capital' ||
+            op.category === 'dividends_accrual' ||
+            op.category === 'dividends_payout'
+          ? 'Учредитель / участник (счёт 75)'
+          : 'Контрагент';
 
-    for (const cpName of cpParts) {
+    for (const rawCpPart of cpParts) {
+      const cpName =
+        op.counterpartyKind === 'ФизическоеЛицо'
+          ? normalizeRussianFioToNominative1C(rawCpPart)
+          : normalizeLegalEntityName1C(rawCpPart);
       const cpInn = isMultiCp ? '' : (op.counterpartyInn || '').replace(/\D/g, '');
       const cpNorm = normalizeCounterpartyKey1C(cpName);
       const existingCp = state.counterparties.find(
@@ -1309,7 +1323,7 @@ export function advanceVirtual1CStateWithOperation(
 
   // 4. Register / update Employees
   if (op.employeeName && op.employeeName.trim()) {
-    const empName = op.employeeName.trim();
+    const empName = normalizeRussianFioToNominative1C(op.employeeName.trim());
     const empKey = `emp:${normalizePersonIdentityKey1C(empName)}`;
     const existingEmp = state.employees.find((e) => e.key === empKey);
     if (existingEmp) {
@@ -2212,7 +2226,7 @@ export function buildStep00DirectoryPrepSteps(
     });
   }
 
-  return steps;
+  return sanitizePrepSteps1C(steps) ?? steps;
 }
 
 /**

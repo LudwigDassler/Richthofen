@@ -34,6 +34,7 @@ import {
   QueuedOperation,
 } from '@/types/accounting';
 import {
+  ALL_DOC_TYPES_1C,
   buildOperationMentorGuide1C,
   computeContextCounterpartySuggestions,
   DOC_TYPE_LABELS_1C,
@@ -46,31 +47,7 @@ import {
 import { formatDateRu, formatMoney } from '@/lib/formatters';
 import { parseRussianNumber } from '@/lib/import1c';
 
-const DOC_TYPES_1C: DocType1CBP30[] = [
-  'СписаниеСРасчетногоСчета',
-  'ПоступлениеНаРасчетныйСчет',
-  'ПоступлениеТоваровУслуг',
-  'РеализацияТоваровУслуг',
-  'ПоступлениеНаличных',
-  'ВыдачаНаличных',
-  'АвансовыйОтчет',
-  'РасходМатериалов',
-  'ПередачаМатериаловВЭксплуатацию',
-  'ПеремещениеТоваров',
-  'ВыпускПродукции',
-  'ПринятиеКУчетуОС',
-  'ПриемНаРаботу',
-  'ИсполнительныйЛист',
-  'НачислениеЗарплаты',
-  'ВедомостьВБанк',
-  'ВедомостьВКассу',
-  'ФинансовыеВложения',
-  'СчетФактураПолученный',
-  'СчетФактураВыданный',
-  'КорректировкаДолга',
-  'ОперацияБух',
-  'ЗакрытиеМесяца',
-];
+const DOC_TYPES_1C: DocType1CBP30[] = ALL_DOC_TYPES_1C;
 
 const COST_ACCOUNT_OPTIONS = [
   { code: '20.01', label: '20.01 — Основное производство' },
@@ -750,8 +727,8 @@ export function Tab2ImportPostings() {
       {filteredOperations.length === 0 ? (
         <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.04)] py-12 text-center text-xs text-slate-500 dark:text-slate-400">
           {operations.length === 0
-            ? 'Очередь операций пуста. Загрузите Excel-файлы (.xlsx, .xls, .csv, .txt, .xml) или вставьте текст выше.'
-            : 'Нет операций, подходящих под выбранный фильтр. Сбросьте фильтры квартала или раздела выше.'}
+            ? 'Очередь операций пуста. Загрузите Excel-файлы (.xlsx, .xls, .csv, .txt, .xml) или нажмите «Вставить текст / таблицу».'
+            : 'Нет операций, подходящих под выбранный фильтр. Сбросьте активные фильтры квартала или раздела в панели отбора.'}
         </div>
       ) : (
         <div className="space-y-2.5">
@@ -1637,7 +1614,7 @@ function OperationEditorCard({
                         </ul>
                       ) : (
                         <p className="text-[11px] text-amber-800 dark:text-amber-300">
-                          В предыдущих строках не найден приказ о приёме с окладом. Укажите месячный ФОТ справа и нажмите «Рассчитать» — система автоматически сформирует начисление ЗП, НДФЛ 13%, взносы 30% и травматизм 0,2%.
+                          В предыдущих строках не найден приказ о приёме с окладом. Укажите месячный ФОТ в поле расчёта и нажмите «Рассчитать» — система автоматически сформирует начисление ЗП, НДФЛ 13%, взносы 30% и травматизм 0,2%.
                         </p>
                       )}
                     </div>
@@ -3203,13 +3180,34 @@ function OperationEditorCard({
                         </div>
 
                         {mentorGuide.step01CalculationBreakdown.steps.length > 0 && (
-                          <ul className="space-y-1 text-[11px] tabular-nums text-slate-700 dark:text-slate-300">
-                            {mentorGuide.step01CalculationBreakdown.steps.map((line, sIdx) => (
-                              <li key={sIdx} className="leading-relaxed">
-                                — {line}
-                              </li>
-                            ))}
-                          </ul>
+                          <div className="space-y-1 text-[11px] tabular-nums text-slate-700 dark:text-slate-300">
+                            <ul className="space-y-1">
+                              {mentorGuide.step01CalculationBreakdown.steps
+                                .slice(0, 4)
+                                .map((line, sIdx) => (
+                                  <li key={sIdx} className="leading-relaxed">
+                                    — {line}
+                                  </li>
+                                ))}
+                            </ul>
+                            {mentorGuide.step01CalculationBreakdown.steps.length > 4 && (
+                              <details className="pt-1">
+                                <summary className="cursor-pointer font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 select-none">
+                                  Показать подробности расчёта (+
+                                  {mentorGuide.step01CalculationBreakdown.steps.length - 4})
+                                </summary>
+                                <ul className="mt-1 space-y-1">
+                                  {mentorGuide.step01CalculationBreakdown.steps
+                                    .slice(4)
+                                    .map((line, sIdx) => (
+                                      <li key={sIdx + 4} className="leading-relaxed">
+                                        — {line}
+                                      </li>
+                                    ))}
+                                </ul>
+                              </details>
+                            )}
+                          </div>
                         )}
 
                         {mentorGuide.step01CalculationBreakdown.sourceLinks.length > 0 && (

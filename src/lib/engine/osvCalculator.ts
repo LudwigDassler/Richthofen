@@ -16,6 +16,7 @@ import {
   OsvSubcontoRow,
   QueuedOperation,
 } from '@/types/accounting';
+import { sanitizeAuditorHint1C } from '@/lib/engine/textHygiene1C';
 
 function round2(n: number): number {
   const r = Math.round((n + Number.EPSILON) * 100) / 100;
@@ -699,7 +700,7 @@ export function calculateOsvReport(params: {
       title: `Не закрыты счета затрат и финансового результата на конец периода`,
       explanation: `Остаток числится на счетах: ${codes}. В законченной учебной работе на конец месяца счета 25, 26, 44 и свёрнутое сальдо счетов 90 и 91 должны равняться 0,00 ₽ (счёт 20.01 имеет остаток только при наличии незавершённого производства).`,
       howToFix1C:
-        'В 1С:БП 3.0 откройте «Операции → Закрытие месяца» и нажмите «Выполнить закрытие месяца» (или нажмите кнопку автоформирования закрытия ниже).',
+        'В 1С:БП 3.0 откройте «Операции → Закрытие месяца» и нажмите «Выполнить закрытие месяца» (или нажмите кнопку «Сформировать закрытие периода»).',
       quickAction: effectiveSourceMode !== 'db_only' ? 'run_autofix' : undefined,
       quickActionLabel:
         effectiveSourceMode !== 'db_only' ? 'Сформировать закрытие периода' : undefined,
@@ -781,7 +782,7 @@ export function calculateOsvReport(params: {
     leafRows,
     subcontoRowsByAccount,
     movementsByAccount,
-    auditorHints,
+    auditorHints: auditorHints.map(sanitizeAuditorHint1C),
     totals: {
       startDebit: totalStartDebit,
       startCredit: totalStartCredit,
