@@ -285,14 +285,21 @@ function parseFlexRuNumber(raw: string): number {
  * Extracts multiple securities / promissory notes from a single row description:
  * e.g. "Куплены ценные бумаги: первый вексель стоимостью 280 000 руб. под 13% годовых, второй — 540 000 руб. под 11% годовых"
  */
-export function extractFinancialNotesFromText1C(text: string): ParsedFinancialNoteItem1C[] {
-  const clean = (text ?? '').replace(/\u00A0/g, ' ');
+export function extractFinancialNotesFromText1C(
+  text: string,
+  explicitAmount?: number
+): ParsedFinancialNoteItem1C[] {
+  const clean = (text ?? '')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\b\d{10,12}\s*\/\s*\d{9}\b/g, ' ')
+    .replace(/(?:инн|кпп|огрн|бик|р\/сч?|к\/сч?)[\s.:№-]*\d{6,20}/giu, ' ')
+    .replace(/\b\d{9,20}\b/g, ' ');
   if (!/вексел|облигац|ценн\p{L}*\s+бумаг/iu.test(clean)) return [];
 
   const notes: ParsedFinancialNoteItem1C[] = [];
   // Match pair patterns: "<amount> (руб)? ... под/по ставке <rate>%"
   const pairRe =
-    /((?:\d{1,3}(?:[\s\u202F]\d{3})+|\d{4,})(?:[.,]\d{1,2})?)\s*(?:руб\.?|₽|р\.?)?[^%.;\n]{0,45}?(?:под|ставк\p{L}*|доходност\p{L}*)\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*%/giu;
+    /((?:\d{1,3}(?:[\s\u202F]\d{3})+|\d{4,8})(?:[.,]\d{1,2})?)\s*(?:руб\.?|₽|р\.?)?[^%.;\n]{0,45}?(?:под|ставк\p{L}*|доходност\p{L}*)\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*%/giu;
   let m: RegExpExecArray | null;
   while ((m = pairRe.exec(clean)) !== null) {
     const principal = parseFlexRuNumber(m[1]);
@@ -309,13 +316,13 @@ export function extractFinancialNotesFromText1C(text: string): ParsedFinancialNo
 
   if (notes.length > 0) return notes;
 
-  // Fallback: single amount + single rate in note/bond text
+  // Fallback: single amount + single rate in note/bond text OR explicit column amount
   const rateMatch = clean.match(/(?:под|ставк\p{L}*)\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*%/iu);
+  const rate = rateMatch ? parseFlexRuNumber(rateMatch[1]) : 0;
   const amtMatches = Array.from(
-    clean.matchAll(/((?:\d{1,3}(?:[\s\u202F]\d{3})+|\d{4,})(?:[.,]\d{1,2})?)\s*(?:руб\.?|₽|р\.?)/giu)
+    clean.matchAll(/((?:\d{1,3}(?:[\s\u202F]\d{3})+|\d{4,8})(?:[.,]\d{1,2})?)\s*(?:руб\.?|₽|р\.?)/giu)
   );
   if (amtMatches.length >= 1) {
-    const rate = rateMatch ? parseFlexRuNumber(rateMatch[1]) : 0;
     amtMatches.forEach((am, idx) => {
       const principal = parseFlexRuNumber(am[1]);
       if (principal >= 1000) {
@@ -327,16 +334,27 @@ export function extractFinancialNotesFromText1C(text: string): ParsedFinancialNo
         });
       }
     });
+  } else if ((explicitAmount ?? 0) >= 1000 && rate > 0) {
+    notes.push({
+      index: 1,
+      label: 'Вексель №1',
+      principal: round2(explicitAmount!),
+      ratePercent: rate,
+    });
   }
 
   return notes;
 }
 
 /**
- * Extracts recurring periodic fee from a contract signing / management row:
+ * Extracts recurring periodic fee from a contract signing / multi-month invoice row:
  * e.g. "Заключен договор аренды с ООО БизнесЦентр с ежемесячной платой 60 000 руб., в т.ч. НДС 20%"
+ * or "Получен счет №23 на сумму 1 380 000 руб ... за аренду ... на 2 месяца" -> 690 000 ₽/мес.
  */
-export function extractRecurringContractTerms1C(text: string): {
+export function extractRecurringContractTerms1C(
+  text: string,
+  explicitAmount?: number
+): {
   periodicAmount: number;
   periodicity: 'monthly' | 'quarterly' | 'once';
   vatRule: 'included' | 'on_top' | 'none';
@@ -352,9 +370,17 @@ export function extractRecurringContractTerms1C(text: string): {
       )
     : null;
   const chosen = m || fallbackM;
-  if (!chosen) return null;
-  const amt = parseFlexRuNumber(chosen[1]);
+  let amt = chosen ? parseFlexRuNumber(chosen[1]) : round2(explicitAmount ?? 0);
   if (amt < 100) return null;
+
+  // If invoice/contract states total for N months ("на 2 месяца", "за 3 мес"), divide into monthly rate
+  const monthsSpanM = !m ? clean.match(/(?:на|за)\s+(\d{1,2})\s*мес\p{L}*/iu) : null;
+  if (monthsSpanM) {
+    const months = Number(monthsSpanM[1]);
+    if (months >= 2 && months <= 24) {
+      amt = round2(amt / months);
+    }
+  }
 
   const isQuarterly = /ежеквартальн|в\s+квартал/iu.test(clean);
   const isNoVat = /без\s+ндс|ндс\s+не\s+облаг/iu.test(clean);
@@ -431,7 +457,7 @@ export function inferNomenclatureCatalogMeta1C(
     category === 'purchase_equipment' ||
     category === 'os_commissioning' ||
     explicitMaterialAccount?.startsWith('08.04') ||
-    /бетоносмесител|бетономешалк|оборудован|станок|станк|компрессор|генератор|трансформатор|кран|погрузчик|экскаватор|производственн\p{L}*\s+лини|сервер/iu.test(
+    /бетоносмесител|бетономешалк|оборудован|станок|станк|компрессор|генератор|трансформатор|кран|погрузчик|экскаватор|минитрактор|трактор|плоттер|вагон-бытовк|бытовк|леса\s+строительн|строительн\p{L}*\s+леса|производственн\p{L}*\s+лини|сервер/iu.test(
       lower
     )
   ) {
@@ -1238,7 +1264,7 @@ export function advanceVirtual1CStateWithOperation(
         const ctrKey = `ctr:${cpNorm}:${ctrKind}:${normalizeSimpleEntityKey1C(ctrName)}`;
         const recurring =
           op.category === 'contract_event' || op.periodicPaymentAmount
-            ? extractRecurringContractTerms1C(op.description)
+            ? extractRecurringContractTerms1C(op.description, op.amount)
             : null;
         const periodicAmt = op.periodicPaymentAmount || recurring?.periodicAmount;
         const existingCtr = state.contracts.find((c) => c.key === ctrKey);
@@ -1413,7 +1439,11 @@ export function advanceVirtual1CStateWithOperation(
     }
   }
 
-  if (op.category === 'os_commissioning' || op.docType1C === 'ПринятиеКУчетуОС') {
+  if (
+    op.category === 'os_commissioning' ||
+    op.docType1C === 'ПринятиеКУчетуОС' ||
+    op.entries.some((e) => e.debit === '01.01' && e.amount >= 0.01)
+  ) {
     const osName = (op.nomenclatureName || 'Объект основных средств').trim();
     const osKey = `os:${normalizeSimpleEntityKey1C(osName)}`;
     const targetStems = extractKeywordStems1C(osName);
@@ -1423,10 +1453,15 @@ export function advanceVirtual1CStateWithOperation(
         const aStems = extractKeywordStems1C(a.name);
         return targetStems.some((ts) => aStems.some((as) => stemsMatch(ts, as)));
       }) ||
-      state.fixedAssets.find((a) => a.status === 'На счёте 08.04.1 (к вводу)');
+      (op.category === 'os_commissioning'
+        ? state.fixedAssets.find((a) => a.status === 'На счёте 08.04.1 (к вводу)')
+        : undefined);
 
     const spi = op.usefulLifeMonths && op.usefulLifeMonths > 0 ? op.usefulLifeMonths : 37;
-    const cost = op.amount > 0 ? op.amount : existingOs?.initialCost || 0;
+    const entry0101 = round2(
+      op.entries.filter((e) => e.debit === '01.01').reduce((s, e) => s + e.amount, 0)
+    );
+    const cost = entry0101 > 0 ? entry0101 : op.amount > 0 ? op.amount : existingOs?.initialCost || 0;
     const monthlyDep = spi > 0 && cost > 0 ? round2(cost / spi) : 0;
 
     if (existingOs) {
@@ -1436,7 +1471,7 @@ export function advanceVirtual1CStateWithOperation(
       existingOs.monthlyDepreciation = monthlyDep;
       existingOs.commissioningDate = op.date;
       existingOs.usages = addUsageRef(existingOs.usages, usageRef);
-    } else {
+    } else if (cost > 0) {
       state.fixedAssets.push({
         key: osKey,
         name: osName,
@@ -1504,14 +1539,29 @@ export function advanceVirtual1CStateWithOperation(
     const debtor = (op.employeeName || 'Сотрудник по исполнительному листу').trim();
     const recipient = (op.alimonyRecipientName || op.counterpartyName || 'Получатель алиментов').trim();
     const recInn = (op.alimonyRecipientInn || op.counterpartyInn || '').replace(/\D/g, '');
-    const rate = op.alimonyRatePercent && op.alimonyRatePercent > 0 ? op.alimonyRatePercent : 25;
-    const shareLabel = op.alimonyShareLabel || `${rate}%`;
-    const writKey = `writ:${normalizePersonIdentityKey1C(debtor)}:${normalizeSimpleEntityKey1C(recipient)}`;
-    const existingWrit = state.writsOfExecution.find((w) => w.key === writKey);
+    const fixedAmt =
+      op.alimonyFixedAmount && op.alimonyFixedAmount > 0 ? round2(op.alimonyFixedAmount) : undefined;
+    const rate = fixedAmt
+      ? 0
+      : op.alimonyRatePercent && op.alimonyRatePercent > 0
+        ? op.alimonyRatePercent
+        : 25;
+    const shareLabel =
+      op.alimonyShareLabel || (fixedAmt ? `${fixedAmt.toLocaleString('ru-RU')} ₽ / мес.` : `${rate}%`);
+    const debtorKey = normalizePersonIdentityKey1C(debtor);
+    const writKey = `writ:${debtorKey}`;
+    const existingWrit = state.writsOfExecution.find(
+      (w) => w.key === writKey || normalizePersonIdentityKey1C(w.debtorEmployeeName) === debtorKey
+    );
     if (existingWrit) {
       if (recInn && !existingWrit.recipientInn) existingWrit.recipientInn = recInn;
+      if (recipient && existingWrit.recipientName.startsWith('Получатель алиментов')) {
+        existingWrit.recipientName = recipient;
+      }
       existingWrit.ratePercent = rate;
       existingWrit.shareLabel = shareLabel;
+      if (fixedAmt) existingWrit.fixedAmount = fixedAmt;
+      if (op.writStartDate) existingWrit.startDate = op.writStartDate;
       existingWrit.usages = addUsageRef(existingWrit.usages, usageRef);
     } else {
       state.writsOfExecution.push({
@@ -1521,8 +1571,8 @@ export function advanceVirtual1CStateWithOperation(
         recipientInn: recInn,
         ratePercent: rate,
         shareLabel,
-        fixedAmount: op.amount > 0 ? op.amount : undefined,
-        startDate: op.date,
+        fixedAmount: fixedAmt,
+        startDate: op.writStartDate || op.date,
         accumulatedAccrued7641: 0,
         accumulatedPaid7641: 0,
         balance7641: 0,
@@ -1540,7 +1590,7 @@ export function advanceVirtual1CStateWithOperation(
     const parsedNotes =
       op.financialNotesList && op.financialNotesList.length > 0
         ? op.financialNotesList
-        : extractFinancialNotesFromText1C(op.description);
+        : extractFinancialNotesFromText1C(op.description, op.amount);
 
     if (parsedNotes.length > 0) {
       const existing5802Count = state.financialInvestments.filter(
@@ -1752,12 +1802,16 @@ export function advanceVirtual1CStateWithOperation(
     // Credit 76.41 -> alimony accrued in payroll!
     if (entry.credit === '76.41') {
       const recSub = (entry.creditSubconto || op.alimonyRecipientName || '').trim();
+      const recNorm = normalizeSimpleEntityKey1C(recSub);
       const matchedWrit =
-        state.writsOfExecution.find(
-          (w) =>
-            recSub &&
-            normalizeSimpleEntityKey1C(w.recipientName) === normalizeSimpleEntityKey1C(recSub)
-        ) || state.writsOfExecution[0];
+        state.writsOfExecution.find((w) => {
+          const wRec = normalizeSimpleEntityKey1C(w.recipientName);
+          const wSurname = w.debtorEmployeeName.toLowerCase().replace(/ё/g, 'е').split(/\s+/)[0];
+          return (
+            (recNorm && wRec && (recNorm.includes(wRec) || wRec.includes(recNorm))) ||
+            (recNorm && wSurname && wSurname.length >= 3 && recNorm.includes(wSurname))
+          );
+        }) || state.writsOfExecution[0];
       if (matchedWrit) {
         matchedWrit.accumulatedAccrued7641 = round2(
           matchedWrit.accumulatedAccrued7641 + entry.amount
@@ -1786,9 +1840,19 @@ export function advanceVirtual1CStateWithOperation(
     // Debit 76.41 -> alimony paid out!
     if (entry.debit === '76.41') {
       let toPay = entry.amount;
+      const debSub = (entry.debitSubconto || op.alimonyRecipientName || op.counterpartyName || '').trim();
+      const debNorm = normalizeSimpleEntityKey1C(debSub);
       const cleanInn = (op.alimonyRecipientInn || op.counterpartyInn || '').replace(/\D/g, '');
       const matchedWrit =
         (cleanInn ? state.writsOfExecution.find((w) => w.recipientInn === cleanInn) : undefined) ||
+        state.writsOfExecution.find((w) => {
+          const wRec = normalizeSimpleEntityKey1C(w.recipientName);
+          const wSurname = w.debtorEmployeeName.toLowerCase().replace(/ё/g, 'е').split(/\s+/)[0];
+          return (
+            (debNorm && wRec && (debNorm.includes(wRec) || wRec.includes(debNorm))) ||
+            (debNorm && wSurname && wSurname.length >= 3 && debNorm.includes(wSurname))
+          );
+        }) ||
         state.writsOfExecution[0];
       if (matchedWrit) {
         if (cleanInn && !matchedWrit.recipientInn) matchedWrit.recipientInn = cleanInn;
@@ -1798,6 +1862,14 @@ export function advanceVirtual1CStateWithOperation(
       }
       for (const s of state.openSettlements) {
         if (s.account !== '76.41' || s.remainingAmount < 0.01 || toPay < 0.01) continue;
+        const sNorm = normalizeSimpleEntityKey1C(s.counterpartyName);
+        if (debNorm && sNorm && !debNorm.includes(sNorm) && !sNorm.includes(debNorm)) {
+          const wSurname = matchedWrit?.debtorEmployeeName
+            .toLowerCase()
+            .replace(/ё/g, 'е')
+            .split(/\s+/)[0];
+          if (!wSurname || !sNorm.includes(wSurname)) continue;
+        }
         const used = Math.min(s.remainingAmount, toPay);
         s.remainingAmount = round2(s.remainingAmount - used);
         toPay = round2(toPay - used);

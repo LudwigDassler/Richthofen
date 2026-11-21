@@ -1841,12 +1841,26 @@ export function normalizeAccountToLeaf1C(
   if (clean === 'МЦ') {
     return /спецодежд|каск|перчат|сиз/i.test(lower) ? 'МЦ.02' : 'МЦ.04';
   }
-  if (clean === '90.01') return '90.01.1';
-  if (clean === '90.02') return '90.02.1';
-  if (clean === '90.07') return '90.07.1';
-  if (clean === '90.08') return '90.08.1';
-  if (clean === '99.01') return '99.01.1';
-  if (clean === '68.04') return '68.04.1';
+  if (clean === '90.01' || clean === '90.1') return '90.01.1';
+  if (clean === '90.02' || clean === '90.2') return '90.02.1';
+  if (clean === '90.3') return '90.03';
+  if (clean === '90.07' || clean === '90.7') return '90.07.1';
+  if (clean === '90.08' || clean === '90.8') return '90.08.1';
+  if (clean === '90.9') return '90.09';
+  if (clean === '91.1') return '91.01';
+  if (clean === '91.2') return '91.02';
+  if (clean === '91.9') return '91.09';
+  if (clean === '99.01' || clean === '99.1') return '99.01.1';
+  if (clean === '68.04' || clean === '68.4') return '68.04.1';
+  if (clean === '20.1') return '20.01';
+  if (clean === '51.01' || clean === '51.1') return '51';
+  if (clean === '50.1') return '50.01';
+  if (clean === '71.1') return '71.01';
+  if (clean === '73.1') return '73.01';
+  if (clean === '73.2') return '73.02';
+  if (clean === '73.3') return '73.03';
+  if (clean === '76.2') return '76.02';
+  if (clean === '76.9') return '76.09';
 
   if (GROUP_TO_DEFAULT_SUBACCOUNT_1C[clean]) {
     return GROUP_TO_DEFAULT_SUBACCOUNT_1C[clean];

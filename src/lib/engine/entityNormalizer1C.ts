@@ -435,6 +435,28 @@ export function extractCounterpartyFromText1C(text: string): string {
     }
   }
 
+  // 8. Named commercial banks (e.g., "в банке Санкт-Петербург", "в Банке ВТБ", "в Сбербанке")
+  const bankMatch = work.match(
+    /(?:^|[^\p{L}])(?:в\s+|от\s+|из\s+|у\s+)?Банк[ауеом]?\s+(?:[«"'„“]([^»"'”]{2,60})[»"'”]|([А-ЯЁ][А-Яа-яЁё0-9-]{1,35}))(?=$|[^\p{L}])/u
+  );
+  if (bankMatch) {
+    const bankTitle = (bankMatch[1] || bankMatch[2] || '').trim();
+    if (bankTitle && !/^(?:РФ|России|клиент)$/iu.test(bankTitle)) {
+      return `Банк «${bankTitle}»`;
+    }
+  }
+  if (/(?:^|[^\p{L}])(?:в\s+|от\s+)?Сбербанк[ауеом]?(?=$|[^\p{L}])/iu.test(work)) {
+    return 'ПАО СБЕРБАНК';
+  }
+
+  // 9. Public security agencies & self-regulatory associations (ОВО МВД РФ, Союз строителей, СРО)
+  const instMatch = work.match(
+    /(?:^|[^\p{L}])(ОВО\s+МВД(?:\s+РФ|\s+России)?|УВО\s+(?:ВНГ|МВД)(?:\s+РФ|\s+России)?|Союз\s+[а-яёА-ЯЁ-]{4,35}(?:\s+[«"'„“][^»"'”]+[»"'”])?|СРО(?:\s+[«"'„“][^»"'”]+[»"'”])?)(?=$|[^\p{L}])/iu
+  );
+  if (instMatch) {
+    return instMatch[1].replace(/\s+/g, ' ').trim();
+  }
+
   return '';
 }
 
@@ -515,6 +537,8 @@ export function extractExplicitCorrespondencesFromText1C(
     const rawDr = m[1].toUpperCase();
     const rawCr = m[2].toUpperCase();
     const tail = m[3] || '';
+    const prefixStart = Math.max(0, m.index - 32);
+    const prefix = clean.slice(prefixStart, m.index);
     const debit = normalizeAccountToLeaf1C(rawDr, 'debit', clean);
     const credit = normalizeAccountToLeaf1C(rawCr, 'credit', clean);
     if (debit && credit) {
@@ -523,7 +547,9 @@ export function extractExplicitCorrespondencesFromText1C(
       results.push({
         debit,
         credit,
-        amount: parseOptionalCorrespondenceAmount(tail),
+        amount:
+          parseOptionalCorrespondenceAmount(tail) ??
+          parseOptionalCorrespondenceAmount(prefix),
         isOffBalance: isOff,
         rawMatch: m[0].trim(),
       });

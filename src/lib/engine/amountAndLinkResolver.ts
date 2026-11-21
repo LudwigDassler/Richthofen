@@ -22,6 +22,7 @@ import {
   resolveUnpaidSupplier6001ByKeywords,
   stemsMatch1C,
 } from './virtual1CState';
+import { calculateOsvReport } from './osvCalculator';
 import { sanitizeBreakdown1C } from './textHygiene1C';
 
 function round2(n: number): number {
@@ -247,9 +248,33 @@ function resolveOperationAmountAndLinksCore(
       input.category === 'intangible_acquisition' ||
       input.category === 'bank_out' ||
       input.category === 'cash_out';
+    const GENERIC_FORWARD_STEMS = new Set([
+      'производств',
+      'работ',
+      'услуг',
+      'материал',
+      'товар',
+      'продукц',
+      'основн',
+      'средств',
+      'передач',
+      'оплат',
+      'расчет',
+      'объект',
+      'ремонт',
+      'строительн',
+      'строительств',
+      'помещен',
+      'заказчик',
+      'покупател',
+      'поставщик',
+      'начислен',
+      'получен',
+      'выполнен',
+    ]);
     const qStemsForward = extractKeywordStems1C(
       `${input.nomenclatureName || ''} ${input.description}`
-    );
+    ).filter((st) => !GENERIC_FORWARD_STEMS.has(st));
 
     if (qStemsForward.length > 0 || input.explicitColumnAmount >= 0.01) {
       for (let fIdx = 0; fIdx < futureOps.length; fIdx++) {
@@ -573,7 +598,26 @@ function resolveOperationAmountAndLinksCore(
           continue;
         }
         const rate = prev.interestRatePercent!;
-        const days = daysBetweenIsoDates(prev.date || input.date, input.date);
+        // Incremental interest period: start from the last prior loan_interest_accrual for this loan (or loan receipt date)
+        let startInterestDate = prev.date || input.date;
+        for (let k = idx + 1; k < input.priorOperations.length; k++) {
+          const mid = input.priorOperations[k];
+          if (
+            mid.includeInProcessing !== false &&
+            mid.category === 'loan_interest_accrual' &&
+            mid.date > startInterestDate &&
+            mid.date < input.date
+          ) {
+            if (
+              !cpNormLoan ||
+              !mid.counterpartyName ||
+              normalizeCounterpartyKey1C(mid.counterpartyName) === cpNormLoan
+            ) {
+              startInterestDate = mid.date;
+            }
+          }
+        }
+        const days = daysBetweenIsoDates(startInterestDate, input.date);
         const interestAmt =
           explicitMonths > 0
             ? round2((prev.amount * (rate / 100) * explicitMonths) / 12)
@@ -592,13 +636,15 @@ function resolveOperationAmountAndLinksCore(
             resolverLevel: 6,
             resolverLevelName: LEVEL_NAMES[6],
             summaryFormula: formulaStr,
-            steps: [`Расчёт процентов по договору займа (ПБУ 15/2008 / ПБУ 19/02): ${formulaStr}.`],
+            steps: [
+              `Расчёт процентов по договору кредита / займа за период ${formatRuDateShort(startInterestDate)} — ${formatRuDateShort(input.date)} (${days} дн.): ${formulaStr}.`,
+            ],
             sourceLinks: [
               {
                 opId: prev.id,
                 opNumber: idx + 1,
                 date: prev.date,
-                label: `Договор займа #${idx + 1} от ${formatRuDateShort(prev.date)} (${fmtMoney(prev.amount)} под ${rate}%)`,
+                label: `Договор кредита / займа #${idx + 1} от ${formatRuDateShort(prev.date)} (${fmtMoney(prev.amount)} под ${rate}%)`,
               },
             ],
           },
@@ -615,15 +661,23 @@ function resolveOperationAmountAndLinksCore(
       const rate = targetNote.interestRatePercent || 0;
       const lastDate = targetNote.lastInterestDate || targetNote.acquisitionDate || input.date;
       const extraDays = lastDate < input.date ? daysBetweenIsoDates(lastDate, input.date) : 0;
+      const mentionsInterestAccrual =
+        /начислен\p{L}*.*(?:%%|процент|доход)|с\s+учетом\s+(?:%%|процент)|включая\s+(?:%%|процент)/iu.test(
+          input.description
+        );
       const extraInterest =
-        rate > 0 && extraDays > 0 && /с\s+учетом\s+процент|включая\s+процент|начисленн\p{L}*\s+процент/iu.test(input.description)
+        rate > 0 && extraDays > 0 && mentionsInterestAccrual
           ? round2((principal * (rate / 100) * extraDays) / 365)
           : 0;
+      const includeInterestInEndorsement =
+        /с\s+учетом\s+(?:%%|процент)|включая\s+(?:%%|процент)/iu.test(input.description);
       // Check if endorsed to pay a specific supplier's open 60.01 debt
       const supplierDebt = linkedCpName
         ? resolveUnpaidSupplier6001ByKeywords(stateBefore, input.description, linkedCpName)
         : resolveUnpaidSupplier6001ByKeywords(stateBefore, input.description);
-      const transferValue = round2(principal + accruedAlready + extraInterest);
+      const transferValue = includeInterestInEndorsement
+        ? round2(principal + accruedAlready + extraInterest)
+        : round2(principal);
       const links: ResolverSourceLink1C[] = [
         {
           opId: targetNote.firstSeenOpId,
@@ -657,14 +711,16 @@ function resolveOperationAmountAndLinksCore(
           resolverLevel: 6,
           resolverLevelName: LEVEL_NAMES[6],
           summaryFormula:
-            accruedAlready + extraInterest > 0
-              ? `Номинал ${fmtMoney(principal)} + накопленные % ${fmtMoney(accruedAlready + extraInterest)} = ${fmtMoney(transferValue)}`
+            extraInterest > 0
+              ? `Номинал векселя ${fmtMoney(principal)}; доначислены %% за ${extraDays} дн. = ${fmtMoney(extraInterest)}`
               : `Учётная стоимость передаваемой ценной бумаги (${targetNote.name}) = ${fmtMoney(principal)}`,
           steps: [
             `Выбывает активная ценная бумага: ${targetNote.name} (номинал на счёте 58.02: ${fmtMoney(principal)}).`,
-            accruedAlready + extraInterest > 0
-              ? `Накопленный процентный доход на счёте 76.09: ${fmtMoney(accruedAlready + extraInterest)}.`
-              : 'Дополнительных накопленных процентов на дату выбытия нет — зачёт по номиналу.',
+            extraInterest > 0
+              ? `На дату выбытия начислен процентный доход за ${extraDays} дн.: ${fmtMoney(principal)} × ${rate}% × ${extraDays} / 365 = ${fmtMoney(extraInterest)} (Дт 76.09 Кт 91.01).`
+              : accruedAlready > 0
+                ? `Ранее накопленные проценты по бумаге на счёте 76.09: ${fmtMoney(accruedAlready)}.`
+                : 'Дополнительных накопленных процентов на дату выбытия нет — зачёт по номиналу.',
             'После выбытия данная ценная бумага помечается закрытой в модели 1С и исключается из последующих начислений процентов.',
           ],
           sourceLinks: links,
@@ -682,6 +738,85 @@ function resolveOperationAmountAndLinksCore(
     input.category.startsWith('purchase_')
   ) {
     if (input.category === 'bank_out' || input.category === 'cash_out') {
+      // Check payment for acquired promissory notes / securities (Дт 76.09 Кт 51)
+      if (/за\s+(?:приобретен\p{L}*\s+|получен\p{L}*\s+)?(?:вексел|ценн\p{L}*\s+бумаг)/iu.test(input.description)) {
+        for (let idx = input.priorOperations.length - 1; idx >= 0; idx--) {
+          const prev = input.priorOperations[idx];
+          if (
+            prev.includeInProcessing !== false &&
+            prev.category === 'financial_investment' &&
+            prev.amount >= 0.01 &&
+            prev.entries.some((e) => e.credit === '76.09')
+          ) {
+            return {
+              resolvedAmount: round2(prev.amount),
+              amountMode: 'from_related_doc',
+              counterpartyName: linkedCpName || prev.counterpartyName,
+              counterpartyInn: linkedCpInn || prev.counterpartyInn,
+              counterpartyKpp: linkedCpKpp || prev.counterpartyKpp,
+              contractName: linkedContract || prev.contractName,
+              vatRate: 0,
+              vatRule: 'none',
+              step01Breakdown: {
+                resolverLevel: 3,
+                resolverLevelName: LEVEL_NAMES[3],
+                summaryFormula: `Кредиторская задолженность за приобретённые ценные бумаги (Кт 76.09) = ${fmtMoney(prev.amount)}`,
+                steps: [
+                  `Найдена предшествующая операция приобретения ценных бумаг #${idx + 1} от ${formatRuDateShort(prev.date)} у «${prev.counterpartyName || 'продавца ЦБ'}» на сумму ${fmtMoney(prev.amount)} (счёт 76.09).`,
+                ],
+                sourceLinks: [
+                  {
+                    opId: prev.id,
+                    opNumber: idx + 1,
+                    date: prev.date,
+                    label: `Приобретение ЦБ #${idx + 1} от ${formatRuDateShort(prev.date)} (${fmtMoney(prev.amount)})`,
+                  },
+                ],
+              },
+            };
+          }
+        }
+      }
+
+      // Check buyer advance refund ("возврат аванса покупателю / заказчику") from open 62.02!
+      if (/возврат\p{L}*.*(?:аванс|предоплат)|возвращ\p{L}*.*(?:аванс|предоплат)/iu.test(input.description)) {
+        const cpNormRef = normalizeCounterpartyKey1C(linkedCpName);
+        const open6202 = stateBefore.openSettlements.filter(
+          (s) =>
+            s.account === '62.02' &&
+            s.remainingAmount >= 0.01 &&
+            (!cpNormRef || normalizeCounterpartyKey1C(s.counterpartyName) === cpNormRef)
+        );
+        if (open6202.length > 0) {
+          const total6202 = round2(open6202.reduce((acc, s) => acc + s.remainingAmount, 0));
+          const first = open6202[0];
+          return {
+            resolvedAmount: total6202,
+            amountMode: 'from_related_doc',
+            counterpartyName: linkedCpName || first.counterpartyName,
+            counterpartyInn: linkedCpInn || first.counterpartyInn,
+            counterpartyKpp: linkedCpKpp || first.counterpartyKpp,
+            contractName: linkedContract || first.contractName,
+            step01Breakdown: {
+              resolverLevel: 3,
+              resolverLevelName: LEVEL_NAMES[3],
+              summaryFormula: `Незачтённый остаток аванса покупателя по Кт 62.02 = ${fmtMoney(total6202)}`,
+              steps: [
+                `Возврат остатка предоплаты покупателю «${first.counterpartyName}» по кредитовому сальдо счёта 62.02 (${fmtMoney(total6202)}).`,
+              ],
+              sourceLinks: open6202.map((s) => ({
+                opId: s.originOpId,
+                opNumber: s.originOpNumber,
+                date: s.originDate,
+                label: s.originOpNumber
+                  ? `Аванс покупателя #${s.originOpNumber} от ${formatRuDateShort(s.originDate)} (${fmtMoney(s.remainingAmount)})`
+                  : `База 1С (${s.counterpartyName})`,
+              })),
+            },
+          };
+        }
+      }
+
       const unpaid = resolveUnpaidSupplier6001ByKeywords(
         stateBefore,
         input.description,
@@ -763,12 +898,120 @@ function resolveOperationAmountAndLinksCore(
     }
   }
 
+  if (input.category === 'employee_settlement_73' && /подар[ока]/iu.test(input.description)) {
+    const osv41 = calculateOsvReport({
+      db1C: input.db1C,
+      operations: input.priorOperations,
+      dateTo: input.date || undefined,
+      includeQueuedOperations: true,
+    });
+    const row41 = osv41.leafRows.find((r) => r.code.startsWith('41.') && r.endDebit >= 0.01);
+    if (row41) {
+      return {
+        resolvedAmount: round2(row41.endDebit),
+        amountMode: 'from_stock_balance',
+        vatRate: 0,
+        vatRule: 'none',
+        step01Breakdown: {
+          resolverLevel: 4,
+          resolverLevelName: LEVEL_NAMES[4],
+          summaryFormula: `Себестоимость подарков на счёте ${row41.code} (без НДС) = ${fmtMoney(row41.endDebit)}`,
+          steps: [
+            `Сумма списания подарков определена по остатку счёта ${row41.code} на дату вручения (${fmtMoney(row41.endDebit)}).`,
+          ],
+          sourceLinks: [],
+        },
+      };
+    }
+  }
+
   if (
     input.category === 'bank_in' ||
     input.category === 'cash_in' ||
     input.category === 'sale_goods' ||
     input.category === 'sale_services'
   ) {
+    // Check receipt of accrued promissory-note / bank interest receivable on 76.09!
+    if (
+      input.category === 'bank_in' &&
+      (/(?:%%|процент\p{L}*).*(?:от\s+банк|вексел|ценн\p{L}*\s+бумаг)/iu.test(input.description) ||
+        /(?:от\s+банк\p{L}*|вексел|ценн\p{L}*\s+бумаг).*(?:%%|процент\p{L}*)/iu.test(input.description))
+    ) {
+      const osv7609 = calculateOsvReport({
+        db1C: input.db1C,
+        operations: input.priorOperations,
+        dateTo: input.date || undefined,
+        includeQueuedOperations: true,
+      });
+      const row7609 = osv7609.leafRows.find((r) => r.code === '76.09');
+      const netDebit7609 = row7609 ? round2(row7609.endDebit - row7609.endCredit) : 0;
+      const lastNoteOp = [...input.priorOperations]
+        .reverse()
+        .find((p) => p.category === 'financial_investment' && p.counterpartyName);
+      if (netDebit7609 >= 0.01) {
+        return {
+          resolvedAmount: netDebit7609,
+          amountMode: 'from_account_balance',
+          counterpartyName: linkedCpName || lastNoteOp?.counterpartyName || 'Банк-эмитент',
+          counterpartyInn: linkedCpInn || lastNoteOp?.counterpartyInn,
+          counterpartyKpp: linkedCpKpp || lastNoteOp?.counterpartyKpp,
+          vatRate: 0,
+          vatRule: 'none',
+          step01Breakdown: {
+            resolverLevel: 5,
+            resolverLevelName: LEVEL_NAMES[5],
+            summaryFormula: `Дебиторская задолженность по начисленным процентам (Дт 76.09) = ${fmtMoney(netDebit7609)}`,
+            steps: [
+              `Поступление начисленных ранее процентов по векселям закрывает открытое дебетовое сальдо счёта 76.09 (${fmtMoney(netDebit7609)}).`,
+            ],
+            sourceLinks: [],
+          },
+        };
+      }
+    }
+
+    // If bank_in is a 100% advance ("получена 100% предоплата / аванс") referencing a prior invoice/contract_event!
+    if (
+      (input.category === 'bank_in' || input.category === 'cash_in') &&
+      /аванс|предоплат/iu.test(input.description)
+    ) {
+      const cpNormAdv = normalizeCounterpartyKey1C(linkedCpName);
+      for (let idx = input.priorOperations.length - 1; idx >= 0; idx--) {
+        const prev = input.priorOperations[idx];
+        if (prev.includeInProcessing === false || prev.amount < 0.01) continue;
+        if (
+          prev.category === 'contract_event' &&
+          cpNormAdv &&
+          normalizeCounterpartyKey1C(prev.counterpartyName) === cpNormAdv
+        ) {
+          return {
+            resolvedAmount: round2(prev.amount),
+            amountMode: 'from_related_doc',
+            counterpartyName: linkedCpName || prev.counterpartyName,
+            counterpartyInn: linkedCpInn || prev.counterpartyInn,
+            counterpartyKpp: linkedCpKpp || prev.counterpartyKpp,
+            contractName: linkedContract || prev.contractName,
+            step01Breakdown: {
+              resolverLevel: 3,
+              resolverLevelName: LEVEL_NAMES[3],
+              summaryFormula: `100% предоплата по счёту / договору #${idx + 1} от ${formatRuDateShort(prev.date)} = ${fmtMoney(prev.amount)}`,
+              steps: [
+                `Найдена предшествующая запись о выставленном счёте / договоре с «${prev.counterpartyName}» на сумму ${fmtMoney(prev.amount)}.`,
+              ],
+              sourceLinks: [
+                {
+                  opId: prev.id,
+                  opNumber: idx + 1,
+                  date: prev.date,
+                  label: `Счёт / договор #${idx + 1} от ${formatRuDateShort(prev.date)} (${fmtMoney(prev.amount)})`,
+                },
+              ],
+            },
+          };
+        }
+      }
+    }
+
     const targetAcc =
       input.category === 'bank_in' || input.category === 'cash_in' ? '62.01' : '62.02';
     const cpNorm = normalizeCounterpartyKey1C(linkedCpName);
@@ -797,7 +1040,7 @@ function resolveOperationAmountAndLinksCore(
           summaryFormula: `Сумма по открытому расчёту с покупателем (счёт ${targetAcc}) = ${fmtMoney(total)}`,
           steps: [
             targetAcc === '62.01'
-              ? `Покупатель «${first.counterpartyName}» погашает дебиторскую задолженность за ранее отгруженную продукцию / услуги по счёту 62.01 (${fmtMoney(total)}).`
+              ? `Покупатель «${first.counterpartyName}» погашает дебиторскую задолженность за ранее отгруженную продукцию / ОС / услуги по счёту 62.01 (${fmtMoney(total)}).`
               : `Отгрузка выполняется в счёт полученной ранее предоплаты от «${first.counterpartyName}» на счёте 62.02 (${fmtMoney(total)}).`,
           ],
           sourceLinks: openBuyer.map((s) => ({
@@ -839,10 +1082,31 @@ function resolveOperationAmountAndLinksCore(
       input.category === 'bank_in' ||
       input.category === 'cash_in';
 
+    const GENERIC_FWD_3B = new Set([
+      'производств',
+      'работ',
+      'услуг',
+      'материал',
+      'товар',
+      'продукц',
+      'основн',
+      'средств',
+      'передач',
+      'оплат',
+      'расчет',
+      'объект',
+      'ремонт',
+      'строительн',
+      'строительств',
+      'помещен',
+      'заказчик',
+      'покупател',
+      'поставщик',
+    ]);
     const cpNormFwd = normalizeCounterpartyKey1C(linkedCpName);
     const qStemsFwd = extractKeywordStems1C(
       `${input.nomenclatureName || ''} ${input.description}`
-    );
+    ).filter((st) => !GENERIC_FWD_3B.has(st));
 
     const candidateFutureMatches: Array<{ fut: QueuedOperation; futNum: number; sharedCount: number }> = [];
     for (let fIdx = 0; fIdx < futureOps.length; fIdx++) {
@@ -1050,6 +1314,41 @@ function resolveOperationAmountAndLinksCore(
   // (Note: 68/69/70/10/41/43 exact subaccount balances are also finalized in postingEngine with full ledger precision)
   // ============================================================================
   if (input.category === 'alimony_payout') {
+    const isMultiRecipientAlimony =
+      /\sи\s+супруг|по\s+исполнительн\p{L}*\s+листам|всем\s+получател/iu.test(input.description);
+    if (isMultiRecipientAlimony) {
+      const open7641All = stateBefore.openSettlements.filter(
+        (s) => s.account === '76.41' && s.remainingAmount >= 0.01
+      );
+      const sumAll = round2(open7641All.reduce((acc, s) => acc + s.remainingAmount, 0));
+      if (sumAll >= 0.01) {
+        const recipientsList = Array.from(
+          new Set(open7641All.map((s) => s.counterpartyName).filter(Boolean))
+        ).join('; ');
+        return {
+          resolvedAmount: sumAll,
+          amountMode: 'from_account_balance',
+          counterpartyName: recipientsList || input.counterpartyName,
+          vatRate: 0,
+          vatRule: 'none',
+          step01Breakdown: {
+            resolverLevel: 5,
+            resolverLevelName: LEVEL_NAMES[5],
+            summaryFormula: `Суммарное кредитовое сальдо счёта 76.41 на ${formatRuDateShort(input.date)} = ${fmtMoney(sumAll)}`,
+            steps: [
+              `Перечисление удержанных алиментов по всем открытым исполнительным листам на счёте 76.41 (${recipientsList}): ${fmtMoney(sumAll)}.`,
+            ],
+            sourceLinks: open7641All.map((s) => ({
+              opId: s.originOpId,
+              opNumber: s.originOpNumber,
+              date: s.originDate,
+              label: `Удержание алиментов #${s.originOpNumber ?? '?'} (${s.counterpartyName}: ${fmtMoney(s.remainingAmount)})`,
+            })),
+          },
+        };
+      }
+    }
+
     const alim = resolveAlimonyPayable7641(
       stateBefore,
       input.counterpartyName,

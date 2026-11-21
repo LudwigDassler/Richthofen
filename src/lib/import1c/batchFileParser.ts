@@ -258,6 +258,9 @@ export interface ExtractedFreeTextRequisites {
   alimonyRecipientHint?: string;
   alimonyRatePercentHint?: number;
   alimonyShareLabelHint?: string;
+  alimonyFixedAmountHint?: number;
+  writStartDateHint?: string;
+  hireStartDateHint?: string;
   financialNotesSummaryHint?: string;
   financialNotesListHint?: ParsedFinancialNoteItem1C[];
   periodicPaymentAmountHint?: number;
@@ -267,27 +270,52 @@ export interface ExtractedFreeTextRequisites {
   explicitCorrespondences?: ExplicitCorrespondenceHint1C[];
 }
 
+export function scrubNonMonetaryNumbersForInlineSum(text: string): string {
+  return (text ?? '')
+    .replace(/\b\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?\b/g, ' ')
+    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' ')
+    .replace(/\b\d{10,12}\s*\/\s*\d{9}\b/g, ' ')
+    .replace(
+      /(?:инн|кпп|огрн|окпо|бик|р\/сч?|к\/сч?|расч[её]тн\p{L}*\s+сч[её]т|корр?(?:еспондентск\p{L}*)?\s+сч[её]т|уведомлени\p{L}*|дог(?:овор\p{L}*)?|сч[её]т(?:-фактур\p{L}*)?|п\/п|плат[её]жн\p{L}*\s+поручен\p{L}*|накладн\p{L}*|торг-12|акт\p{L}*|исп(?:олнительн\p{L}*)?\s+лист\p{L}*)[\s.:№#-]*[А-Яа-яA-Za-z0-9/_-]{1,24}/giu,
+      ' '
+    )
+    .replace(/№\s*[А-Яа-яA-Za-z0-9/_-]+/gu, ' ')
+    .replace(/(?:не\s+)?превышающ\p{L}*\s+\d[\d\s\u00A0]*(?:[.,]\d+)?\s*(?:₽|руб\.?|р\.?)/giu, ' ')
+    .replace(/(?:дебет|кредит|д-?т|к-?т|(?<=[\s(])д|(?<=[\s,;])к)\s*\d{2}(?:\.[0-9А-ЯЁA-Z]{1,3}){0,2}/giu, ' ')
+    .replace(/\b\d{9,20}\b/g, ' ')
+    .replace(/\d+(?:[.,]\d+)?\s*%/g, ' ');
+}
+
 export function isNonPostingManagementOrPolicyText(text: string): boolean {
   const clean = (text ?? '').toLowerCase().replace(/ё/g, 'е');
   if (
-    /принят\p{L}*\s+на\s+работу|прием\s+на\s+работу|оформлен\p{L}*\s+в\s+штат|поступил\p{L}*\s+исполнительн\p{L}*\s+лист/iu.test(
-      clean
-    )
-  ) {
-    return true;
-  }
-  if (
-    /(?:утвержден|принят|установлен|издан)\p{L}*.*(?:учетн\p{L}*\s+политик|лимит\s+(?:остатка\s+)?касс|штатн\p{L}*\s+расписан|приказ\s+об\s+учетн)/iu.test(
-      clean
-    )
-  ) {
-    return true;
-  }
-  if (
-    /(?:заключен|подписан|пролонгирован)\p{L}*\s+договор|(?:выставлен|получен|поступил)\p{L}*\s+счет\s+на\s+оплат/iu.test(
+    /принят\p{L}*\s+на\s+работу|прием\s+на\s+работу|оформлен\p{L}*\s+в\s+штат|переведен\p{L}*\s+на\s+должност|кадров\p{L}*\s+перевод|уведомлени\p{L}*.*имущественн\p{L}*\s+вычет|поступил\p{L}*\s+исполнительн\p{L}*\s+лист|исполнительн\p{L}*\s+лист.*(?:в\s+пользу|удержан|алимент)/iu.test(
       clean
     ) &&
-    !/оплачен|перечислен|списан\p{L}*\s+с\s+р\/с|поступил\p{L}*\s+(?:товар|материал|оборудован|деньг|денежн|аванс|оплат)|оказан\p{L}*\s+услуг|выполнен\p{L}*\s+работ|акт\s+(?:оказанных|выполненных)|товарн\p{L}*\s+накладн|торг-12|(?:^|[^\p{L}])упд(?=$|[^\p{L}])/iu.test(
+    !/перечислен|выплачен|уплачен|списан.*алимент/iu.test(clean)
+  ) {
+    return true;
+  }
+  if (
+    /(?:утвержден|принят|установлен|издан)\p{L}*.*(?:учетн\p{L}*\s+политик|лимит\s+(?:остатка\s+)?касс|штатн\p{L}*\s+расписан|приказ\s+об\s+учетн)|выдана\s+доверенность|отрази\p{L}*\s+незавер[шщ]енн\p{L}*\s+производств|инвентаризаци\p{L}*\s+нзп/iu.test(
+      clean
+    )
+  ) {
+    return true;
+  }
+  if (
+    /(?:сформировать|сформирован\p{L}*)\s+(?:осв|оборотно-сальдов|бухгалтерск\p{L}*\s+отчетност)|закрыть\s+период/iu.test(
+      clean
+    ) &&
+    !/результат\p{L}*\s+за\s+месяц|закрытие\s+(?:месяца|счет)/iu.test(clean)
+  ) {
+    return true;
+  }
+  if (
+    /(?:заключен|подписан|пролонгирован)\p{L}*\s+договор|(?:выставлен|выписан|выписал|получен|поступил)\p{L}*\s+счет(?!-фактур)/iu.test(
+      clean
+    ) &&
+    !/оплачен|перечислен|списан\p{L}*\s+с\s+р\/с|(?:получен|поступил)\p{L}*.*(?:\d+\s*%\s*)?(?:товар|материал|оборудован|деньг|денежн|аванс|предоплат|оплат)|оказан\p{L}*\s+услуг|выполнен\p{L}*\s+работ|(?<=^|[^\p{L}])акт(?=$|[^\p{L}])|товарн\p{L}*\s+накладн|торг-12|(?:^|[^\p{L}])упд(?=$|[^\p{L}])/iu.test(
       clean
     )
   ) {
@@ -596,10 +624,17 @@ export function inferVatFromTextAndCell(
 
 export function extractRequisitesFromFreeText(
   text: string,
-  reportingYear?: number
+  reportingYear?: number,
+  explicitColumnAmount?: number
 ): ExtractedFreeTextRequisites {
-  const innMatch = text.match(/ИНН[\s.:№-]*(\d{10}|\d{12})\b/i);
-  const kppMatch = text.match(/КПП[\s.:№-]*(\d{9})\b/i);
+  const slashInnKpp = text.match(/(?:^|[^\d])(\d{10}|\d{12})\s*\/\s*(\d{9})(?=$|[^\d])/);
+  const innMatch =
+    text.match(/ИНН[\s.:№-]*(\d{10}|\d{12})\b/i) ||
+    (slashInnKpp ? [slashInnKpp[0], slashInnKpp[1]] : null) ||
+    text.match(/\((\d{10}|\d{12})\)/);
+  const kppMatch =
+    text.match(/КПП[\s.:№-]*(\d{9})\b/i) ||
+    (slashInnKpp ? [slashInnKpp[0], slashInnKpp[2]] : null);
   const rsMatch = text.match(
     /(?:р\/сч?|расч[её]тн\p{L}*\s+сч[её]т|казначейск\p{L}*\s+сч[её]т)[\s.:№-]*(\d{20})\b/iu
   );
@@ -651,9 +686,13 @@ export function extractRequisitesFromFreeText(
 
   let contractNumber = '';
   let contractDate = '';
-  const ctrMatch = text.match(
-    /договор[ауом]?\s*(?:поставки|подряда|аренды|оказания услуг|купли-продажи)?\s*№\s*([А-Яа-яA-Za-z0-9/_-]+)(?:\s*от\s*(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?|\d{4}-\d{2}-\d{2}))?/i
-  );
+  const ctrMatch =
+    text.match(
+      /(?:договор[ауом]?|дог\.)\s*(?:поставки|подряда|аренды|оказания\s+услуг|купли-продажи)?\s*№\s*([А-Яа-яA-Za-z0-9/_-]+)(?:\s*от\s*(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?|\d{4}-\d{2}-\d{2}))?/iu
+    ) ||
+    text.match(
+      /(?:договор[ауом]?|дог\.)\s*([0-9][А-Яа-яA-Za-z0-9/_-]*)(?:\s*от\s*(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?|\d{4}-\d{2}-\d{2}))?/iu
+    );
   if (ctrMatch) {
     contractNumber = ctrMatch[1].trim();
     if (ctrMatch[2]) {
@@ -671,34 +710,62 @@ export function extractRequisitesFromFreeText(
     docNumber = docMatch[1].trim();
   }
 
-  // Extract quantity, nomenclature & unitPrice from text:
-  // Supports both "133 шт по 9300 руб" AND "226 шт Панель из ПВХ и МДФ по цене без НДС 1 500 руб."
+  // Extract quantity, nomenclature & unitPrice from text (including multi-item qty*price lists!)
   let quantity: number | undefined;
   let unitPrice: number | undefined;
   let nomenclatureHint: string | undefined;
   let employeeHint: string | undefined;
   let productionObjectHint: string | undefined;
+  let multiItemListTotal: number | undefined;
+  let multiItemListNote: string | undefined;
+
+  const multiQtyPriceRegex =
+    /(\d+(?:[.,]\d+)?)\s*(тыс\.?\s*шт\.?|шт\.?|ед\.?|компл\.?|уп(?:ак)?\.?|рул\.?|пач\p{L}*\.?|меш\p{L}*\.?|бан\p{L}*\.?|кор\p{L}*\.?|лист\p{L}*\.?|п\.?\s*м\.?|пог\.?\s*м\.?|кв\.?\s*м\.?|куб\.?\s*м\.?|м2|м3|кг|т(?=$|[\s.,;)])|тонн\p{L}*|л)(?:\s+[А-Яа-яЁёA-Za-z0-9«»"'-]+(?:\s+[А-Яа-яЁёA-Za-z0-9«»"'-]+){0,5}?)?\s+(?:по\s+цене|по\s+стоимости|по|[*×xх])(?:\s+(?:без\s*(?:уч[её]та\s*)?ндс(?:\s*\d+\s*%)?|с\s*(?:уч[её]том\s*)?ндс(?:\s*\d+\s*%)?|в\s*т\.?\s*ч\.?\s*ндс(?:\s*\d+\s*%)?|вкл\.?\s*ндс|за\s+[а-яё.]+))*\s*(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.?)(?:\/[а-яё.]+)?/giu;
+  const allQtyPricePairs = Array.from(text.matchAll(multiQtyPriceRegex))
+    .map((m) => {
+      const rawQ = parseRussianNumber(m[1]);
+      const unitStr = (m[2] || '').toLowerCase();
+      const q = /^тыс/.test(unitStr) ? rawQ * 1000 : rawQ;
+      const p = parseRussianNumber(m[3]);
+      return { q, p, prod: Math.round((q * p + Number.EPSILON) * 100) / 100 };
+    })
+    .filter((x) => x.q > 0 && x.p > 0);
+
+  if (allQtyPricePairs.length >= 2) {
+    multiItemListTotal =
+      Math.round((allQtyPricePairs.reduce((s, x) => s + x.prod, 0) + Number.EPSILON) * 100) / 100;
+    multiItemListNote = `Суммированы позиции ТМЦ из условия: ${allQtyPricePairs
+      .map((x) => `${x.q} × ${x.p.toLocaleString('ru-RU')} ₽`)
+      .join(' + ')} = ${multiItemListTotal.toLocaleString('ru-RU', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })} ₽`;
+  }
 
   const qtyPriceAdjacentMatch = text.match(
-    /(\d+(?:[.,]\d+)?)\s*(?:шт\.?|ед\.?|компл\.?|упак\.?|рул\.?|п\.?\s*м\.?|кв\.?\s*м\.?|м2|м3|кг|т|тонн\p{L}*|л)\s*(?:по\s*(?:цене\s*)?(?:(?:без\s*(?:уч[её]та\s*)?ндс(?:\s*\d+\s*%)?|с\s*(?:уч[её]том\s*)?ндс(?:\s*\d+\s*%)?|в\s*т\.?\s*ч\.?\s*ндс(?:\s*\d+\s*%)?)\s*)?|[*×xх]\s*)(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.?)/iu
+    /(\d+(?:[.,]\d+)?)\s*(тыс\.?\s*шт\.?|шт\.?|ед\.?|компл\.?|уп(?:ак)?\.?|рул\.?|пач\p{L}*\.?|меш\p{L}*\.?|бан\p{L}*\.?|п\.?\s*м\.?|кв\.?\s*м\.?|м2|м3|кг|т(?=$|[\s.,;)])|тонн\p{L}*|л)\s*(?:по\s*(?:цене\s*)?(?:(?:без\s*(?:уч[её]та\s*)?ндс(?:\s*\d+\s*%)?|с\s*(?:уч[её]том\s*)?ндс(?:\s*\d+\s*%)?|в\s*т\.?\s*ч\.?\s*ндс(?:\s*\d+\s*%)?|вкл\.?\s*ндс)\s*)?|[*×xх]\s*)(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.?)/iu
   );
   const qtyItemPriceMatch = !qtyPriceAdjacentMatch
     ? text.match(
-        /(\d+(?:[.,]\d+)?)\s*(?:шт\.?|ед\.?|компл\.?|упак\.?|рул\.?|п\.?\s*м\.?|кв\.?\s*м\.?|м2|м3|кг|т|тонн\p{L}*|л)\s+([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{1,70}?)\s+(?:по\s+цене|по\s+стоимости|по)(?:\s+(?:без\s*(?:уч[её]та\s*)?ндс(?:\s*\d+\s*%)?|с\s*(?:уч[её]том\s*)?ндс(?:\s*\d+\s*%)?|в\s*т\.?\s*ч\.?\s*ндс(?:\s*\d+\s*%)?|за\s+(?:шт|ед)\.?))*\s*(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.?)/iu
+        /(\d+(?:[.,]\d+)?)\s*(тыс\.?\s*шт\.?|шт\.?|ед\.?|компл\.?|уп(?:ак)?\.?|рул\.?|п\.?\s*м\.?|кв\.?\s*м\.?|м2|м3|кг|т(?=$|[\s.,;)])|тонн\p{L}*|л)\s+([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{1,70}?)\s+(?:по\s+цене|по\s+стоимости|по)(?:\s+(?:без\s*(?:уч[её]та\s*)?ндс(?:\s*\d+\s*%)?|с\s*(?:уч[её]том\s*)?ндс(?:\s*\d+\s*%)?|в\s*т\.?\s*ч\.?\s*ндс(?:\s*\d+\s*%)?|вкл\.?\s*ндс|за\s+(?:шт|ед)\.?))*\s*(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.?)/iu
       )
     : null;
 
-  if (qtyPriceAdjacentMatch) {
-    const q = parseRussianNumber(qtyPriceAdjacentMatch[1]);
-    const p = parseRussianNumber(qtyPriceAdjacentMatch[2]);
+  if (allQtyPricePairs.length >= 2) {
+    // Keep quantity/unitPrice undefined so single-item qty*price doesn't overwrite multiSumTotal!
+  } else if (qtyPriceAdjacentMatch) {
+    const rawQ = parseRussianNumber(qtyPriceAdjacentMatch[1]);
+    const q = /^тыс/i.test(qtyPriceAdjacentMatch[2]) ? rawQ * 1000 : rawQ;
+    const p = parseRussianNumber(qtyPriceAdjacentMatch[3]);
     if (q > 0) quantity = q;
     if (p > 0) unitPrice = p;
   } else if (qtyItemPriceMatch) {
-    const q = parseRussianNumber(qtyItemPriceMatch[1]);
-    const rawBetweenItem = qtyItemPriceMatch[2]
+    const rawQ = parseRussianNumber(qtyItemPriceMatch[1]);
+    const q = /^тыс/i.test(qtyItemPriceMatch[2]) ? rawQ * 1000 : rawQ;
+    const rawBetweenItem = qtyItemPriceMatch[3]
       .replace(/^(?:продукци[яию]|товар[аыов]*|материал[аыов]*|издели[яй])\s+/iu, '')
       .trim();
-    const p = parseRussianNumber(qtyItemPriceMatch[3]);
+    const p = parseRussianNumber(qtyItemPriceMatch[4]);
     if (q > 0) quantity = q;
     if (p > 0) unitPrice = p;
     if (rawBetweenItem.length >= 2) {
@@ -706,10 +773,11 @@ export function extractRequisitesFromFreeText(
     }
   } else {
     const qtyOnlyMatch = text.match(
-      /(?:в\s+кол(?:-ве|ичестве)\s*)?(\d+(?:[.,]\d+)?)\s*(?:шт\.?|ед\.?|компл\.?|упак\.?|рул\.?|кв\.?\s*м\.?|м2|м3|кг|тонн\p{L}*)(?=$|[^\p{L}])/iu
+      /(?:в\s+кол(?:-ве|ичестве)\s*)?(\d+(?:[.,]\d+)?)\s*(тыс\.?\s*шт\.?|шт\.?|ед\.?|компл\.?|уп(?:ак)?\.?|рул\.?|кв\.?\s*м\.?|м2|м3|кг|тонн\p{L}*)(?=$|[^\p{L}])/iu
     );
     if (qtyOnlyMatch) {
-      const q = parseRussianNumber(qtyOnlyMatch[1]);
+      const rawQ = parseRussianNumber(qtyOnlyMatch[1]);
+      const q = /^тыс/i.test(qtyOnlyMatch[2]) ? rawQ * 1000 : rawQ;
       if (q > 0) quantity = q;
     }
   }
@@ -850,13 +918,14 @@ export function extractRequisitesFromFreeText(
     }
   }
 
-  // F. HR hiring / employment order: e.g. "Принят на работу Иванов И.И. на должность прораба с окладом 80 000 руб."
+  // F. HR hiring / transfer / employment order
   let employeePositionHint: string | undefined;
   let monthlySalaryHint: number | undefined;
   let usefulLifeMonthsHint: number | undefined;
+  let hireStartDateHint: string | undefined;
 
   const hireMatch = text.match(
-    /(?:[Пп]ринят[аы]?\s+на\s+работу|[Пп]ри[её]м\s+на\s+работу|[Оо]формлен[аы]?\s+в\s+штат|[Зз]аключ[её]н\s+трудовой\s+договор\s+с)\s+(?:(?:сотрудник[аом]?|работник[аом]?)\s+)?(?:([а-яё-]{3,25}(?:\s+[а-яё-]{3,25})?)\s+)?([А-ЯЁ][а-яё]+(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.?|[А-ЯЁ][а-яё.]+)){0,2})/u
+    /(?:[Пп]ринят[аы]?\s+на\s+работу|[Пп]ри[её]м\s+на\s+работу|[Оо]формлен[аы]?\s+в\s+штат|[Зз]аключ[её]н\s+трудовой\s+договор\s+с)(?:\s+с\s+\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)?\s+(?:(?:сотрудник[аом]?|работник[аом]?)\s+)?(?:([а-яё-]{3,25}(?:\s+[а-яё-]{3,25})?)\s+)?([А-ЯЁ][а-яё]+(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.?|[А-ЯЁ][а-яё.]+)){0,2})/u
   );
   if (hireMatch && hireMatch[2]) {
     const preRole = (hireMatch[1] ?? '').trim();
@@ -871,6 +940,26 @@ export function extractRequisitesFromFreeText(
       .trim();
     if (candEmp.length >= 2) {
       employeeHint = candEmp;
+    }
+  }
+  const transferMatch = !hireMatch
+    ? text.match(
+        /(?:сотрудник|работник)?\s*([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)?)\s+переведен\p{L}*\s+на\s+должност/iu
+      )
+    : null;
+  if (transferMatch && transferMatch[1]) {
+    employeeHint = normalizeInflectedPersonPhrase(transferMatch[1].trim());
+  }
+
+  if (/принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу/iu.test(text)) {
+    const hireDateFromText = text.match(
+      /(?:принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу)[^.;]{0,40}?\bс\s*(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)/iu
+    );
+    if (hireDateFromText && hireDateFromText[1]) {
+      hireStartDateHint = normalizeOperationDateToReportingYear(
+        hireDateFromText[1],
+        reportingYear ?? DEFAULT_REPORTING_YEAR
+      );
     }
   }
 
@@ -907,6 +996,8 @@ export function extractRequisitesFromFreeText(
   let alimonyRecipientHint: string | undefined;
   let alimonyRatePercentHint: number | undefined;
   let alimonyShareLabelHint: string | undefined;
+  let alimonyFixedAmountHint: number | undefined;
+  let writStartDateHint: string | undefined;
 
   const isWritText =
     /исполнительн\p{L}*\s+лист/iu.test(text) &&
@@ -924,7 +1015,7 @@ export function extractRequisitesFromFreeText(
       employeeHint = normalizeInflectedPersonPhrase(debtorMatch[1]);
     }
     const benefitMatch = text.match(
-      /в\s+пользу\s+([А-Яа-яЁё][А-Яа-яЁё.\s-]{2,45}?)(?=\s*(?:[,;()]|\.{2,}|$|\s+в\s+размер|\s+на\s+содержан|\s+по\s+|\s+от\s+|\s+инн|\s+\d))/iu
+      /в\s+пользу\s+([А-Яа-яЁё][А-Яа-яЁё.\s-]{2,45}?)(?=\s*(?:[,;()]|\.{2,}|$|\s+в\s+размер|\s+в\s+тверд|\s+ежемесячн|\s+на\s+содержан|\s+по\s+|\s+от\s+|\s+инн|\s+\d))/iu
     );
     if (benefitMatch && benefitMatch[1]) {
       const cleanedRec = benefitMatch[1].replace(/\.+$/, '').trim();
@@ -933,8 +1024,29 @@ export function extractRequisitesFromFreeText(
       alimonyRecipientHint = `Получатель алиментов (${employeeHint})`;
     }
 
+    const writStartM = text.match(
+      /(?:в\s+период\s+с|начиная\s+с|удерживать\s+с)\s*(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)/iu
+    );
+    if (writStartM && writStartM[1]) {
+      writStartDateHint = normalizeOperationDateToReportingYear(
+        writStartM[1],
+        reportingYear ?? DEFAULT_REPORTING_YEAR
+      );
+    }
+
+    const fixedAlimonyM =
+      text.match(
+        /(?:в\s+размере|в\s+тверд\p{L}*\s+(?:денежн\p{L}*\s+)?сумм\p{L}*|ежемесячн\p{L}*)[^0-9%]{0,25}?(\d{1,3}(?:[\s\u00A0]\d{3})+|\d{4,})\s*(?:₽|руб\.?|р\.?)/iu
+      );
     const pctExplicit = text.match(/(\d{1,2}(?:[.,]\d{1,2})?)\s*%/);
-    if (pctExplicit) {
+    if (fixedAlimonyM && !pctExplicit) {
+      const fixedVal = parseRussianNumber(fixedAlimonyM[1]);
+      if (fixedVal > 0) {
+        alimonyFixedAmountHint = fixedVal;
+        alimonyRatePercentHint = 0;
+        alimonyShareLabelHint = `${fixedVal.toLocaleString('ru-RU')} ₽ / мес.`;
+      }
+    } else if (pctExplicit) {
       alimonyRatePercentHint = Number(pctExplicit[1].replace(',', '.'));
       alimonyShareLabelHint = `${pctExplicit[1]}%`;
     } else if (/\b1\s*\/\s*4\b|четверт|одного\s+реб[её]нк/iu.test(text)) {
@@ -952,7 +1064,7 @@ export function extractRequisitesFromFreeText(
     }
   } else if (isAlimonyPayoutText) {
     const recPayoutMatch = text.match(
-      /алимент\p{L}*\s+([А-Яа-яЁё][А-Яа-яЁё.\s-]{2,45}?)(?=\s*(?:[,;()]|$|\s+инн|\s+р\/с|\s+бик|\s+на\s+сумму|\s+в\s+сумме))/iu
+      /алимент\p{L}*\s+([А-Яа-яЁё][А-Яа-яЁё.\s-]{2,45}?)(?=\s*(?:[,;()]|$|\s+инн|\s+р\/с|\s+бик|\s+на\s+сумму|\s+в\s+сумме|\s+и\s+супруг))/iu
     );
     if (recPayoutMatch && recPayoutMatch[1]) {
       alimonyRecipientHint = normalizeInflectedPersonPhrase(recPayoutMatch[1].trim());
@@ -961,7 +1073,7 @@ export function extractRequisitesFromFreeText(
 
   // I. Multi-sum promissory notes / securities ("Приобретено два векселя (один на 280 000 под 13% , второй - 540 000 под 11%)")
   const multiSum = extractMultiSumAndFinancialNotes(text);
-  const parsedNotesList = extractFinancialNotesFromText1C(text);
+  const parsedNotesList = extractFinancialNotesFromText1C(text, explicitColumnAmount);
   if (!nomenclatureHint && (multiSum.financialNotesSummaryHint || parsedNotesList.length > 0)) {
     nomenclatureHint = /облигац/iu.test(text)
       ? 'Долговые ценные бумаги (облигации)'
@@ -970,7 +1082,9 @@ export function extractRequisitesFromFreeText(
 
   // J. Recurring contract fee & loan/security interest rate
   const isContractSignOrInvoice = isNonPostingManagementOrPolicyText(text);
-  const recurringTerms = isContractSignOrInvoice ? extractRecurringContractTerms1C(text) : null;
+  const recurringTerms = isContractSignOrInvoice
+    ? extractRecurringContractTerms1C(text, explicitColumnAmount)
+    : null;
   const ratePctMatch = text.match(/(?:под|по\s+ставк\p{L}*|ставк\p{L}*)\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*%/iu);
   const interestRatePercentHint = ratePctMatch
     ? Number(ratePctMatch[1].replace(',', '.'))
@@ -1001,12 +1115,15 @@ export function extractRequisitesFromFreeText(
     alimonyRecipientHint,
     alimonyRatePercentHint,
     alimonyShareLabelHint,
+    alimonyFixedAmountHint,
+    writStartDateHint,
+    hireStartDateHint,
     financialNotesSummaryHint: multiSum.financialNotesSummaryHint,
     financialNotesListHint: parsedNotesList.length > 0 ? parsedNotesList : undefined,
     periodicPaymentAmountHint: recurringTerms?.periodicAmount,
     interestRatePercentHint,
-    multiSumTotal: multiSum.multiSumTotal,
-    multiSumNote: multiSum.multiSumNote,
+    multiSumTotal: multiItemListTotal ?? multiSum.multiSumTotal,
+    multiSumNote: multiItemListNote ?? multiSum.multiSumNote,
     explicitCorrespondences: extractExplicitCorrespondencesFromText1C(text),
   };
 }
@@ -1416,7 +1533,8 @@ function mapTabularRowToDraft(params: {
 
   const extracted = extractRequisitesFromFreeText(
     `${description} ${counterpartyCell} ${contractCell}`,
-    reportingYear
+    reportingYear,
+    Math.abs(amount)
   );
 
   const inferredVat = inferVatFromTextAndCell(description, vatRateCell);
@@ -1425,11 +1543,24 @@ function mapTabularRowToDraft(params: {
 
   const vatAmountParsed = parseRussianNumber(vatCell);
   const qtyParsed = parseRussianNumber(qtyCell) || extracted.quantity || 0;
-  const unitPriceParsed = parseRussianNumber(priceCell) || extracted.unitPrice || 0;
+  let unitPriceParsed = parseRussianNumber(priceCell) || extracted.unitPrice || 0;
 
   let effectiveAmount = Math.abs(amount);
   let amountCalculationNote: string | undefined;
-  if (effectiveAmount < 0.01 && extracted.multiSumTotal && extracted.multiSumTotal > 0) {
+
+  // Detect unit-price placed into Amount column when description ends with "... <qty> шт ... по цене (вкл. НДС)"
+  if (
+    effectiveAmount >= 0.01 &&
+    qtyParsed > 1 &&
+    unitPriceParsed === 0 &&
+    /по\s+цене(?:\s*\(?(?:вкл\.?\s*ндс|с\s*(?:уч[её]том\s*)?ндс(?:\s*\d+\s*%)?|без\s*(?:уч[её]та\s*)?ндс(?:\s*\d+\s*%)?|за\s+[а-яё.]+)\)?)?\s*[.,;)]*$/iu.test(
+      description.trim()
+    )
+  ) {
+    unitPriceParsed = effectiveAmount;
+    effectiveAmount = Math.round((qtyParsed * unitPriceParsed + Number.EPSILON) * 100) / 100;
+    amountCalculationNote = `В колонке указана цена за единицу (${unitPriceParsed.toFixed(2)} ₽): ${qtyParsed} × ${unitPriceParsed.toFixed(2)} ₽ = ${effectiveAmount.toFixed(2)} ₽`;
+  } else if (effectiveAmount < 0.01 && extracted.multiSumTotal && extracted.multiSumTotal > 0) {
     effectiveAmount = extracted.multiSumTotal;
     amountCalculationNote = extracted.multiSumNote;
   } else if (effectiveAmount < 0.01 && qtyParsed > 0 && unitPriceParsed > 0) {
@@ -1440,11 +1571,12 @@ function mapTabularRowToDraft(params: {
     description &&
     !isNonPostingManagementOrPolicyText(description)
   ) {
+    const scrubbedDesc = scrubNonMonetaryNumbersForInlineSum(description);
     const inlineSumMatch =
-      description.match(
+      scrubbedDesc.match(
         /(?:на\s+сумму|в\s+сумме|в\s+размере|стоимостью)[\s:=—-]*(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)/iu
       ) ||
-      description.match(
+      scrubbedDesc.match(
         /(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\d{3,}(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р(?=$|[^\p{L}]))/iu
       );
     if (inlineSumMatch && inlineSumMatch[1]) {
@@ -1458,12 +1590,16 @@ function mapTabularRowToDraft(params: {
   const isNonPostingRow = Boolean(description && isNonPostingManagementOrPolicyText(description));
   const finalInn = innCell.replace(/\D/g, '') || extracted.inn;
   const finalKpp = kppCell.replace(/\D/g, '') || extracted.kpp;
+  const effectiveRowDate =
+    extracted.hireStartDateHint && date && extracted.hireStartDateHint > date
+      ? extracted.hireStartDateHint
+      : date;
 
   return {
     draft: {
       rowKey,
       sourceFileName: fileName,
-      date,
+      date: effectiveRowDate,
       docNumber: docNumber || extracted.docNumber,
       description: description || nomCell || counterpartyCell || 'Хозяйственная операция',
       amount: effectiveAmount,
@@ -1502,6 +1638,8 @@ function mapTabularRowToDraft(params: {
       alimonyRecipientInn: extracted.alimonyRecipientHint ? finalInn || undefined : undefined,
       alimonyRatePercent: extracted.alimonyRatePercentHint,
       alimonyShareLabel: extracted.alimonyShareLabelHint,
+      alimonyFixedAmount: extracted.alimonyFixedAmountHint,
+      writStartDate: extracted.writStartDateHint,
       financialNotesSummary: extracted.financialNotesSummaryHint,
       financialNotesList: extracted.financialNotesListHint,
       periodicPaymentAmount: extracted.periodicPaymentAmountHint,
@@ -1824,7 +1962,7 @@ export function parseFreeTextOrDelimitedOperations(
   text: string,
   fileName: string,
   db1C: Database1CSnapshot | null,
-  options?: { reportingYear?: number }
+  options?: { reportingYear?: number; fileIndex?: number }
 ): RawDraftOperationInput[] {
   if (/1CClientBankExchange|СекцияДокумент\s*=/i.test(text)) {
     return parse1CClientBankExchange(text, fileName, db1C, options);
@@ -1837,6 +1975,7 @@ export function parseFreeTextOrDelimitedOperations(
   if (lines.length === 0) return [];
 
   const effYear = options?.reportingYear ?? DEFAULT_REPORTING_YEAR;
+  const effFileIdx = options?.fileIndex ?? 0;
 
   const sampleLines = lines.slice(0, 5);
   const countChar = (ch: string) =>
@@ -1855,7 +1994,7 @@ export function parseFreeTextOrDelimitedOperations(
       rawMatrix: matrix,
       formattedMatrix: matrix,
       fileName,
-      fileIndex: 0,
+      fileIndex: effFileIdx,
       sheetName: 'TSV',
       reportingYear: effYear,
     });
@@ -1868,7 +2007,7 @@ export function parseFreeTextOrDelimitedOperations(
       rawMatrix: matrix,
       formattedMatrix: matrix,
       fileName,
-      fileIndex: 0,
+      fileIndex: effFileIdx,
       sheetName: 'CSV',
       reportingYear: effYear,
     });
@@ -1881,7 +2020,7 @@ export function parseFreeTextOrDelimitedOperations(
       rawMatrix: matrix,
       formattedMatrix: matrix,
       fileName,
-      fileIndex: 0,
+      fileIndex: effFileIdx,
       sheetName: 'CSV',
       reportingYear: effYear,
     });
@@ -2342,6 +2481,7 @@ export function processBatchFiles(
         fileDrafts.push(
           ...parseFreeTextOrDelimitedOperations(text, file.name, workingDb, {
             reportingYear,
+            fileIndex,
           })
         );
       }

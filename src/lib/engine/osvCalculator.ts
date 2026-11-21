@@ -596,9 +596,29 @@ export function calculateOsvReport(params: {
       // Aggregate root movements for clicking synthetic group rows in OSV
       const mergedMovs = children
         .flatMap((c) => movementsByAccount[c.code] ?? [])
-        .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+        .sort(
+          (a, b) =>
+            (a.date || '').localeCompare(b.date || '') ||
+            (a.id || '').localeCompare(b.id || '')
+        );
       if (mergedMovs.length > 0) {
-        movementsByAccount[root] = mergedMovs;
+        let groupRunningNet = round2(gStartDt - gStartKt);
+        movementsByAccount[root] = mergedMovs.map((m) => {
+          groupRunningNet = round2(
+            groupRunningNet + (m.debitAmount || 0) - (m.creditAmount || 0)
+          );
+          const { debit: rDt, credit: rKt, isRed: rRed } = splitNetToSides(
+            groupRunningNet,
+            rootInfo.type
+          );
+          return {
+            ...m,
+            runningNet: groupRunningNet,
+            runningDebit: rDt,
+            runningCredit: rKt,
+            isRedRunning: rRed,
+          };
+        });
       }
     }
     rows.push(leaf);

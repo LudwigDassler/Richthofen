@@ -1177,7 +1177,7 @@ export function Tab1DatabaseOsv() {
                 aria-modal="true"
                 aria-label={`Карточка счёта ${selectedAccountDrilldown}`}
                 onClick={(e) => e.stopPropagation()}
-                className="w-full max-w-4xl h-full bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 shadow-xl flex flex-col"
+                className="w-full max-w-5xl h-full bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 shadow-xl flex flex-col"
               >
                 {/* Drawer Header */}
                 <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-start justify-between gap-4">
@@ -1258,13 +1258,13 @@ export function Tab1DatabaseOsv() {
                     <table className="w-full text-xs">
                       <thead className="sticky top-0 bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-slate-500">
                         <tr>
-                          <th className="py-2.5 px-3 text-left font-medium">Дата</th>
-                          <th className="py-2.5 px-3 text-left font-medium">Документ и аналитика</th>
-                          <th className="py-2.5 px-3 text-left font-medium">Корр. счёт</th>
-                          <th className="py-2.5 px-3 text-right font-medium">Дебет</th>
-                          <th className="py-2.5 px-3 text-right font-medium">Кредит</th>
-                          <th className="py-2.5 px-3 text-right font-medium">Текущее сальдо</th>
-                          <th className="py-2.5 px-3 text-right font-medium">Действие</th>
+                          <th className="py-2.5 px-2.5 text-left font-medium whitespace-nowrap">Дата</th>
+                          <th className="py-2.5 px-2.5 text-left font-medium">Документ и аналитика</th>
+                          <th className="py-2.5 px-2.5 text-left font-medium whitespace-nowrap">Корр. счёт</th>
+                          <th className="py-2.5 px-2.5 text-right font-medium whitespace-nowrap">Дебет</th>
+                          <th className="py-2.5 px-2.5 text-right font-medium whitespace-nowrap">Кредит</th>
+                          <th className="py-2.5 px-2.5 text-right font-medium whitespace-nowrap">Текущее сальдо</th>
+                          <th className="py-2.5 px-2.5 text-right font-medium whitespace-nowrap">Действие</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -1280,13 +1280,13 @@ export function Tab1DatabaseOsv() {
                               key={m.id}
                               className="hover:bg-slate-50 dark:hover:bg-slate-800/40"
                             >
-                              <td className="py-2.5 px-3 tabular-nums whitespace-nowrap align-top">
+                              <td className="py-2.5 px-2.5 tabular-nums whitespace-nowrap align-top">
                                 {formatDateRu(m.date)}
                                 <div className="text-[10px] text-slate-400">
                                   {m.source === 'db' ? 'База 1С' : 'Новая оп.'}
                                 </div>
                               </td>
-                              <td className="py-2.5 px-3 align-top max-w-[280px]">
+                              <td className="py-2.5 px-2.5 align-top max-w-[240px]">
                                 <div className="font-medium text-slate-900 dark:text-slate-100 truncate">
                                   {m.docLabel}
                                 </div>
@@ -1299,29 +1299,29 @@ export function Tab1DatabaseOsv() {
                                   {m.description}
                                 </div>
                               </td>
-                              <td className="py-2.5 px-3 tabular-nums font-semibold align-top">
+                              <td className="py-2.5 px-2.5 tabular-nums font-semibold align-top whitespace-nowrap">
                                 {m.corrAccount || 'забаланс'}
                               </td>
-                              <td className="py-2.5 px-3 text-right tabular-nums align-top">
+                              <td className="py-2.5 px-2.5 text-right tabular-nums align-top whitespace-nowrap">
                                 {m.debitAmount > 0 ? formatMoney(m.debitAmount, true) : '—'}
                               </td>
-                              <td className="py-2.5 px-3 text-right tabular-nums align-top">
+                              <td className="py-2.5 px-2.5 text-right tabular-nums align-top whitespace-nowrap">
                                 {m.creditAmount > 0 ? formatMoney(m.creditAmount, true) : '—'}
                               </td>
                               <td
-                                className={`py-2.5 px-3 text-right tabular-nums font-medium align-top whitespace-nowrap ${
+                                className={`py-2.5 px-2.5 text-right tabular-nums font-medium align-top whitespace-nowrap ${
                                   m.isRedRunning
                                     ? 'text-rose-600 dark:text-rose-400 font-semibold'
                                     : 'text-slate-900 dark:text-slate-100'
                                 }`}
                               >
-                                {m.runningDebit > 0
+                                {Math.abs(m.runningDebit) > 0.005
                                   ? `Дт ${formatMoney(m.runningDebit, true)}`
-                                  : m.runningCredit > 0
+                                  : Math.abs(m.runningCredit) > 0.005
                                     ? `Кт ${formatMoney(m.runningCredit, true)}`
                                     : '0,00'}
                               </td>
-                              <td className="py-2.5 px-3 text-right align-top whitespace-nowrap">
+                              <td className="py-2.5 px-2.5 text-right align-top whitespace-nowrap">
                                 {m.operationId ? (
                                   <button
                                     type="button"
@@ -1330,10 +1330,10 @@ export function Tab1DatabaseOsv() {
                                       setSelectedAccountDrilldown(null);
                                       jumpToOperation(targetOpId);
                                     }}
-                                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-[11px] font-medium text-amber-700 dark:text-amber-400"
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-[11px] font-medium text-amber-700 dark:text-amber-400 whitespace-nowrap"
                                   >
                                     Перейти к операции
-                                    <ExternalLink className="w-3 h-3" strokeWidth={1.6} />
+                                    <ExternalLink className="w-3 h-3 shrink-0" strokeWidth={1.6} />
                                   </button>
                                 ) : (
                                   <span className="text-[11px] text-slate-400">Архив БД</span>

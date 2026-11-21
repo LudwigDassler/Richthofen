@@ -584,6 +584,8 @@ export interface QueuedOperation {
   alimonyRecipientInn?: string;
   alimonyRatePercent?: number;
   alimonyShareLabel?: string;
+  alimonyFixedAmount?: number;
+  writStartDate?: string;
   financialNotesSummary?: string;
   financialNotesList?: ParsedFinancialNoteItem1C[];
   disposedFinancialNoteId?: string;
