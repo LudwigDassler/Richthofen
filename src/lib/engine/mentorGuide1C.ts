@@ -75,8 +75,14 @@ export function getOperationStatusBadgeText(
   if (op.readinessStatus === 'critical_error' || op.needsAmount) {
     return 'Требует проверки';
   }
+  if (op.category === 'customer_invoice' || op.docType1C === 'СчетПокупателю') {
+    return 'Счёт покупателю (без проводок)';
+  }
+  if (op.category === 'supplier_invoice' || op.docType1C === 'СчетОтПоставщика') {
+    return 'Счёт от поставщика (без проводок)';
+  }
   if (op.category === 'contract_event') {
-    return 'Договор / счёт 1С (без проводок)';
+    return 'Договор 1С (без проводок)';
   }
   if (op.category === 'policy_event') {
     return 'Учётная политика / лимит 1С';
@@ -243,6 +249,10 @@ export function mapDocTypeToDefaultCategory(
       return 'expense_report';
     case 'СчетФактураПолученный':
       return 'vat_deduction';
+    case 'СчетПокупателю':
+      return 'customer_invoice';
+    case 'СчетОтПоставщика':
+      return 'supplier_invoice';
     case 'ОперацияБух':
       return [
         'penalty_claim',
@@ -284,6 +294,8 @@ function buildStep01Fallback(op: QueuedOperation): Step01CalculationBreakdown1C 
     return op.resolverTrace;
   }
   const nonPostingCategories: OperationCategory[] = [
+    'customer_invoice',
+    'supplier_invoice',
     'contract_event',
     'policy_event',
     'hr_hire',
@@ -345,11 +357,13 @@ function buildStep02Logic(
 ): Step02AccountingLogic1C {
   const norms: string[] = [];
   switch (op.category) {
+    case 'customer_invoice':
+    case 'supplier_invoice':
     case 'contract_event':
     case 'policy_event':
       norms.push(
         'ПБУ 1/2008 «Учётная политика организации»',
-        'Ст. 9 Федерального закона № 402-ФЗ (факт хозяйственной жизни vs заключение рамочного договора / выставление счёта)'
+        'Ст. 9 Федерального закона № 402-ФЗ (счёт на оплату / рамочный договор фиксирует оферту и сумму заказа без проводок Дт/Кт до отгрузки или оплаты)'
       );
       break;
     case 'hr_hire':
@@ -1129,7 +1143,61 @@ function buildOperationMentorGuideCore(
     };
   }
 
-  // 8e. Заключение договора / получение счёта на оплату (без бухгалтерских проводок в день подписания)
+  // 8d-inv. Счёт покупателю / Счёт от поставщика (на оплату — 0 проводок, основание для Реализации / Оплаты)
+  if (
+    op.category === 'customer_invoice' ||
+    op.docType1C === 'СчетПокупателю' ||
+    op.category === 'supplier_invoice' ||
+    op.docType1C === 'СчетОтПоставщика'
+  ) {
+    const isBuyerInv = op.category === 'customer_invoice' || op.docType1C === 'СчетПокупателю';
+    const sumFmt = op.amount >= 0.01 ? formatMoneyRu(op.amount) : 'по условиям договора';
+    return {
+      accountingMeaning: isBuyerInv
+        ? `Выставление счёта покупателю на оплату («${op.description}») на сумму ${sumFmt}. В 1С:БП 3.0 документ «Счёт покупателю» фиксирует коммерческое предложение (оферту), номенклатуру работ/товаров и сумму заказа контрагента «${cp}», но сам по себе НЕ создаёт бухгалтерских проводок Дт/Кт (0 проводок).`
+        : `Регистрация входящего счёта от поставщика на оплату («${op.description}») на сумму ${sumFmt}. Документ «Счёт от поставщика» сохраняет реквизиты и сумму заказа у «${cp}» для последующего списания с р/с и поступления, не формируя проводок Дт/Кт (0 проводок).`,
+      whyAmountOrVatRule: isBuyerInv
+        ? `Сумма счёта (${sumFmt}) сохранена в открытых счетах/заказах 1С: при последующем вводе «Поступления на расчётный счёт» (аванс Дт 51 Кт 62.02) или «Реализации (акт, накладная, УПД)» (Дт 62.01 Кт 90.01.1) по кнопке «Создать на основании» сумма и состав работ подтянутся автоматически!`
+        : `Сумма счёта (${sumFmt}) сохранена в открытых счетах поставщиков 1С для автоматического заполнения платёжного поручения и документа поступления.`,
+      navigationPath1C: isBuyerInv
+        ? 'Раздел «Продажи» → «Продажи» → «Счета покупателям» → кнопка «Создать»'
+        : 'Раздел «Покупки» → «Покупки» → «Счета от поставщиков» → кнопка «Создать»',
+      documentOperationKind1C: isBuyerInv
+        ? '1С: Счёт покупателю (на оплату, 0 проводок)'
+        : '1С: Счёт от поставщика (на оплату, 0 проводок)',
+      headerFieldsSteps: [
+        { field: isBuyerInv ? 'Покупатель' : 'Поставщик', value: cp },
+        { field: 'Договор', value: ctr, hint: `Вид договора: ${isBuyerInv ? 'С покупателем' : 'С поставщиком'}` },
+        { field: 'Сумма счёта', value: sumFmt },
+      ],
+      tabularAndTabsSteps: [
+        {
+          tabName: 'Товары и услуги',
+          instruction: isBuyerInv
+            ? `Добавьте предмет счёта («${op.nomenclatureName || op.description}») на сумму ${sumFmt} и нажмите «Провести и закрыть». Далее используйте кнопку «Создать на основании» при получении аванса или подписании акта/накладной.`
+            : `Укажите предмет счёта («${op.nomenclatureName || op.description}») на сумму ${sumFmt} и нажмите «Записать и закрыть».`,
+        },
+      ],
+      referencePostings: [
+        {
+          debit: isBuyerInv ? '— (Документ «Счёт покупателю»)' : '— (Документ «Счёт от поставщика»)',
+          credit: '— (0 проводок по регистру бухгалтерии)',
+          amountRule: sumFmt,
+          purpose: isBuyerInv
+            ? 'Основание для «Поступления на р/с» и «Реализации (акт, накладная, УПД)»'
+            : 'Основание для «Списания с р/с» и «Поступления (акт, накладная, УПД)»',
+        },
+      ],
+      selfCheckOsv: [
+        'Проверьте, что в день выставления счёта на счетах 62.01 / 60.01 ещё нет задолженности — она появится только по дате отгрузки (акта) или оплаты.',
+      ],
+      commonStudentMistakes: [
+        'Ошибочное проведение «Счёта покупателю» документом «Реализация товаров и услуг» в день выписки счёта (приводит к преждевременному начислению выручки 90.01.1 и НДС 68.02).',
+      ],
+    };
+  }
+
+  // 8e. Заключение договора (без бухгалтерских проводок в день подписания)
   if (op.category === 'contract_event') {
     return {
       accountingMeaning: `Управленческое / договорное событие («${op.description}»). Подписание рамочного договора или получение счёта на оплату фиксирует условия будущих расчётов с контрагентом «${cp}», но само по себе ещё НЕ меняет активы или обязательства организации — поэтому в день заключения договора бухгалтерские проводки Дт/Кт НЕ формируются (0 проводок).`,

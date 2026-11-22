@@ -171,7 +171,11 @@ function resolveOperationAmountAndLinksCore(
   let linkedContract = (input.contractName || '').trim();
   const extraLinks: ResolverSourceLink1C[] = [];
 
-  if (!linkedCpName && (input.category === 'bank_out' || input.category === 'cash_out')) {
+  if (
+    !linkedCpName &&
+    (input.category === 'bank_out' || input.category === 'cash_out') &&
+    !/возврат\p{L}*.*(?:аванс|предоплат)/iu.test(input.description)
+  ) {
     const res6001 = resolveUnpaidSupplier6001ByKeywords(
       stateBefore,
       input.description,
@@ -196,36 +200,92 @@ function resolveOperationAmountAndLinksCore(
     }
   }
 
-  // Check buyer open advance 62.02 / receivable 62.01 when counterparty is missing on sale or bank_in
+  // Check buyer contracts, openOrders, and open advance 62.02 / receivable 62.01 when counterparty is missing on sale or bank_in
   if (
     !linkedCpName &&
     (input.category === 'sale_goods' ||
       input.category === 'sale_services' ||
-      input.category === 'bank_in')
+      input.category === 'bank_in' ||
+      input.category === 'customer_invoice')
   ) {
-    const targetAcc = input.category === 'bank_in' ? '62.01' : '62.02';
-    const openBuyer = stateBefore.openSettlements.filter(
-      (s) => s.account === targetAcc && s.remainingAmount >= 0.01 && s.counterpartyName
-    );
     const qStems = extractKeywordStems1C(`${input.nomenclatureName || ''} ${input.description}`);
-    const stemMatched = openBuyer.filter((s) =>
-      s.keywordStems.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))
-    );
-    const chosen =
-      stemMatched[0] || (openBuyer.length === 1 ? openBuyer[0] : undefined);
-    if (chosen) {
-      linkedCpName = chosen.counterpartyName;
-      linkedCpInn = chosen.counterpartyInn || linkedCpInn;
-      linkedCpKpp = chosen.counterpartyKpp || linkedCpKpp;
-      linkedContract = chosen.contractName || linkedContract;
-      extraLinks.push({
-        opId: chosen.originOpId,
-        opNumber: chosen.originOpNumber,
-        date: chosen.originDate,
-        label: chosen.originOpNumber
-          ? `Операция #${chosen.originOpNumber} от ${formatRuDateShort(chosen.originDate)} (счёт ${targetAcc}, ${chosen.counterpartyName})`
-          : `База 1С (счёт ${targetAcc}, ${chosen.counterpartyName})`,
-      });
+    // 1) Check recurring buyer contracts first (e.g., monthly scaffolding rental act)
+    if (qStems.length > 0 && input.category === 'sale_services') {
+      const buyerContracts = Object.values(stateBefore.contracts).filter(
+        (c) =>
+          c.kind === 'СПокупателем' &&
+          c.counterpartyName &&
+          c.subjectKeywords.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))
+      );
+      if (buyerContracts.length > 0) {
+        const ctr = buyerContracts[0];
+        const cpRec = stateBefore.counterparties[ctr.counterpartyKey];
+        linkedCpName = ctr.counterpartyName;
+        linkedCpInn = cpRec?.inn || linkedCpInn;
+        linkedCpKpp = cpRec?.kpp || linkedCpKpp;
+        linkedContract = ctr.contractName || linkedContract;
+        extraLinks.push({
+          opId: ctr.firstSeenOpId,
+          opNumber: ctr.firstSeenOpNumber,
+          date: ctr.firstSeenDate,
+          label: ctr.firstSeenOpNumber
+            ? `Договор #${ctr.firstSeenOpNumber} от ${formatRuDateShort(ctr.firstSeenDate)} (${ctr.counterpartyName})`
+            : `Договор 1С (${ctr.counterpartyName})`,
+        });
+      }
+    }
+
+    // 2) Check open customer orders (СчетПокупателю / договор)
+    if (!linkedCpName) {
+      const openCustOrders = (stateBefore.openOrders ?? []).filter(
+        (o) => o.orderKind === 'customer' && o.status === 'open' && o.counterpartyName
+      );
+      const orderStemMatched = openCustOrders.filter((o) =>
+        o.keywordStems.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))
+      );
+      const chosenOrder =
+        orderStemMatched[0] ||
+        (qStems.length === 0 && openCustOrders.length === 1 ? openCustOrders[0] : undefined);
+      if (chosenOrder) {
+        linkedCpName = chosenOrder.counterpartyName;
+        linkedCpInn = chosenOrder.counterpartyInn || linkedCpInn;
+        linkedCpKpp = chosenOrder.counterpartyKpp || linkedCpKpp;
+        linkedContract = chosenOrder.contractName || linkedContract;
+        extraLinks.push({
+          opId: chosenOrder.originOpId,
+          opNumber: chosenOrder.originOpNumber,
+          date: chosenOrder.originDate,
+          label: `Счёт / договор #${chosenOrder.originOpNumber} от ${formatRuDateShort(chosenOrder.originDate)} (${chosenOrder.counterpartyName})`,
+        });
+      }
+    }
+
+    // 3) Check open 62.01 / 62.02 settlements
+    if (!linkedCpName) {
+      const targetAcc = input.category === 'bank_in' ? '62.01' : '62.02';
+      const openBuyer = stateBefore.openSettlements.filter(
+        (s) => s.account === targetAcc && s.remainingAmount >= 0.01 && s.counterpartyName
+      );
+      const stemMatched = openBuyer.filter((s) =>
+        s.keywordStems.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))
+      );
+      const chosen =
+        stemMatched[0] ||
+        (qStems.length === 0 && openBuyer.length === 1 ? openBuyer[0] : undefined);
+      if (chosen) {
+        linkedCpName = chosen.counterpartyName;
+        linkedCpInn = chosen.counterpartyInn || linkedCpInn;
+        linkedCpKpp = chosen.counterpartyKpp || linkedCpKpp;
+        linkedContract = chosen.contractName || linkedContract;
+        extraLinks.push({
+          opId: chosen.originOpId,
+          opNumber: chosen.originOpNumber,
+          date: chosen.originDate,
+          label: chosen.originOpNumber
+            ? `Операция #${chosen.originOpNumber} от ${formatRuDateShort(chosen.originDate)} (счёт ${targetAcc}, ${chosen.counterpartyName})`
+            : `База 1С (счёт ${targetAcc}, ${chosen.counterpartyName})`,
+        });
+      }
     }
   }
 
@@ -295,13 +355,15 @@ function resolveOperationAmountAndLinksCore(
             fut.category === 'cash_out' ||
             fut.category.startsWith('purchase_') ||
             fut.category === 'advance_offset' ||
-            fut.category === 'contract_event'
+            fut.category === 'contract_event' ||
+            fut.category === 'supplier_invoice'
           : fut.category === 'bank_in' ||
             fut.category === 'cash_in' ||
             fut.category === 'sale_goods' ||
             fut.category === 'sale_services' ||
             fut.category === 'advance_offset' ||
-            fut.category === 'contract_event';
+            fut.category === 'contract_event' ||
+            fut.category === 'customer_invoice';
         if (!futCompatible) continue;
 
         const futStems = extractKeywordStems1C(
@@ -331,6 +393,36 @@ function resolveOperationAmountAndLinksCore(
         }
       }
     }
+  }
+
+  if (input.category === 'customer_invoice' || input.category === 'supplier_invoice') {
+    const invAmt = round2(input.explicitColumnAmount || input.textDerivedAmount || 0);
+    const isCustInv = input.category === 'customer_invoice';
+    return {
+      resolvedAmount: invAmt,
+      amountMode: invAmt >= 0.01 ? 'explicit' : 'calculated_by_1c',
+      counterpartyName: linkedCpName || undefined,
+      counterpartyInn: linkedCpInn || undefined,
+      counterpartyKpp: linkedCpKpp || undefined,
+      contractName: linkedContract || undefined,
+      step01Breakdown: {
+        resolverLevel: 1,
+        resolverLevelName: isCustInv
+          ? 'Счёт покупателю на оплату (регистрация суммы заказа без бухгалтерских проводок)'
+          : 'Счёт от поставщика на оплату (регистрация основания платежа без проводок)',
+        summaryFormula:
+          invAmt >= 0.01
+            ? `Сумма счёта на оплату = ${fmtMoney(invAmt)} (0 проводок Дт/Кт; заказ сохранён для последующей оплаты и отгрузки)`
+            : 'Регистрация счёта на оплату в журнале 1С:БП 3.0 (0 проводок Дт/Кт)',
+        steps: [
+          isCustInv
+            ? `Документ «Счет покупателю» в 1С:БП 3.0 фиксирует согласованную сумму заказа (${fmtMoney(invAmt)}) и номенклатуру, но сам не формирует бухгалтерских проводок.`
+            : `Документ «Счет от поставщика» в 1С:БП 3.0 регистрирует реквизиты для платёжного поручения (${fmtMoney(invAmt)}) без проводок.`,
+          'Сумма и предмет счёта сохранены в регистре открытых заказов (openOrders) для автоматической подстановки при поступлении оплаты и реализации.',
+        ],
+        sourceLinks: extraLinks,
+      },
+    };
   }
 
   // ============================================================================
@@ -943,9 +1035,50 @@ function resolveOperationAmountAndLinksCore(
         };
       }
     } else {
-      // Purchase receipt after 100% supplier advance on 60.02!
+      // Check open supplier orders (СчетОтПоставщика / договор) first, then 100% supplier advance on 60.02!
       const cpNorm = normalizeCounterpartyKey1C(linkedCpName);
       const qStems = extractKeywordStems1C(`${input.nomenclatureName || ''} ${input.description}`);
+      const openSupOrders = (stateBefore.openOrders ?? []).filter(
+        (o) =>
+          o.orderKind === 'supplier' &&
+          o.status === 'open' &&
+          o.remainingAmount >= 0.01 &&
+          ((cpNorm && o.counterpartyKey === cpNorm) ||
+            (!cpNorm && o.keywordStems.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))))
+      );
+      if (openSupOrders.length > 0) {
+        const stemPref = openSupOrders.filter((o) =>
+          o.keywordStems.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))
+        );
+        const ord = stemPref[0] || openSupOrders[0];
+        return {
+          resolvedAmount: ord.remainingAmount,
+          amountMode: 'from_related_doc',
+          counterpartyName: linkedCpName || ord.counterpartyName,
+          counterpartyInn: linkedCpInn || ord.counterpartyInn,
+          counterpartyKpp: linkedCpKpp || ord.counterpartyKpp,
+          contractName: linkedContract || ord.contractName,
+          vatRate: ord.vatRate,
+          vatRule: ord.vatRule,
+          step01Breakdown: {
+            resolverLevel: 3,
+            resolverLevelName: LEVEL_NAMES[3],
+            summaryFormula: `Подтянуто из счёта/договора #${ord.originOpNumber} от ${formatRuDateShort(ord.originDate)} = ${fmtMoney(ord.remainingAmount)}`,
+            steps: [
+              `Найдена предшествующая регистрация счёта/договора поставщика «${ord.counterpartyName}» (#${ord.originOpNumber} от ${formatRuDateShort(ord.originDate)}) на сумму ${fmtMoney(ord.remainingAmount)}.`,
+            ],
+            sourceLinks: [
+              {
+                opId: ord.originOpId,
+                opNumber: ord.originOpNumber,
+                date: ord.originDate,
+                label: `Счёт/договор #${ord.originOpNumber} от ${formatRuDateShort(ord.originDate)} (${ord.counterpartyName})`,
+              },
+            ],
+          },
+        };
+      }
+
       const open6002 = stateBefore.openSettlements.filter(
         (s) =>
           s.account === '60.02' &&
@@ -1024,7 +1157,8 @@ function resolveOperationAmountAndLinksCore(
     if (
       input.category === 'bank_in' &&
       (/(?:%%|процент\p{L}*).*(?:от\s+банк|вексел|ценн\p{L}*\s+бумаг)/iu.test(input.description) ||
-        /(?:от\s+банк\p{L}*|вексел|ценн\p{L}*\s+бумаг).*(?:%%|процент\p{L}*)/iu.test(input.description))
+        /(?:от\s+банк\p{L}*|вексел|ценн\p{L}*\s+бумаг).*(?:%%|процент\p{L}*)/iu.test(input.description) ||
+        /задолженност\p{L}*\s+по\s+(?:%%|процент)/iu.test(input.description))
     ) {
       const osv7609 = calculateOsvReport({
         db1C: input.db1C,
@@ -1059,53 +1193,122 @@ function resolveOperationAmountAndLinksCore(
       }
     }
 
-    // If bank_in is a 100% advance ("получена 100% предоплата / аванс") referencing a prior invoice/contract_event!
+    const cpNorm = normalizeCounterpartyKey1C(linkedCpName);
+    const qStems = extractKeywordStems1C(`${input.nomenclatureName || ''} ${input.description}`);
+
+    // Monthly recurring service act (e.g., "Выставлен акт и сч-ф. на аренду лесов за март / за месяц"):
+    // check periodicAmount on matching buyer contract BEFORE full multi-month advance!
     if (
-      (input.category === 'bank_in' || input.category === 'cash_in') &&
-      /аванс|предоплат/iu.test(input.description)
+      input.category === 'sale_services' &&
+      /за\s+(?:январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр|месяц)\p{L}*|ежемесячн/iu.test(
+        input.description
+      )
     ) {
-      const cpNormAdv = normalizeCounterpartyKey1C(linkedCpName);
-      for (let idx = input.priorOperations.length - 1; idx >= 0; idx--) {
-        const prev = input.priorOperations[idx];
-        if (prev.includeInProcessing === false || prev.amount < 0.01) continue;
-        if (
-          prev.category === 'contract_event' &&
-          cpNormAdv &&
-          normalizeCounterpartyKey1C(prev.counterpartyName) === cpNormAdv
-        ) {
-          return {
-            resolvedAmount: round2(prev.amount),
-            amountMode: 'from_related_doc',
-            counterpartyName: linkedCpName || prev.counterpartyName,
-            counterpartyInn: linkedCpInn || prev.counterpartyInn,
-            counterpartyKpp: linkedCpKpp || prev.counterpartyKpp,
-            contractName: linkedContract || prev.contractName,
-            step01Breakdown: {
-              resolverLevel: 3,
-              resolverLevelName: LEVEL_NAMES[3],
-              summaryFormula: `100% предоплата по счёту / договору #${idx + 1} от ${formatRuDateShort(prev.date)} = ${fmtMoney(prev.amount)}`,
-              steps: [
-                `Найдена предшествующая запись о выставленном счёте / договоре с «${prev.counterpartyName}» на сумму ${fmtMoney(prev.amount)}.`,
-              ],
-              sourceLinks: [
-                {
-                  opId: prev.id,
-                  opNumber: idx + 1,
-                  date: prev.date,
-                  label: `Счёт / договор #${idx + 1} от ${formatRuDateShort(prev.date)} (${fmtMoney(prev.amount)})`,
-                },
-              ],
-            },
-          };
-        }
+      const periodicBuyerCtr = Object.values(stateBefore.contracts).find(
+        (c) =>
+          c.kind === 'СПокупателем' &&
+          c.periodicAmount !== undefined &&
+          c.periodicAmount >= 0.01 &&
+          ((cpNorm && c.counterpartyKey === cpNorm) ||
+            (qStems.length > 0 &&
+              c.subjectKeywords.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))))
+      );
+      if (periodicBuyerCtr && periodicBuyerCtr.periodicAmount) {
+        const cpRec = stateBefore.counterparties[periodicBuyerCtr.counterpartyKey];
+        return {
+          resolvedAmount: round2(periodicBuyerCtr.periodicAmount),
+          amountMode: 'from_related_doc',
+          counterpartyName: linkedCpName || periodicBuyerCtr.counterpartyName,
+          counterpartyInn: linkedCpInn || cpRec?.inn,
+          counterpartyKpp: linkedCpKpp || cpRec?.kpp,
+          contractName: linkedContract || periodicBuyerCtr.contractName,
+          vatRate: periodicBuyerCtr.vatRate,
+          vatRule: periodicBuyerCtr.vatRule,
+          step01Breakdown: {
+            resolverLevel: 3,
+            resolverLevelName: LEVEL_NAMES[3],
+            summaryFormula: `Ежемесячная ставка по счёту/договору #${periodicBuyerCtr.firstSeenOpNumber} = ${fmtMoney(periodicBuyerCtr.periodicAmount)}`,
+            steps: [
+              `Подтянута периодическая (месячная) сумма по договору/счёту с «${periodicBuyerCtr.counterpartyName}» (#${periodicBuyerCtr.firstSeenOpNumber} от ${formatRuDateShort(periodicBuyerCtr.firstSeenDate)}): ${fmtMoney(periodicBuyerCtr.periodicAmount)}.`,
+            ],
+            sourceLinks: [
+              {
+                opId: periodicBuyerCtr.firstSeenOpId,
+                opNumber: periodicBuyerCtr.firstSeenOpNumber,
+                date: periodicBuyerCtr.firstSeenDate,
+                label: `Счёт/договор #${periodicBuyerCtr.firstSeenOpNumber} от ${formatRuDateShort(periodicBuyerCtr.firstSeenDate)} (${fmtMoney(periodicBuyerCtr.periodicAmount)}/мес.)`,
+              },
+            ],
+          },
+        };
+      }
+    }
+
+    // Priority: Check open customer orders (СчетПокупателю / договор) in virtual1CState.openOrders!
+    // Apply to advance receipts ("аванс / предоплата") and to sales ("sale_goods / sale_services"),
+    // or bank_in when no 62.01 receivable exists yet for this buyer!
+    const hasOpen6201ForBuyer = stateBefore.openSettlements.some(
+      (s) =>
+        s.account === '62.01' &&
+        s.remainingAmount >= 0.01 &&
+        ((cpNorm && normalizeCounterpartyKey1C(s.counterpartyName) === cpNorm) ||
+          (!cpNorm && s.keywordStems.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))))
+    );
+    const shouldCheckCustomerOrdersFirst =
+      input.category === 'sale_goods' ||
+      input.category === 'sale_services' ||
+      /аванс|предоплат|по\s+счет/iu.test(input.description) ||
+      !hasOpen6201ForBuyer;
+
+    if (shouldCheckCustomerOrdersFirst) {
+      const openCustOrders = (stateBefore.openOrders ?? []).filter(
+        (o) =>
+          o.orderKind === 'customer' &&
+          o.status === 'open' &&
+          o.remainingAmount >= 0.01 &&
+          ((cpNorm && o.counterpartyKey === cpNorm) ||
+            (!cpNorm && o.keywordStems.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))))
+      );
+      if (openCustOrders.length > 0) {
+        const stemPreferred =
+          qStems.length > 0
+            ? openCustOrders.filter((o) =>
+                o.keywordStems.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))
+              )
+            : [];
+        const chosenOrder = stemPreferred[0] || openCustOrders[0];
+        return {
+          resolvedAmount: chosenOrder.remainingAmount,
+          amountMode: 'from_related_doc',
+          counterpartyName: linkedCpName || chosenOrder.counterpartyName,
+          counterpartyInn: linkedCpInn || chosenOrder.counterpartyInn,
+          counterpartyKpp: linkedCpKpp || chosenOrder.counterpartyKpp,
+          contractName: linkedContract || chosenOrder.contractName,
+          vatRate: chosenOrder.vatRate,
+          vatRule: chosenOrder.vatRule,
+          step01Breakdown: {
+            resolverLevel: 3,
+            resolverLevelName: LEVEL_NAMES[3],
+            summaryFormula: `Подтянуто из счёта/договора #${chosenOrder.originOpNumber} от ${formatRuDateShort(chosenOrder.originDate)} = ${fmtMoney(chosenOrder.remainingAmount)}`,
+            steps: [
+              `Найдена предшествующая запись о выставленном счёте / заказе покупателю «${chosenOrder.counterpartyName}» (#${chosenOrder.originOpNumber} от ${formatRuDateShort(chosenOrder.originDate)}) на сумму ${fmtMoney(chosenOrder.remainingAmount)}.`,
+            ],
+            sourceLinks: [
+              {
+                opId: chosenOrder.originOpId,
+                opNumber: chosenOrder.originOpNumber,
+                date: chosenOrder.originDate,
+                label: `Счёт/договор #${chosenOrder.originOpNumber} от ${formatRuDateShort(chosenOrder.originDate)} (${fmtMoney(chosenOrder.remainingAmount)})`,
+              },
+            ],
+          },
+        };
       }
     }
 
     const targetAcc =
       input.category === 'bank_in' || input.category === 'cash_in' ? '62.01' : '62.02';
-    const cpNorm = normalizeCounterpartyKey1C(linkedCpName);
-    const qStems = extractKeywordStems1C(`${input.nomenclatureName || ''} ${input.description}`);
-    const openBuyer = stateBefore.openSettlements.filter(
+    const openBuyerAll = stateBefore.openSettlements.filter(
       (s) =>
         s.account === targetAcc &&
         s.remainingAmount >= 0.01 &&
@@ -1113,6 +1316,13 @@ function resolveOperationAmountAndLinksCore(
           (!cpNorm &&
             s.keywordStems.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))))
     );
+    const stemFilteredBuyer =
+      openBuyerAll.length > 1 && qStems.length > 0
+        ? openBuyerAll.filter((s) =>
+            s.keywordStems.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))
+          )
+        : [];
+    const openBuyer = stemFilteredBuyer.length > 0 ? stemFilteredBuyer : openBuyerAll;
     if (openBuyer.length > 0) {
       const total = round2(openBuyer.reduce((acc, s) => acc + s.remainingAmount, 0));
       const first = openBuyer[0];
@@ -1416,7 +1626,9 @@ function resolveOperationAmountAndLinksCore(
   // ============================================================================
   if (input.category === 'alimony_payout') {
     const isMultiRecipientAlimony =
-      /\sи\s+супруг|по\s+исполнительн\p{L}*\s+листам|всем\s+получател/iu.test(input.description);
+      /(?:,|\s+и)\s*супруг|супруг\p{L}*.*супруг|по\s+исполнительн\p{L}*\s+листам|всем\s+получател/iu.test(
+        input.description
+      ) || (input.description.match(/\b\d{12}\b/g)?.length ?? 0) >= 2;
     if (isMultiRecipientAlimony) {
       const open7641All = stateBefore.openSettlements.filter(
         (s) => s.account === '76.41' && s.remainingAmount >= 0.01
@@ -1777,7 +1989,9 @@ function resolveOperationAmountAndLinksCore(
     let penaltySum = 0;
     const parts: string[] = [];
     for (const m of inlineMatches) {
-      const val = round2(Number(m[1].replace(/[\s\u00A0]/g, '').replace(',', '.')) || 0);
+      const rawDigits = (m[1] || '').replace(/[\s\u00A0]/g, '').replace(',', '.');
+      if (/^\d{9,}$/.test(rawDigits)) continue;
+      const val = round2(Number(rawDigits) || 0);
       if (val > 0) {
         penaltySum = round2(penaltySum + val);
         parts.push(fmtMoney(val));

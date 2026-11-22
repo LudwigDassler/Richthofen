@@ -95,6 +95,10 @@ function deriveReadinessStatus(op: QueuedOperation): OperationReadinessStatus {
     op.category === 'writ_of_execution' ||
     op.docType1C === 'ИсполнительныйЛист' ||
     op.category === 'contract_event' ||
+    op.category === 'customer_invoice' ||
+    op.category === 'supplier_invoice' ||
+    op.docType1C === 'СчетПокупателю' ||
+    op.docType1C === 'СчетОтПоставщика' ||
     op.category === 'policy_event'
   ) {
     return 'ready';

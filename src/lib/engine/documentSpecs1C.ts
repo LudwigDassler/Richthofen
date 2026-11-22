@@ -18,6 +18,76 @@ function makeSpec(spec: DocumentSpec1C): DocumentSpec1C {
 }
 
 export const DOCUMENT_SPECS: Record<OperationCategory, DocumentSpec1C> = {
+  customer_invoice: makeSpec({
+    docType: 'СчетПокупателю',
+    category: 'customer_invoice',
+    label: '1С: Счёт покупателю (на оплату, без проводок)',
+    uiProfile: 'trade_services',
+    menuPath1C: 'Продажи → Счета покупателям → кнопка «Создать»',
+    documentKind1C: 'Счёт покупателю на оплату (проводок не формирует, основание для Реализации и Поступления на р/с)',
+    requiresCommercialCounterparty: true,
+    acceptsCounterpartySubconto: true,
+    requiresIndividual: false,
+    needsContract: true,
+    needsWarehouse: false,
+    needsExpenseItem: false,
+    needsCashFlowItem: false,
+    allowsZeroPostings: true,
+    vatPolicy: 'optional_by_text',
+    defaultSubaccounts: { debit: '', credit: '' },
+    auditGuidanceTemplate: {
+      repostInstruction: 'Запишите и проведите «Счёт покупателю» (кнопка «Провести и закрыть»)',
+      verifyInOsv: 'Продажи → Счета покупателям (проводок в ОСВ не формирует до отгрузки или оплаты)',
+      defaultCheckPoints: [
+        'Проверьте покупателя, договор с покупателем, сумму счёта и ставку НДС',
+        'При отгрузке нажмите «Создать на основании → Реализация (акт, накладная, УПД)»',
+      ],
+    },
+    masterDataRules: {
+      createsCounterparty: true,
+      createsContract: true,
+      createsNomenclature: true,
+      createsEmployee: false,
+      createsFixedAsset: false,
+    },
+    exportBslKind: 'manual_operation',
+  }),
+
+  supplier_invoice: makeSpec({
+    docType: 'СчетОтПоставщика',
+    category: 'supplier_invoice',
+    label: '1С: Счёт от поставщика (на оплату, без проводок)',
+    uiProfile: 'trade_services',
+    menuPath1C: 'Покупки → Счета от поставщиков → кнопка «Создать»',
+    documentKind1C: 'Счёт от поставщика на оплату (проводок не формирует, основание для Оплаты и Поступления)',
+    requiresCommercialCounterparty: true,
+    acceptsCounterpartySubconto: true,
+    requiresIndividual: false,
+    needsContract: true,
+    needsWarehouse: false,
+    needsExpenseItem: false,
+    needsCashFlowItem: false,
+    allowsZeroPostings: true,
+    vatPolicy: 'optional_by_text',
+    defaultSubaccounts: { debit: '', credit: '' },
+    auditGuidanceTemplate: {
+      repostInstruction: 'Запишите «Счёт от поставщика» (кнопка «Записать и закрыть»)',
+      verifyInOsv: 'Покупки → Счета от поставщиков (проводок в ОСВ не формирует до оплаты или поступления)',
+      defaultCheckPoints: [
+        'Проверьте поставщика, договор с поставщиком, сумму счёта и ставку НДС',
+        'При оплате нажмите «Создать на основании → Списание с расчётного счёта»',
+      ],
+    },
+    masterDataRules: {
+      createsCounterparty: true,
+      createsContract: true,
+      createsNomenclature: true,
+      createsEmployee: false,
+      createsFixedAsset: false,
+    },
+    exportBslKind: 'manual_operation',
+  }),
+
   contract_event: makeSpec({
     docType: 'ОперацияБух',
     category: 'contract_event',
@@ -2217,6 +2287,8 @@ export const DOC_TYPE_TO_DEFAULT_CATEGORY_1C: Record<DocType1CBP30, OperationCat
   ОперацияПоПлатежнойКарте: 'acquiring_receipt',
   СчетФактураПолученный: 'vat_deduction',
   СчетФактураВыданный: 'advance_vat',
+  СчетПокупателю: 'customer_invoice',
+  СчетОтПоставщика: 'supplier_invoice',
   ВыдачаНаличных: 'cash_out',
   ПоступлениеНаличных: 'cash_in',
   НачислениеЗарплаты: 'payroll_accrual',
@@ -2237,6 +2309,8 @@ export const DOC_TYPE_LABELS_1C: Record<DocType1CBP30, string> = {
   ПоступлениеНаРасчетныйСчет: '1С: Поступление на расчётный счёт',
   ПоступлениеТоваровУслуг: '1С: Поступление (акты, накладные, УПД)',
   РеализацияТоваровУслуг: '1С: Реализация (акты, накладные, УПД)',
+  СчетПокупателю: '1С: Счёт покупателю (на оплату)',
+  СчетОтПоставщика: '1С: Счёт от поставщика (на оплату)',
   РасходМатериалов: '1С: Расход материалов (Требование-накладная)',
   ПередачаМатериаловВЭксплуатацию: '1С: Передача материалов в эксплуатацию (МОЛ)',
   ПринятиеКУчетуОС: '1С: Принятие к учёту ОС',
@@ -2269,6 +2343,8 @@ export const ALL_DOC_TYPES_1C: DocType1CBP30[] = [
   'ПоступлениеНаРасчетныйСчет',
   'ПоступлениеТоваровУслуг',
   'РеализацияТоваровУслуг',
+  'СчетПокупателю',
+  'СчетОтПоставщика',
   'ПоступлениеНаличных',
   'ВыдачаНаличных',
   'АвансовыйОтчет',
@@ -2474,7 +2550,9 @@ export function doesSpecAllowZeroPostings(
   }
   if (
     opOrCategory.docType1C === 'ПриемНаРаботу' ||
-    opOrCategory.docType1C === 'ИсполнительныйЛист'
+    opOrCategory.docType1C === 'ИсполнительныйЛист' ||
+    opOrCategory.docType1C === 'СчетПокупателю' ||
+    opOrCategory.docType1C === 'СчетОтПоставщика'
   ) {
     return true;
   }

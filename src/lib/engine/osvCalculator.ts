@@ -126,16 +126,43 @@ interface MovementRecord {
   description: string;
 }
 
-function normalizeSubcontoLabel(raw?: string, acc?: string): string {
+export function normalizeSubcontoLabel(raw?: string, acc?: string): string {
   const clean = (raw ?? '').trim();
   if (!clean) return 'Без аналитики (субконто)';
+  // On 50.01 (Касса организации), Subconto 1 (Статьи ДДС) is turnover-only in 1C:BP 3.0; balance is kept for the cash desk as a whole.
+  if (acc === '50.01') {
+    return 'Основная касса организации';
+  }
+  // On 51 (Расчётные счета), Subconto 1 is Банковские счета (balance-bearing), Subconto 2 (Статьи ДДС) is turnover-only.
+  if (acc === '51') {
+    return clean.split(/\s+\/\s+/)[0].trim() || 'Основной расчётный счёт';
+  }
+  // On 70 (Расчёты с персоналом по оплате труда), 1C:BP 3.0 default «Сводно по всем работникам» keeps consolidated payroll register balance.
+  if (acc === '70') {
+    return 'Работники организации (сводно по ведомостям)';
+  }
+  // On 68.* and 69.*, Subconto 1 in 1C:BP 3.0 is Виды платежей в бюджет (фонды): «Налог (взносы): начислено / уплачено».
+  if (acc && (acc.startsWith('68.') || acc.startsWith('69.'))) {
+    return 'Налог (взносы): начислено / уплачено';
+  }
   // In 1C:BP 3.0 Chart of Accounts, on 20.01 / 20.02 / 23 Subconto 1 is Номенклатурные группы (balance-bearing)
   // while Subconto 2 (Статьи затрат) is marked «Только обороты» so production output (43 <- 20.01) & month-end close cleanly.
   if (acc === '20.01' || acc === '20.02' || acc === '23') {
     return clean.split(/\s+\/\s+/)[0].trim() || clean;
   }
-  if (acc && (acc.startsWith('60') || acc.startsWith('62') || acc.startsWith('76'))) {
-    return clean.replace(/\s+\/\s+Основной договор$/iu, '').trim() || clean;
+  // Fixed assets & capex accounts group balance by asset/object name (Subconto 1)
+  if (acc === '08.04.1' || acc === '01.01' || acc === '01.09' || acc === '02.01') {
+    return clean.split(/\s+\/\s+/)[0].trim() || clean;
+  }
+  // Counterparty settlement & VAT accounts group primary OSV subconto by Counterparty (Subconto 1)
+  if (
+    acc &&
+    (acc.startsWith('60') ||
+      acc.startsWith('62') ||
+      acc.startsWith('76') ||
+      acc.startsWith('19'))
+  ) {
+    return clean.split(/\s+\/\s+/)[0].trim() || clean;
   }
   return clean;
 }
@@ -471,6 +498,8 @@ export function calculateOsvReport(params: {
         }
         const sSides = splitNetToSides(sNet, info.type);
         const eSides = splitNetToSides(eNet, info.type);
+        const isTurnoverOnlyFinResultSub =
+          code.startsWith('90.') || code.startsWith('91.') || code.startsWith('99.');
         subRows.push({
           subcontoKey: `${code}::${label}`,
           subcontoLabel: label,
@@ -480,7 +509,7 @@ export function calculateOsvReport(params: {
           turnoverCredit: t.kt,
           endDebit: eSides.debit,
           endCredit: eSides.credit,
-          hasRedEnd: eSides.isRed,
+          hasRedEnd: isTurnoverOnlyFinResultSub ? false : eSides.isRed,
         });
       }
       if (subRows.length > 0) {

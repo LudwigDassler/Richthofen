@@ -13,6 +13,7 @@ import {
   VirtualFinancialInvestment1C,
   VirtualFixedAsset1C,
   VirtualNomenclature1C,
+  VirtualOpenOrder1C,
   VirtualOpenSettlement1C,
   VirtualWritOfExecution1C,
 } from '@/types/accounting';
@@ -577,6 +578,10 @@ export function cloneVirtual1CState(state: Virtual1CStateSnapshot): Virtual1CSta
       ...s,
       keywordStems: [...s.keywordStems],
     })),
+    openOrders: (state.openOrders ?? []).map((o) => ({
+      ...o,
+      keywordStems: [...o.keywordStems],
+    })),
   };
 }
 
@@ -592,6 +597,7 @@ export function createInitialVirtual1CState(
     writsOfExecution: [],
     financialInvestments: [],
     openSettlements: [],
+    openOrders: [],
   };
 
   if (!db1C) return state;
@@ -1174,9 +1180,13 @@ export function advanceVirtual1CStateWithOperation(
       .filter(Boolean);
     const isMultiCp = cpParts.length > 1;
     const roleHint =
-      op.category.startsWith('purchase_') || op.category === 'bank_out'
+      op.category.startsWith('purchase_') ||
+      op.category === 'bank_out' ||
+      op.category === 'supplier_invoice'
         ? 'Поставщик / подрядчик'
-        : op.category.startsWith('sale_') || op.category === 'bank_in'
+        : op.category.startsWith('sale_') ||
+            op.category === 'bank_in' ||
+            op.category === 'customer_invoice'
         ? 'Покупатель / заказчик'
         : op.category === 'founder_contribution' ||
             op.category === 'charter_capital' ||
@@ -1237,10 +1247,12 @@ export function advanceVirtual1CStateWithOperation(
     const cpNorm = normalizeCounterpartyKey1C(cpParts[0] || op.counterpartyName.trim());
     const cpName = cpParts[0] || op.counterpartyName.trim();
 
-    // 2. Register / update Contract for commercial counterparty (including contract_event recurring terms!)
+    // 2. Register / update Contract for commercial counterparty (including contract_event & multi-month invoices!)
     if (
       (op.contractName && op.contractName.trim()) ||
-      op.category === 'contract_event'
+      op.category === 'contract_event' ||
+      op.category === 'customer_invoice' ||
+      op.category === 'supplier_invoice'
     ) {
       if (
         ![
@@ -1256,25 +1268,46 @@ export function advanceVirtual1CStateWithOperation(
         const ctrKind: VirtualContract1C['contractKind'] =
           op.category.startsWith('sale_') ||
           op.category === 'bank_in' ||
-          (op.category === 'contract_event' && /покупател|заказчик/iu.test(op.description))
+          op.category === 'customer_invoice' ||
+          (op.category === 'contract_event' && /покупател|заказчик|сдач\p{L}*\s+.*в\s+аренд/iu.test(op.description))
             ? 'СПокупателем'
             : op.category.startsWith('purchase_') ||
                 op.category === 'bank_out' ||
+                op.category === 'supplier_invoice' ||
                 op.category === 'contract_event'
               ? 'СПоставщиком'
               : 'Прочее';
         const ctrName = (op.contractName || 'Основной договор').trim();
         const ctrKey = `ctr:${cpNorm}:${ctrKind}:${normalizeSimpleEntityKey1C(ctrName)}`;
         const recurring =
-          op.category === 'contract_event' || op.periodicPaymentAmount
+          op.category === 'contract_event' ||
+          op.category === 'customer_invoice' ||
+          op.category === 'supplier_invoice' ||
+          op.periodicPaymentAmount
             ? extractRecurringContractTerms1C(op.description, op.amount)
             : null;
-        const periodicAmt = op.periodicPaymentAmount || recurring?.periodicAmount;
+        const multiMonthsMatch =
+          (op.category === 'customer_invoice' ||
+            op.category === 'supplier_invoice' ||
+            op.category === 'contract_event') &&
+          op.amount >= 0.01
+            ? op.description.match(/\bна\s+(\d{1,2})\s*мес/iu)
+            : null;
+        const derivedMonthlyFromInvoice =
+          multiMonthsMatch && Number(multiMonthsMatch[1]) >= 2
+            ? round2(op.amount / Number(multiMonthsMatch[1]))
+            : undefined;
+        const periodicAmt =
+          op.periodicPaymentAmount || recurring?.periodicAmount || derivedMonthlyFromInvoice;
         const existingCtr = state.contracts.find((c) => c.key === ctrKey);
         if (existingCtr) {
           if (op.contractNumber && !existingCtr.number) existingCtr.number = op.contractNumber;
           if (periodicAmt && periodicAmt > 0) existingCtr.periodicAmount = periodicAmt;
-          if (recurring?.periodicity) existingCtr.periodicity = recurring.periodicity;
+          if (recurring?.periodicity) {
+            existingCtr.periodicity = recurring.periodicity;
+          } else if (derivedMonthlyFromInvoice) {
+            existingCtr.periodicity = 'monthly';
+          }
           if (recurring?.vatRule) existingCtr.vatRule = recurring.vatRule;
           if (recurring?.vatRate !== undefined) existingCtr.vatRate = recurring.vatRate;
           existingCtr.usages = addUsageRef(existingCtr.usages, usageRef);
@@ -1712,113 +1745,202 @@ export function advanceVirtual1CStateWithOperation(
     }
   }
 
-  // 8. Update Open Settlements (60.01, 60.02, 62.01, 62.02, 76.41) from generated entries
+  // 7b. Register / update Open Orders (СчетПокупателю / СчетОтПоставщика / composite invoice + advance)
+  const mentionsInvoiceIssued =
+    /(?:выписан|выписал|выставлен)\p{L}*\s+счет(?!-фактур)/iu.test(op.description);
+  const mentionsInvoiceReceived =
+    /(?:получен|поступил)\p{L}*\s+счет(?!-фактур)/iu.test(op.description);
+
+  if (
+    (op.category === 'customer_invoice' ||
+      op.category === 'supplier_invoice' ||
+      (op.category === 'bank_in' && mentionsInvoiceIssued) ||
+      (op.category === 'bank_out' && mentionsInvoiceReceived)) &&
+    op.amount >= 0.01
+  ) {
+    const orderSide: VirtualOpenOrder1C['side'] =
+      op.category === 'supplier_invoice' || op.category === 'bank_out' ? 'supplier' : 'customer';
+    let orderTotal = round2(op.amount);
+    if (op.category === 'bank_in' || op.category === 'bank_out') {
+      const pctAdvMatch = op.description.match(
+        /(?:аванс|предоплат\p{L}*)\s*(\d{1,2}(?:[.,]\d+)?)\s*%/iu
+      );
+      const pctVal = pctAdvMatch ? Number(pctAdvMatch[1].replace(',', '.')) : 0;
+      if (pctVal > 0 && pctVal < 100) {
+        orderTotal = round2((op.amount * 100) / pctVal);
+      }
+    }
+    const docNumMatch =
+      op.docNumber ||
+      op.description.match(/счет\p{L}*\s*№?\s*([А-Яа-яA-Za-z0-9/-]{1,12})/iu)?.[1] ||
+      op.contractNumber ||
+      '';
+    const subjectText = `${op.nomenclatureName || ''} ${op.description || ''}`.trim();
+    const existingSameOrder = state.openOrders.find((o) => o.originOpId === op.id);
+    if (!existingSameOrder) {
+      state.openOrders.push({
+        id: `ord-${orderSide}-${op.id}`,
+        side: orderSide,
+        counterpartyName: op.counterpartyName || '',
+        counterpartyInn: op.counterpartyInn || '',
+        counterpartyKpp: op.counterpartyKpp || '',
+        contractName: op.contractName || 'Основной договор',
+        docNumber: docNumMatch || undefined,
+        totalAmount: orderTotal,
+        remainingAmount: orderTotal,
+        vatRate: op.vatRate,
+        vatRule: op.vatRule,
+        subjectSummary: op.nomenclatureName || op.description,
+        keywordStems: extractKeywordStems1C(subjectText),
+        status: 'open',
+        originOpId: op.id,
+        originOpNumber: opNumber,
+        originDate: op.date,
+      });
+    }
+  }
+
+  // Cancel matching openOrders upon buyer/supplier advance refund ("возврат аванса")
+  if (
+    (op.category === 'bank_out' || op.category === 'bank_in') &&
+    /возврат\p{L}*.*(?:аванс|предоплат)|возвращ\p{L}*.*(?:аванс|предоплат)/iu.test(op.description)
+  ) {
+    const cancelSide: VirtualOpenOrder1C['side'] =
+      op.category === 'bank_out' ? 'customer' : 'supplier';
+    const cpNormCancel = normalizeCounterpartyKey1C(op.counterpartyName || '');
+    for (const ord of state.openOrders) {
+      if (ord.side !== cancelSide || ord.status !== 'open') continue;
+      if (cpNormCancel && normalizeCounterpartyKey1C(ord.counterpartyName) !== cpNormCancel) {
+        continue;
+      }
+      ord.status = 'cancelled';
+      ord.remainingAmount = 0;
+    }
+  }
+
+  // Fulfill / reduce openOrders upon sale_goods / sale_services / purchase_*
+  if (
+    (op.category === 'sale_goods' ||
+      op.category === 'sale_services' ||
+      op.category.startsWith('purchase_')) &&
+    op.amount >= 0.01
+  ) {
+    const targetSide: VirtualOpenOrder1C['side'] = op.category.startsWith('purchase_')
+      ? 'supplier'
+      : 'customer';
+    const cpNormFulfill = normalizeCounterpartyKey1C(op.counterpartyName || '');
+    const opStems = extractKeywordStems1C(`${op.nomenclatureName || ''} ${op.description || ''}`);
+    const candidates = state.openOrders
+      .filter((o) => o.side === targetSide && o.status === 'open' && o.remainingAmount >= 0.01)
+      .filter(
+        (o) =>
+          !cpNormFulfill ||
+          !o.counterpartyName ||
+          normalizeCounterpartyKey1C(o.counterpartyName) === cpNormFulfill
+      )
+      .sort((a, b) => {
+        const aHit = a.keywordStems.some((ks) => opStems.some((os) => stemsMatch(ks, os)));
+        const bHit = b.keywordStems.some((ks) => opStems.some((os) => stemsMatch(ks, os)));
+        if (aHit !== bHit) return bHit ? 1 : -1;
+        return (a.originDate || '').localeCompare(b.originDate || '');
+      });
+    let remFulfill = op.amount;
+    for (const ord of candidates) {
+      if (remFulfill < 0.01) break;
+      const used = Math.min(ord.remainingAmount, remFulfill);
+      ord.remainingAmount = round2(ord.remainingAmount - used);
+      remFulfill = round2(remFulfill - used);
+      if (ord.remainingAmount < 0.01) {
+        ord.status = 'fulfilled';
+      }
+    }
+  }
+
+  // 8. Update Open Settlements (60.01, 60.02, 62.01, 62.02, 76.41) in TWO PASSES:
+  // Pass 1: register all newly created debts / advances on op.entries FIRST
+  // Pass 2: pay down / offset open debts / advances SECOND (so composite same-op settlements never cannibalize older open settlements)
+  const pushOpenSettlement = (
+    account: VirtualOpenSettlement1C['account'],
+    amountVal: number,
+    cpOverride?: string
+  ) => {
+    const existingSameOp = state.openSettlements.find(
+      (s) => s.originOpId === op.id && s.account === account
+    );
+    if (existingSameOp) {
+      existingSameOp.originalAmount = round2(existingSameOp.originalAmount + amountVal);
+      existingSameOp.remainingAmount = round2(existingSameOp.remainingAmount + amountVal);
+    } else {
+      const subjectText = `${op.nomenclatureName || ''} ${op.description || ''}`.trim();
+      state.openSettlements.push({
+        id: `op-${account}-${op.id}`,
+        account,
+        counterpartyName: cpOverride || op.counterpartyName || '',
+        counterpartyInn: op.counterpartyInn || '',
+        counterpartyKpp: op.counterpartyKpp || '',
+        contractName: op.contractName || 'Основной договор',
+        originalAmount: amountVal,
+        remainingAmount: amountVal,
+        subjectSummary: op.nomenclatureName || op.description,
+        keywordStems: extractKeywordStems1C(subjectText),
+        source: 'created_in_operation',
+        originOpId: op.id,
+        originOpNumber: opNumber,
+        originDate: op.date,
+      });
+    }
+  };
+
+  const paydownOpenSettlement = (
+    account: VirtualOpenSettlement1C['account'],
+    amountVal: number,
+    subcontoRaw: string
+  ) => {
+    let toPay = amountVal;
+    const entryCpRaw = (subcontoRaw || '').split('/')[0].trim();
+    const cpNorm = normalizeCounterpartyKey1C(entryCpRaw || op.counterpartyName || '');
+    const payStems = extractKeywordStems1C(op.description);
+
+    const candidates = state.openSettlements
+      .filter((s) => s.account === account && s.remainingAmount >= 0.01)
+      .filter(
+        (s) =>
+          !cpNorm ||
+          !s.counterpartyName ||
+          normalizeCounterpartyKey1C(s.counterpartyName) === cpNorm
+      )
+      .sort((a, b) => {
+        const aSameOp = a.originOpId === op.id;
+        const bSameOp = b.originOpId === op.id;
+        if (aSameOp !== bSameOp) return bSameOp ? 1 : -1;
+        const aStemHit = a.keywordStems.some((ks) =>
+          payStems.some((ps) => stemsMatch(ks, ps))
+        );
+        const bStemHit = b.keywordStems.some((ks) =>
+          payStems.some((ps) => stemsMatch(ks, ps))
+        );
+        if (aStemHit !== bStemHit) return bStemHit ? 1 : -1;
+        return (a.originDate || '').localeCompare(b.originDate || '');
+      });
+
+    for (const s of candidates) {
+      if (toPay < 0.01) break;
+      const used = Math.min(s.remainingAmount, toPay);
+      s.remainingAmount = round2(s.remainingAmount - used);
+      toPay = round2(toPay - used);
+    }
+  };
+
+  // PASS 1: Push new open settlements
   for (const entry of op.entries) {
     if (entry.isOffBalance || entry.amount < 0.01) continue;
-
-    const pushOpenSettlement = (
-      account: VirtualOpenSettlement1C['account'],
-      amountVal: number,
-      cpOverride?: string
-    ) => {
-      const existingSameOp = state.openSettlements.find(
-        (s) => s.originOpId === op.id && s.account === account
-      );
-      if (existingSameOp) {
-        existingSameOp.originalAmount = round2(existingSameOp.originalAmount + amountVal);
-        existingSameOp.remainingAmount = round2(existingSameOp.remainingAmount + amountVal);
-      } else {
-        const subjectText = `${op.nomenclatureName || ''} ${op.description || ''}`.trim();
-        state.openSettlements.push({
-          id: `op-${account}-${op.id}`,
-          account,
-          counterpartyName: cpOverride || op.counterpartyName || '',
-          counterpartyInn: op.counterpartyInn || '',
-          counterpartyKpp: op.counterpartyKpp || '',
-          contractName: op.contractName || 'Основной договор',
-          originalAmount: amountVal,
-          remainingAmount: amountVal,
-          subjectSummary: op.nomenclatureName || op.description,
-          keywordStems: extractKeywordStems1C(subjectText),
-          source: 'created_in_operation',
-          originOpId: op.id,
-          originOpNumber: opNumber,
-          originDate: op.date,
-        });
-      }
-    };
-
-    const paydownOpenSettlement = (
-      account: VirtualOpenSettlement1C['account'],
-      amountVal: number,
-      subcontoRaw: string
-    ) => {
-      let toPay = amountVal;
-      const entryCpRaw = (subcontoRaw || '').split('/')[0].trim();
-      const cpNorm = normalizeCounterpartyKey1C(entryCpRaw || op.counterpartyName || '');
-      const payStems = extractKeywordStems1C(op.description);
-
-      const candidates = state.openSettlements
-        .filter((s) => s.account === account && s.remainingAmount >= 0.01)
-        .filter(
-          (s) =>
-            !cpNorm ||
-            !s.counterpartyName ||
-            normalizeCounterpartyKey1C(s.counterpartyName) === cpNorm
-        )
-        .sort((a, b) => {
-          const aStemHit = a.keywordStems.some((ks) =>
-            payStems.some((ps) => stemsMatch(ks, ps))
-          );
-          const bStemHit = b.keywordStems.some((ks) =>
-            payStems.some((ps) => stemsMatch(ks, ps))
-          );
-          if (aStemHit !== bStemHit) return bStemHit ? 1 : -1;
-          return (a.originDate || '').localeCompare(b.originDate || '');
-        });
-
-      for (const s of candidates) {
-        if (toPay < 0.01) break;
-        const used = Math.min(s.remainingAmount, toPay);
-        s.remainingAmount = round2(s.remainingAmount - used);
-        toPay = round2(toPay - used);
-      }
-    };
-
-    // 60.01 (passive): Credit increases unpaid supplier debt; Debit pays it down
     if (entry.credit === '60.01') pushOpenSettlement('60.01', entry.amount);
-    if (entry.debit === '60.01') paydownOpenSettlement('60.01', entry.amount, entry.debitSubconto);
-
-    // 60.02 (active): Debit increases supplier advance; Credit offsets it
     if (entry.debit === '60.02') pushOpenSettlement('60.02', entry.amount);
-    if (entry.credit === '60.02') paydownOpenSettlement('60.02', entry.amount, entry.creditSubconto);
-
-    // 62.01 (active): Debit increases unpaid buyer receivable; Credit pays it down
     if (entry.debit === '62.01' && entry.credit !== '62.02') {
       pushOpenSettlement('62.01', entry.amount);
     }
-    if (entry.credit === '62.01') paydownOpenSettlement('62.01', entry.amount, entry.creditSubconto);
-
-    // 62.02 (passive): Credit increases buyer advance; Debit offsets it
     if (entry.credit === '62.02') pushOpenSettlement('62.02', entry.amount);
-    if (entry.debit === '62.02') paydownOpenSettlement('62.02', entry.amount, entry.debitSubconto);
 
-    // 51 <- 76.09: Receipt of accrued promissory note / security interest reduces unpaid accruedInterestAmount
-    if (entry.debit === '51' && entry.credit === '76.09') {
-      const notesWithInterest = state.financialInvestments.filter(
-        (f) => (f.accruedInterestAmount ?? 0) >= 0.01
-      );
-      let remReceived = entry.amount;
-      for (const n of notesWithInterest) {
-        if (remReceived < 0.01) break;
-        const curAcc = n.accruedInterestAmount || 0;
-        const clearAmt = Math.min(curAcc, remReceived);
-        n.accruedInterestAmount = round2(Math.max(0, curAcc - clearAmt));
-        remReceived = round2(remReceived - clearAmt);
-      }
-    }
-
-    // Credit 76.41 -> alimony accrued in payroll!
     if (entry.credit === '76.41') {
       const recSub = (entry.creditSubconto || op.alimonyRecipientName || '').trim();
       const recNorm = normalizeSimpleEntityKey1C(recSub);
@@ -1854,6 +1976,30 @@ export function advanceVirtual1CStateWithOperation(
         originOpNumber: opNumber,
         originDate: op.date,
       });
+    }
+  }
+
+  // PASS 2: Pay down / offset open settlements
+  for (const entry of op.entries) {
+    if (entry.isOffBalance || entry.amount < 0.01) continue;
+    if (entry.debit === '60.01') paydownOpenSettlement('60.01', entry.amount, entry.debitSubconto);
+    if (entry.credit === '60.02') paydownOpenSettlement('60.02', entry.amount, entry.creditSubconto);
+    if (entry.credit === '62.01') paydownOpenSettlement('62.01', entry.amount, entry.creditSubconto);
+    if (entry.debit === '62.02') paydownOpenSettlement('62.02', entry.amount, entry.debitSubconto);
+
+    // 51 <- 76.09: Receipt of accrued promissory note / security interest reduces unpaid accruedInterestAmount
+    if (entry.debit === '51' && entry.credit === '76.09') {
+      const notesWithInterest = state.financialInvestments.filter(
+        (f) => (f.accruedInterestAmount ?? 0) >= 0.01
+      );
+      let remReceived = entry.amount;
+      for (const n of notesWithInterest) {
+        if (remReceived < 0.01) break;
+        const curAcc = n.accruedInterestAmount || 0;
+        const clearAmt = Math.min(curAcc, remReceived);
+        n.accruedInterestAmount = round2(Math.max(0, curAcc - clearAmt));
+        remReceived = round2(remReceived - clearAmt);
+      }
     }
 
     // Debit 76.41 -> alimony paid out!

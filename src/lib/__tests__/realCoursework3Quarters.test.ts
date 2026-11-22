@@ -2,11 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { processBatchFiles } from '../import1c/batchFileParser';
+import {
+  extractSafeInlineMonetaryAmount,
+  processBatchFiles,
+} from '../import1c/batchFileParser';
 import { autoFixAllBy1CDb, runAuditDiagnostics } from '../engine/auditAndAutofix';
 import { calculateOsvReport } from '../engine/osvCalculator';
 import { detectOperationClassification } from '../engine/postingEngine';
 import { DOCUMENT_SPECS } from '../engine/documentSpecs1C';
+import { selectBestEgrulCandidate } from '../egrul/egrulLookup';
 
 function loadCourseworkBatchInput() {
   const specs = [
@@ -24,7 +28,43 @@ function loadCourseworkBatchInput() {
   });
 }
 
-test('Universal grammar classifier handles incoming payments, payroll payouts, OS word order, SRO fees, and composite settlement', () => {
+test('Hard sanity guard forbids parsing 9..20-digit INN/KPP/BIK/OGRN/bank codes as rubles and enforces region 78 EGRUL filter', () => {
+  assert.equal(
+    extractSafeInlineMonetaryAmount('Приобретен вексель у Банка Санкт-Петербург (7831820027 / 780601001)'),
+    0,
+    '10-digit SPb INN 7831820027 must NEVER be parsed as 7.83B rubles'
+  );
+  assert.equal(
+    extractSafeInlineMonetaryAmount('Оплачен счет ООО "Тест" ИНН 7816588904 КПП 781601001 р/сч 40702810455000001234 БИК 044030653'),
+    0,
+    'INN, KPP, r/s, and BIK must all yield 0 inline amount'
+  );
+  assert.equal(
+    extractSafeInlineMonetaryAmount('Выписан счет по дог.15 на 2 320 000 руб. ООО "Слава" (7816588904 / 781601001)'),
+    2320000,
+    'Explicit ruble sum alongside parenthesized INN/KPP must extract 2 320 000'
+  );
+
+  // Strict SPb region 78 filter: Krasnodar (23...) or Samara (63...) homonyms must be rejected
+  const krasnodarSlava = selectBestEgrulCandidate(
+    [
+      {
+        name: 'ООО «Слава»',
+        fullName: 'ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ «СЛАВА»',
+        inn: '2315997706',
+        kpp: '231501001',
+        ogrn: '1172375000000',
+        region: '23',
+        isActive: true,
+      },
+    ],
+    'ООО «Слава»',
+    '78'
+  );
+  assert.equal(krasnodarSlava, null, 'Out-of-region Krasnodar candidate must be rejected for SPb home region 78');
+});
+
+test('Universal grammar classifier handles incoming payments, СчетПокупателю, payroll payouts, OS word order, SRO fees, and composite settlement', () => {
   // 1. Incoming bank payment mentioning shipped goods/products must NEVER fall into sale_goods or manual
   const pay1 = detectOperationClassification({
     description: 'Получена оплата за оконные блоки от Покупателя А.',
@@ -37,6 +77,13 @@ test('Universal grammar classifier handles incoming payments, payroll payouts, O
   });
   assert.equal(pay2.category, 'bank_in');
   assert.equal(pay2.docType1C, 'ПоступлениеНаРасчетныйСчет');
+
+  // 1b. Standalone invoice to buyer -> СчетПокупателю (customer_invoice)
+  const invBuyer = detectOperationClassification({
+    description: 'Выписан счет по дог.15 на ремонт помещений ООО "Слава" (7816588904 / 781601001).',
+  });
+  assert.equal(invBuyer.category, 'customer_invoice');
+  assert.equal(invBuyer.docType1C, 'СчетПокупателю');
 
   // 2. Payroll payout with abbreviated "ЗП" (without slash) or "з/п"
   const zpBank = detectOperationClassification({
@@ -101,7 +148,7 @@ test('DOCUMENT_SPECS menuPath1C has zero duplicated adjacent segments', () => {
   }
 });
 
-test('Real 3-quarter coursework CSV pipeline (207 operations): 100% OSV balance, 0 red active balances, 0 false manual, 0 critical errors, 0 autofixable left', async () => {
+test('Real 3-quarter coursework CSV pipeline (207 operations): 100% OSV balance, 0 red active/subconto balances, 0 false manual, 0 critical errors, 0 autofixable left', async () => {
   const files = loadCourseworkBatchInput();
   const batch = await processBatchFiles(files, null, { reportingYear: 2026 });
 
@@ -133,6 +180,26 @@ test('Real 3-quarter coursework CSV pipeline (207 operations): 100% OSV balance,
 
   const ops = fixed.operations;
 
+  // Max primary operation amount must equal 10 692 000 ₽ (ООО «Ключ»), proving 0 billion-ruble INN corruptions
+  const primaryOps = ops.filter((o) => o.category !== 'closing');
+  const maxPrimaryAmt = Math.max(...primaryOps.map((o) => o.amount));
+  assert.equal(maxPrimaryAmt, 10692000, 'Max primary operation amount must be 10 692 000 ₽');
+
+  // Verify standalone СчетПокупателю and openOrders resolution (ООО «Слава» 2 320 000 ₽)
+  const slavaInvoice = ops.find(
+    (o) => o.category === 'customer_invoice' && o.description.includes('Слава')
+  );
+  assert.ok(slavaInvoice, 'Expected СчетПокупателю for ООО "Слава"');
+  assert.equal(slavaInvoice.docType1C, 'СчетПокупателю');
+  assert.equal(slavaInvoice.amount, 2320000);
+  assert.equal(slavaInvoice.entries.length, 0);
+
+  const slavaPrepay = ops.find(
+    (o) => o.category === 'bank_in' && o.description.includes('предоплата от ООО "Слава"')
+  );
+  assert.ok(slavaPrepay, 'Expected bank_in prepayment from ООО "Слава"');
+  assert.equal(slavaPrepay.amount, 2320000, 'Prepayment from ООО "Слава" must pull 2 320 000 ₽ from openOrders');
+
   // Zero false manual (ОперацияБух) and zero critical_error
   const manuals = ops.filter((o) => o.category === 'manual');
   const criticals = ops.filter((o) => o.readinessStatus === 'critical_error');
@@ -146,6 +213,9 @@ test('Real 3-quarter coursework CSV pipeline (207 operations): 100% OSV balance,
     0,
     `Expected 0 critical_error operations, got: ${criticals.map((c) => `${c.date}: ${c.readinessNote}`).join(' | ')}`
   );
+
+  assert.equal(fixed.executionSummary.remainingAutofixableCount, 0);
+  assert.equal(fixed.executionSummary.criticalAfter, 0);
 
   // Zero occurrences of deprecated generic message
   for (const op of ops) {
@@ -223,6 +293,8 @@ test('Real 3-quarter coursework CSV pipeline (207 operations): 100% OSV balance,
   assert.equal(findLeaf('75.01')?.endCredit ?? 0, 0, '75.01 founder shares must close to 0');
   assert.equal(findLeaf('76.09')?.endDebit ?? 0, 0, '76.09 interest/note settlements must close to 0');
   assert.equal(findLeaf('76.09')?.endCredit ?? 0, 0, '76.09 interest/note settlements must close to 0');
+  assert.equal(findLeaf('76.41')?.endDebit ?? 0, 0, '76.41 alimony settlements must close to 0');
+  assert.equal(findLeaf('76.41')?.endCredit ?? 0, 0, '76.41 alimony settlements must close to 0');
   assert.ok((findLeaf('51')?.endDebit ?? 0) > 0, '51 bank account must have positive debit balance');
 
   // Audit diagnostics: 0 remaining autofixable issues (and 0 total issues)
@@ -231,16 +303,15 @@ test('Real 3-quarter coursework CSV pipeline (207 operations): 100% OSV balance,
   assert.equal(autofixable.length, 0, 'Expected 0 remaining autofixable audit issues');
   assert.equal(issues.length, 0, 'Expected 0 audit issues after autofix');
 
-  // Subconto & AuditorHints invariants: 0 unoffset_advances warnings and 0 red subconto rows
+  // Subconto & AuditorHints invariants: 0 unoffset_advances warnings and 0 red subconto rows across ALL accounts
   const unoffsetHints = (yearOsv.auditorHints ?? []).filter((h) => h.checkType === 'unoffset_advances');
   assert.equal(
     unoffsetHints.length,
     0,
     `Expected 0 unoffset_advances hints, got: ${unoffsetHints.map((h) => h.title).join(' | ')}`
   );
-  for (const accCode of ['20.01', '26', '60.01', '60.02', '62.01', '62.02', '71.01', '73.03', '75.01']) {
-    const subs = yearOsv.subcontoRowsByAccount?.[accCode] ?? [];
-    const redSubs = subs.filter((s) => s.hasRedEnd);
+  for (const [accCode, subs] of Object.entries(yearOsv.subcontoRowsByAccount ?? {})) {
+    const redSubs = subs.filter((s) => s.hasRedEnd || s.hasRedStart);
     assert.equal(
       redSubs.length,
       0,
@@ -248,7 +319,7 @@ test('Real 3-quarter coursework CSV pipeline (207 operations): 100% OSV balance,
     );
   }
 
-  // Account Card (movementsByAccount) invariants on leaf & synthetic group accounts (e.g. "51", "10", "60", "90")
+  // Account Card (movementsByAccount) invariants on leaf & synthetic group accounts (e.g. "51", "10", "60", "62", "90")
   for (const code of ['51', '10', '60', '62', '90']) {
     const movs = yearOsv.movementsByAccount?.[code] ?? [];
     assert.ok(movs.length > 0, `Expected Account Card movements for account ${code}`);
@@ -263,3 +334,4 @@ test('Real 3-quarter coursework CSV pipeline (207 operations): 100% OSV balance,
     );
   }
 });
+

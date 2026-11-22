@@ -32,7 +32,7 @@ import {
   buildOperationMentorGuide1C,
   doesOperationRequireCounterparty,
 } from '@/lib/engine/mentorGuide1C';
-import { calculateOsvReport } from '@/lib/engine/osvCalculator';
+import { calculateOsvReport, normalizeSubcontoLabel } from '@/lib/engine/osvCalculator';
 import {
   advanceVirtual1CStateWithOperation,
   buildStep00DirectoryPrepSteps,
@@ -787,8 +787,9 @@ export function detectOperationClassification(
     .toLowerCase()
     .replace(/ё/g, 'е');
 
-  // 0a. Organizational / Accounting Policy / WIP Note / Reporting Instruction (0 postings)
+  // 0a. Organizational / Accounting Policy / WIP Note / Tax Deduction Notice / Reporting Instruction (0 postings)
   if (
+    /уведомлени\p{L}*.*(?:имущественн\p{L}*|налогов\p{L}*)\s+вычет/iu.test(itemAndDescText) ||
     /(?:утвержден|принят|установлен|издан)\p{L}*.*(?:учетн\p{L}*\s+политик|лимит\s+(?:остатка\s+)?касс|штатн\p{L}*\s+расписан|приказ\s+об\s+учетн)|(?:отрази|отраж[её]н)\p{L}*\s+незавер[шщ][её]нн\p{L}*\s+производств|инвентаризаци\p{L}*\s+нзп/iu.test(
       itemAndDescText
     ) ||
@@ -800,26 +801,42 @@ export function detectOperationClassification(
     return {
       category: 'policy_event',
       docType1C: 'ОперацияБух',
-      documentSubKind1C: 'Учётная политика / регламентная памятка (без проводок)',
+      documentSubKind1C: /вычет/iu.test(itemAndDescText)
+        ? 'Уведомление о праве на имущественный / налоговый вычет НДФЛ (без проводок при подаче)'
+        : 'Учётная политика / регламентная памятка (без проводок)',
     };
   }
 
-  // 0b. Framework Contract Signing / Trust / Invoice Issued or Received without Payment or Act (0 postings)
-  if (
-    /выдана\s+доверенност/iu.test(itemAndDescText) ||
-    (!/трудовой\s+договор.*оклад/iu.test(itemAndDescText) &&
-      /(?:заключен|подписан|пролонгирован)\p{L}*\s+договор|(?:выписан|выписал|выставлен|получен|поступил)\p{L}*\s+счет(?!-фактур)/iu.test(
-        itemAndDescText
-      ) &&
-      !/(?:получен|поступил|зачислен)\p{L}*.*(?:\d+\s*%\s*)?(?:товар|материал|оборудован|деньг|денежн|аванс|предоплат|оплат|доплат)|оплачен|произведен\p{L}*\s+оплат|перечислен|списан\p{L}*\s+с\s+р\/с|оказан\p{L}*\s+.*услуг|выполнен\p{L}*\s+.*работ|(?:^|[^\p{L}])акт(?=$|[^\p{L}])|товарн\p{L}*\s+накладн|торг-12|(?:^|[^\p{L}])упд(?=$|[^\p{L}])/iu.test(
-        itemAndDescText
-      ))
-  ) {
-    return {
-      category: 'contract_event',
-      docType1C: 'ОперацияБух',
-      documentSubKind1C: 'Регистрация договора / счёта на оплату / доверенности (без проводок)',
-    };
+  // 0b. Standalone Invoice to Customer (СчетПокупателю) / Invoice from Supplier (СчетОтПоставщика) / Framework Contract Signing (0 postings)
+  const hasPaymentOrShipmentInSameRow =
+    /(?:получен|поступил|зачислен)\p{L}*.*(?:\d+\s*%\s*)?(?:товар|материал|оборудован|деньг|денежн|аванс|предоплат|оплат|доплат)|оплачен|оплатил|произведен\p{L}*\s+оплат|перечислен|списан\p{L}*\s+с\s+р\/с|оказан\p{L}*\s+.*услуг|выполнен\p{L}*\s+.*работ|передан\p{L}*\s+.*работ|(?:^|[^\p{L}])акт(?=$|[^\p{L}])|товарн\p{L}*\s+накладн|торг-12|(?:^|[^\p{L}])упд(?=$|[^\p{L}])/iu.test(
+      itemAndDescText
+    );
+  if (!hasPaymentOrShipmentInSameRow && !/трудовой\s+договор.*оклад/iu.test(itemAndDescText)) {
+    if (/(?:выписан|выписал|выставлен)\p{L}*\s+счет(?!-фактур)/iu.test(itemAndDescText)) {
+      return {
+        category: 'customer_invoice',
+        docType1C: 'СчетПокупателю',
+        documentSubKind1C: 'Счёт покупателю на оплату (без проводок, регистрация суммы заказа)',
+      };
+    }
+    if (/(?:получен|поступил)\p{L}*\s+счет(?!-фактур)/iu.test(itemAndDescText)) {
+      return {
+        category: 'supplier_invoice',
+        docType1C: 'СчетОтПоставщика',
+        documentSubKind1C: 'Счёт от поставщика на оплату (без проводок)',
+      };
+    }
+    if (
+      /выдана\s+доверенност/iu.test(itemAndDescText) ||
+      /(?:заключен|подписан|пролонгирован)\p{L}*\s+договор/iu.test(itemAndDescText)
+    ) {
+      return {
+        category: 'contract_event',
+        docType1C: 'ОперацияБух',
+        documentSubKind1C: 'Регистрация договора / доверенности (без проводок)',
+      };
+    }
   }
 
   // 0b-off. Unilateral off-balance operations (001–009, МЦ)
@@ -878,7 +895,7 @@ export function detectOperationClassification(
 
   if (
     !/начислен/iu.test(itemAndDescText) &&
-    /(?:получен|поступил|зачислен)\p{L}*.*(?:(?:задолженност\p{L}*\s+по\s+)?(?:%%|процент\p{L}*).*(?:от\s+банк|вексел|ценн\p{L}*\s+бумаг)|от\s+банк\p{L}*.*(?:%%|процент\p{L}*))/iu.test(
+    /(?:получен|поступил|зачислен)\p{L}*.*(?:(?:задолженност\p{L}*\s+по\s+)?(?:%%|процент\p{L}*).*(?:от\s+банк|вексел|ценн\p{L}*\s+бумаг)|от\s+банк\p{L}*.*(?:%%|процент\p{L}*)|задолженност\p{L}*\s+по\s+(?:%%|процент\p{L}*))/iu.test(
       itemAndDescText
     )
   ) {
@@ -1319,9 +1336,9 @@ export function detectOperationClassification(
     };
   }
 
-  // 9b. HR Hiring / Transfer / Tax Deduction Notice (кадровый учёт без проводок)
+  // 9b. HR Hiring / Transfer (кадровый учёт без проводок)
   if (
-    /принят[аы]?\s+на\s+работу|прием\s+на\s+работу|оформлен[аы]?\s+в\s+штат|трудовой\s+договор.*оклад|переведен\p{L}*\s+на\s+должност|кадров\p{L}*\s+перевод|уведомлени\p{L}*.*(?:имущественн\p{L}*|налогов\p{L}*)\s+вычет/iu.test(
+    /принят[аы]?\s+на\s+работу|прием\s+на\s+работу|оформлен[аы]?\s+в\s+штат|трудовой\s+договор.*оклад|переведен\p{L}*\s+на\s+должност|кадров\p{L}*\s+перевод/iu.test(
       itemAndDescText
     )
   ) {
@@ -1546,20 +1563,36 @@ export function detectOperationClassification(
     draft.explicitCredit === '75' ||
     isFounderContributionText(itemAndDescText)
   ) {
+    const isInKindAsset =
+      /в\s+виде\s+|бытовк|станок|станк|леса|бетоносмесител|оборудован|основн\p{L}*\s+средств|имуществ|ос(?=$|[^\p{L}])/iu.test(
+        itemAndDescText
+      ) && !/денежн|наличн|на\s+р\/с|на\s+расчетн/iu.test(itemAndDescText);
     const isCash = /(?:^|[^\p{L}])пко(?=$|[^\p{L}])|в кассу|наличн/iu.test(itemAndDescText);
     return {
       category: 'founder_contribution',
-      docType1C: isCash ? 'ПоступлениеНаличных' : 'ПоступлениеНаРасчетныйСчет',
-      documentSubKind1C: 'Прочее поступление (вклад в УК — счёт 75.01)',
+      docType1C: isInKindAsset
+        ? 'ОперацияБух'
+        : isCash
+          ? 'ПоступлениеНаличных'
+          : 'ПоступлениеНаРасчетныйСчет',
+      documentSubKind1C: isInKindAsset
+        ? 'Вклад учредителя в УК основным средством / имуществом (Дт 08.04.1 Кт 75.01 → Дт 01.01 Кт 08.04.1)'
+        : 'Прочее поступление (вклад в УК — счёт 75.01)',
     };
   }
 
-  // 17. Explicit Bank IN (strictly BEFORE sales so "Получена оплата/доплата за отгруженную продукцию..." never falls into sale_goods!)
+  // 17. Explicit Bank IN (strictly BEFORE sales so "Получена оплата за оконные блоки от ООО..." or "доплата за отгруженную..." never falls into sale_goods or manual!)
   if (
     draft.directionHint === 'in' ||
-    /(?:получен|поступил|зачислен)\p{L}*(?:\s+на\s+(?:р\/с(?:ч)?|расчетн\p{L}*\s+счет\p{L}*))?(?:\s+от\s+[^\n,;]{1,65}?)?\s+(?:\d+\s*%\s*)?(?:оплат|доплат|предоплат|аванс|выручк|денежн\p{L}*\s+средств|задолженност|долг|остаток\s+(?:оплат|долг|задолженност))|поступление\s+на\s+(?:р\/с|расчетн)|(?:оплата|доплата|предоплата|аванс)\s+от\s+(?:покупател|заказчик|ооо|ао|пао|зао|ип)|платежное\s+поручение\s+входящ|выручка\s+на\s+расчетный\s+счет/iu.test(
+    (!/получен\p{L}*\s+счет(?!-фактур)|получен\p{L}*.*(?:кредит|за[её]м)|(?:приобретен|приобрел|получен|поступил|купил)\p{L}*\s+и\s+(?:оплачен|оплатил)/iu.test(
       itemAndDescText
-    )
+    ) &&
+      (/(?:получен|поступил|зачислен)\p{L}*(?:[^\n.;]{0,95}?)(?:оплат\p{L}*|доплат\p{L}*|предоплат\p{L}*|аванс\p{L}*|выручк\p{L}*|денежн\p{L}*\s+средств|задолженност\p{L}*\s+(?:покупател|заказчик|от\s+|по\s+%%|по\s+процент)|остаток\s+(?:оплат|долг|задолженност))/iu.test(
+        itemAndDescText
+      ) ||
+        /поступление\s+на\s+(?:р\/с|расчетн)|(?:оплата|доплата|предоплата|аванс)\s+от\s+(?:покупател|заказчик|ооо|ао|пао|зао|ип)|платежное\s+поручение\s+входящ|выручка\s+на\s+расчетный\s+счет/iu.test(
+          itemAndDescText
+        )))
   ) {
     return {
       category: 'bank_in',
@@ -1570,7 +1603,7 @@ export function detectOperationClassification(
 
   // 18. Explicit Bank OUT (unless row is a composite primary receipt/act + payment!)
   const isCompositePurchaseAndPayment =
-    /(?:(?:приобретен|приобрел|получен|поступил)\p{L}*\s+и\s+(?:оплачен|оплатил)\p{L}*|на\s+основании\s+[^\n]{0,65}произведен\p{L}*\s+оплат|произведен\p{L}*\s+оплат\p{L}*\s+на\s+основании\s+(?:счета[,\s]+)?(?:акт|накладн)|акт\p{L}*\s+и\s+счет-фактур|(?:приобретен|поступил|получен|оказан)\p{L}*.*оплат\p{L}*\s+(?:поставщику\s+)?произведен|(?:вступительн\p{L}*|членск\p{L}*|целев\p{L}*)?\s*взнос\p{L}*.*(?:саморегулируем|(?:^|[^\p{L}])сро(?=$|[^\p{L}])|союз\s+строител|ассоциац))/iu.test(
+    /(?:(?:приобретен|приобрел|получен|поступил|купил)\p{L}*\s+и\s+(?:оплачен|оплатил)\p{L}*|на\s+основании\s+[^\n]{0,65}произведен\p{L}*\s+оплат|произведен\p{L}*\s+оплат\p{L}*\s+на\s+основании\s+(?:счета[,\s]+)?(?:акт|накладн)|акт\p{L}*\s+и\s+счет-фактур|(?:приобретен|поступил|получен|оказан)\p{L}*.*оплат\p{L}*\s+(?:поставщику\s+)?произведен|(?:вступительн\p{L}*|членск\p{L}*|целев\p{L}*)?\s*взнос\p{L}*.*(?:саморегулируем|(?:^|[^\p{L}])сро(?=$|[^\p{L}])|союз\s+строител|ассоциац))/iu.test(
       itemAndDescText
     );
   if (
@@ -1580,7 +1613,7 @@ export function detectOperationClassification(
         itemAndDescText
       ) ||
       (/^\s*(?:оплачен\p{L}*|оплатил\p{L}*)\s+/iu.test(itemAndDescText) &&
-        !/^(?:приобретен|получен|поступил|оказан|выполнен)/iu.test(itemAndDescText.trim())))
+        !/^(?:приобретен|приобрел|купил|получен|поступил|оказан|выполнен)/iu.test(itemAndDescText.trim())))
   ) {
     const isBuyerRefund = /возврат\p{L}*.*аванс/iu.test(itemAndDescText);
     return {
@@ -1596,7 +1629,7 @@ export function detectOperationClassification(
     (/(?:^|[^\p{L}])(?:поставлен[аоы]?|отгружен\p{L}*|реализован\p{L}*|прода[нж]\p{L}*)\s+(?:готов\p{L}*\s+|собственн\p{L}*\s+)?(?:продукц|товар|издели|оконн\p{L}*\s+блок|дверн\p{L}*\s+блок|конструкц|парти|покупател|заказчик|клиент|в\s+адрес|ооо|ао|пао|зао|ип|\d)/iu.test(
       itemAndDescText
     ) ||
-      /(?:^|[^\p{L}])(?:реализован\p{L}*|отгружен\p{L}*)(?=$|[^\p{L}])|выполнен\p{L}*\s+(?:\p{L}+\s+){0,4}работ|сдан\p{L}*\s+(?:\p{L}+\s+){0,4}работ|(?:оказан\p{L}*|реализаци\p{L}*)\s+(?:\p{L}+\s+){0,4}услуг\p{L}*\s+(?:заказчик|покупател|клиент|ооо|ао|пао|зао|ип)|акт\s+(?:оказанных\s+услуг|выполненных\s+работ|приемки)|реализация\s+(?:товаров|продукции|услуг|работ)|выручка\s+от\s+реализац/iu.test(
+      /(?:^|[^\p{L}])(?:реализован\p{L}*|отгружен\p{L}*)(?=$|[^\p{L}])|(?:выполнен|сдан|сдал|передан)\p{L}*\s+(?:\p{L}+\s+){0,4}работ|выставлен\p{L}*\s+акт|(?:оказан\p{L}*|реализаци\p{L}*)\s+(?:\p{L}+\s+){0,4}услуг\p{L}*\s+(?:заказчик|покупател|клиент|ооо|ао|пао|зао|ип)|акт\s+(?:оказанных\s+услуг|выполненных\s+работ|приемки)|реализация\s+(?:товаров|продукции|услуг|работ)|выручка\s+от\s+реализац/iu.test(
         itemAndDescText
       ))
   ) {
@@ -1612,7 +1645,7 @@ export function detectOperationClassification(
     }
     if (
       matchedNomKind === 'Услуга' ||
-      /оказан\p{L}*\s+(?:\p{L}+\s+){0,4}услуг|реализация\s+(?:\p{L}+\s+){0,2}услуг|выполнен\p{L}*\s+(?:\p{L}+\s+){0,4}работ|сдан\p{L}*\s+(?:\p{L}+\s+){0,4}работ|акт\s+(?:выполненных\s+работ|приемки)/iu.test(
+      /оказан\p{L}*\s+(?:\p{L}+\s+){0,4}услуг|реализация\s+(?:\p{L}+\s+){0,2}услуг|(?:выполнен|сдан|сдал|передан)\p{L}*\s+(?:\p{L}+\s+){0,4}работ|выставлен\p{L}*\s+акт|акт\s+(?:выполненных\s+работ|приемки)|аренд/iu.test(
         itemAndDescText
       )
     ) {
@@ -1676,7 +1709,7 @@ export function detectOperationClassification(
   }
   if (
     matchedNomKind === 'Услуга' ||
-    /аренд|услуг|связ|интернет|телефон|электроэнерг|коммунальн|доставк|транспортн|перевозк|реклам|консультац|обслуживан|нотариус|юридическ|аудиторск|ведени\p{L}*\s+бухгалтерск|озеленен|благоустройств.*(?:выполнен|оказан|акт)|работ\p{L}*.*выполнен\p{L}*.*на\s+основании\s+акт|на\s+основании\s+(?:счета[,\s]+)?акт\p{L}*|охран|уборк|ремонт|(?:вступительн\p{L}*|членск\p{L}*|целев\p{L}*)?\s*взнос\p{L}*.*(?:саморегулируем|(?:^|[^\p{L}])сро(?=$|[^\p{L}])|союз\s+строител|ассоциац)|сертификац|лицензи|подписк/iu.test(
+    /отражен\p{L}*\s+расход\p{L}*\s+на\s+(?:работ|услуг)|аренд|услуг|связ|интернет|телефон|электроэнерг|коммунальн|доставк|транспортн|перевозк|реклам|консультац|обслуживан|нотариус|юридическ|аудиторск|ведени\p{L}*\s+бухгалтерск|озеленен|благоустройств.*(?:выполнен|оказан|акт)|работ\p{L}*.*выполнен\p{L}*.*на\s+основании\s+акт|на\s+основании\s+(?:счета[,\s]+)?акт\p{L}*|охран|уборк|ремонт|(?:вступительн\p{L}*|членск\p{L}*|целев\p{L}*)?\s*взнос\p{L}*.*(?:саморегулируем|(?:^|[^\p{L}])сро(?=$|[^\p{L}])|союз\s+строител|ассоциац)|сертификац|лицензи|подписк/iu.test(
       itemAndDescText
     )
   ) {
@@ -2425,12 +2458,14 @@ export function bindAndGenerateOperation(
       source: CounterpartyResolutionSource;
     } | null = null;
 
-    // 1) Search prior operations for buyer advances (62.02) or buyer settlements (62.01)
+    // 1A) Strictly prefer prior buyer operations / invoices / contracts sharing subject stems FIRST
     for (let i = priorCandidateOps.length - 1; i >= 0; i--) {
       const p = priorCandidateOps[i];
       if (!p.includeInProcessing || !p.counterpartyName.trim()) continue;
       if (draft.date && p.date && p.date > draft.date) continue;
       const isBuyerOp =
+        p.category === 'customer_invoice' ||
+        p.category === 'contract_event' ||
         p.category === 'bank_in' ||
         p.category === 'sale_goods' ||
         p.category === 'sale_services' ||
@@ -2440,16 +2475,8 @@ export function bindAndGenerateOperation(
       const pStem = stemRuItemKey(`${p.nomenclatureName} ${p.description}`);
       const sharesProduct =
         saleTokens.length > 0 && saleTokens.some((tok) => pStem.includes(tok));
-      const hasOpenAdvance =
-        computeCounterpartyAdvanceBalance(
-          '62.02',
-          p.counterpartyName,
-          p.counterpartyInn,
-          db1C,
-          priorCandidateOps
-        ) > 0.01;
 
-      if (sharesProduct || hasOpenAdvance) {
+      if (sharesProduct) {
         inferredBuyer = {
           name: p.counterpartyName,
           inn: p.counterpartyInn,
@@ -2461,6 +2488,40 @@ export function bindAndGenerateOperation(
       }
     }
 
+    // 1B) Fallback to an open advance (62.02) ONLY if no stem match was found AND no contradictory subject tokens exist
+    if (!inferredBuyer && saleTokens.length === 0) {
+      for (let i = priorCandidateOps.length - 1; i >= 0; i--) {
+        const p = priorCandidateOps[i];
+        if (!p.includeInProcessing || !p.counterpartyName.trim()) continue;
+        if (draft.date && p.date && p.date > draft.date) continue;
+        const isBuyerOp =
+          p.category === 'bank_in' ||
+          p.category === 'sale_goods' ||
+          p.category === 'sale_services' ||
+          p.entries.some((e) => e.credit === '62.02' || e.debit === '62.01');
+        if (!isBuyerOp) continue;
+
+        const hasOpenAdvance =
+          computeCounterpartyAdvanceBalance(
+            '62.02',
+            p.counterpartyName,
+            p.counterpartyInn,
+            db1C,
+            priorCandidateOps
+          ) > 0.01;
+        if (hasOpenAdvance) {
+          inferredBuyer = {
+            name: p.counterpartyName,
+            inn: p.counterpartyInn,
+            kpp: p.counterpartyKpp,
+            contractName: p.contractName,
+            source: p.counterpartySource ?? 'unresolved',
+          };
+          break;
+        }
+      }
+    }
+
     // Only pick a general prior buyer without open advance or stem match if there is a SINGLE unique buyer in priorOps
     if (!inferredBuyer) {
       const uniquePriorBuyerOps = new Map<string, QueuedOperation>();
@@ -2468,6 +2529,7 @@ export function bindAndGenerateOperation(
         if (!p.includeInProcessing || !p.counterpartyName.trim()) continue;
         if (draft.date && p.date && p.date > draft.date) continue;
         const isBuyerOp =
+          p.category === 'customer_invoice' ||
           p.category === 'bank_in' ||
           p.category === 'sale_goods' ||
           p.category === 'sale_services' ||
@@ -2550,12 +2612,12 @@ export function bindAndGenerateOperation(
           matchedName: m1c.name,
           matchedCode1C: m1c.code1C,
           matchedInn: cpInn,
-          note: 'Покупатель определён автоматически по связанному авансу / договору 1С',
+          note: 'Покупатель определён автоматически по связанному счёту / авансу / договору 1С',
         };
       } else {
         cpBinding = {
           status: 'new_for_1c',
-          note: 'Покупатель определён автоматически по связанному авансу (счёт 62.02)',
+          note: 'Покупатель определён автоматически по связанному счёту / авансу (счёт 62)',
         };
       }
     }
@@ -2573,6 +2635,8 @@ export function bindAndGenerateOperation(
   const needsContract = [
     'bank_out',
     'bank_in',
+    'customer_invoice',
+    'supplier_invoice',
     'purchase_goods',
     'purchase_materials',
     'purchase_equipment',
@@ -2586,7 +2650,10 @@ export function bindAndGenerateOperation(
   let contractBinding: EntityBindingStatus = { status: 'not_required' };
   if (needsContract) {
     const expectedKind =
-      category === 'bank_in' || category === 'sale_goods' || category === 'sale_services'
+      category === 'bank_in' ||
+      category === 'customer_invoice' ||
+      category === 'sale_goods' ||
+      category === 'sale_services'
         ? 'СПокупателем'
         : 'СПоставщиком';
 
@@ -2916,6 +2983,7 @@ export function bindAndGenerateOperation(
   if (
     !inlineSpiMonths &&
     (category === 'os_commissioning' ||
+      category === 'founder_contribution' ||
       category === 'depreciation_accrual' ||
       category === 'intangible_commissioning' ||
       category === 'intangible_amortization' ||
@@ -2934,19 +3002,46 @@ export function bindAndGenerateOperation(
       inlineSpiMonths = Number(spiYears[1]) * 12;
     }
   }
-  if (!nomName && (category === 'os_commissioning' || category === 'os_disposal')) {
-    const mOsMiddle = draft.description.match(
-      /введен[аоы]?\s+(.+?)\s+в\s+эксплуатац/iu
+  if (category === 'os_commissioning' || category === 'os_disposal') {
+    const targetPool = Object.values(priorVirtualState.fixedAssets).filter((fa) =>
+      category === 'os_commissioning'
+        ? fa.status === 'На счёте 08.04.1 (к вводу)'
+        : fa.status === 'Введено в эксплуатацию (счёт 01.01)'
     );
-    const mOsAfter = draft.description.match(
-      /в\s+эксплуатац\p{L}*\s+([^\n(,;]+)/iu
+    const reqOsStems = extractKeywordStems1C(`${nomName} ${draft.description}`);
+    const matchedPriorOs =
+      targetPool.find((fa) =>
+        extractKeywordStems1C(fa.name).some((fs) => reqOsStems.some((rs) => stemsMatch1C(rs, fs)))
+      ) ?? (category === 'os_commissioning' && targetPool.length === 1 ? targetPool[0] : undefined);
+    if (matchedPriorOs && matchedPriorOs.name) {
+      nomName = matchedPriorOs.name;
+    } else if (!nomName) {
+      const mOsBefore = draft.description.match(
+        /^\s*([А-ЯЁа-яё0-9][^\n(,;]{2,45}?)\s+введен[аоы]?\s+в\s+эксплуатац/iu
+      );
+      const mOsMiddle = draft.description.match(
+        /введен[аоы]?\s+(.+?)\s+в\s+эксплуатац/iu
+      );
+      const mOsAfter = draft.description.match(
+        /в\s+эксплуатац\p{L}*\s+([^\n(,;]+)/iu
+      );
+      const mOsDisp = draft.description.match(
+        /(?:реализован[аоы]?|продан[аоы]?|ликвидирован[аоы]?|списан[аоы]?|демонтирован[аоы]?|выбыл[аои]?)\s+(?:объект\s+ос\s+)?([^\n(,;]+?)(?=\s+(?:с\s+ндс|без\s+ндс|в\s+ооо|покупател|$))/iu
+      );
+      const rawOsName = (mOsBefore?.[1] || mOsMiddle?.[1] || mOsAfter?.[1] || mOsDisp?.[1] || '').trim();
+      if (rawOsName.length >= 2) {
+        nomName = rawOsName.charAt(0).toUpperCase() + rawOsName.slice(1);
+      }
+    }
+  } else if (!nomName && category === 'purchase_equipment' && !isCapexServiceExpense) {
+    const mEq = draft.description.match(
+      /(?:поступил[аои]?|приобретен[аоы]?|приобрел[аи]?|получен[аоы]?|куплен[аоы]?)(?:\s+и\s+(?:оплачен[аоы]?|оплатил[аи]?))?\s+([а-яёa-z][^\n(,;—-]{2,55}?)(?=\s+(?:от|у|в\s+ооо|в\s+ао|на\s+сумм|в\s+сумме|стоимост|по\s+цен|с\s+ндс|для\s+сдач|\(|$))/iu
     );
-    const mOsDisp = draft.description.match(
-      /(?:ликвидирован[аоы]?|списан[аоы]?|демонтирован[аоы]?|выбыл[аои]?)\s+(?:объект\s+ос\s+)?([^\n(,;]+)/iu
-    );
-    const rawOsName = (mOsMiddle?.[1] || mOsAfter?.[1] || mOsDisp?.[1] || '').trim();
-    if (rawOsName.length >= 2) {
-      nomName = rawOsName.charAt(0).toUpperCase() + rawOsName.slice(1);
+    if (mEq?.[1]) {
+      const cleanedEq = mEq[1].trim();
+      if (cleanedEq.length >= 3) {
+        nomName = cleanedEq.charAt(0).toUpperCase() + cleanedEq.slice(1);
+      }
     }
   }
   // Link equipment capex delivery/mounting expense on 08.04.1 to the uncommissioned fixed asset so 08.04.1 accumulates cleanly
@@ -2992,7 +3087,7 @@ export function bindAndGenerateOperation(
     }
   } else if (!nomName && category === 'purchase_materials') {
     const mMat = draft.description.match(
-      /(?:поступил[аои]?|приобретен[аоы]?|закуплен[аоы]?|оприходован[аоы]?)\s+([а-яёa-z][^\n(,;—-]{2,55}?)(?=\s+(?:от|у|поставщик|на\s+сумм|в\s+сумме|стоимост|по\s+цен|в\s+т\.?\s*ч|$))/iu
+      /(?:поступил[аои]?|приобретен[аоы]?|приобрел[аи]?|закуплен[аоы]?|оприходован[аоы]?|получен[аоы]?)(?:\s+и\s+(?:оплачен[аоы]?|оплатил[аи]?))?(?:\s+через\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)?)?(?:\s+от\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*[«"'][^»"']+[»"'](?:\s*\([^)]*\))?)?\s+([а-яёa-z][^\n(,;—-]{2,55}?)(?=\s+(?:от|у|поставщик|на\s+основани|на\s+сумм|в\s+сумме|стоимост|по\s+цен|в\s+т\.?\s*ч|\(|$))/iu
     );
     if (mMat?.[1]) {
       const cleanedMat = mMat[1].trim();
@@ -3096,7 +3191,37 @@ export function bindAndGenerateOperation(
   if (category === 'policy_event') {
     amountMode = 'calculated_by_1c';
     calculationProvenance =
-      'Управленческое событие: настройка параметров учётной политики организации в 1С:БП 3.0 (0 бухгалтерских проводок)';
+      'Управленческое событие: настройка параметров учётной политики / вычета в 1С:БП 3.0 (0 бухгалтерских проводок)';
+    amountCalculationNote = calculationProvenance;
+  }
+
+  if (category === 'customer_invoice' || category === 'supplier_invoice') {
+    const terms = extractRecurringContractTerms1C(draft.description, effectiveDraftAmount);
+    if (!resolvedPeriodicPaymentAmount && terms?.periodicAmount && terms.periodicAmount >= 0.01) {
+      resolvedPeriodicPaymentAmount = terms.periodicAmount;
+    }
+    if (terms?.vatRule && inheritedVatRule === undefined) {
+      inheritedVatRule = terms.vatRule;
+    }
+    if (terms?.vatRate !== undefined && inheritedVatRate === undefined) {
+      inheritedVatRate = terms.vatRate;
+    }
+    if (!contractName) {
+      contractName = /аренд/iu.test(draft.description)
+        ? 'Договор аренды'
+        : category === 'customer_invoice'
+          ? 'Основной договор с покупателем'
+          : 'Основной договор с поставщиком';
+      contractBinding = { status: 'new_for_1c', note: 'Договор / счёт зарегистрирован в 1С' };
+    }
+    amountMode = effectiveDraftAmount >= 0.01 ? 'explicit' : 'calculated_by_1c';
+    const perStr = resolvedPeriodicPaymentAmount
+      ? ` (ежемесячно ${resolvedPeriodicPaymentAmount.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽)`
+      : '';
+    calculationProvenance =
+      category === 'customer_invoice'
+        ? `Счёт покупателю${cpName ? ` «${cpName}»` : ''} на сумму ${effectiveDraftAmount.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽${perStr} — 0 проводок при выписке, заказ сохранён для последующей оплаты и отгрузки`
+        : `Счёт от поставщика${cpName ? ` «${cpName}»` : ''} на сумму ${effectiveDraftAmount.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽ — 0 проводок при регистрации`;
     amountCalculationNote = calculationProvenance;
   }
 
@@ -3160,11 +3285,15 @@ export function bindAndGenerateOperation(
 
   // 6a-0c. Alimony Payout ('alimony_payout' / 76.41 -> 51): resolve recipient + accumulated 76.41 balance
   if (category === 'alimony_payout') {
-    if (!resolvedAlimonyRecipientInn) {
+    const isMultiAlimony =
+      /(?:,|\s+и)\s*супруг|супруг\p{L}*.*супруг|по\s+исполнительн\p{L}*\s+листам|всем\s+получател/iu.test(
+        draft.description
+      ) || (draft.description.match(/\b\d{12}\b/g)?.length ?? 0) >= 2;
+    if (!isMultiAlimony && !resolvedAlimonyRecipientInn) {
       const mInn = draft.description.match(/инн\s*[:№]?\s*(\d{10}|\d{12})/iu);
       if (mInn?.[1]) resolvedAlimonyRecipientInn = mInn[1];
     }
-    if (!resolvedAlimonyRecipientName) {
+    if (!isMultiAlimony && !resolvedAlimonyRecipientName) {
       const mRec = draft.description.match(
         /алимент\p{L}*\s+((?:супруг[еиа]\s+)?[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?|\s+[А-ЯЁ][а-яё]+)?)/iu
       );
@@ -3175,11 +3304,13 @@ export function bindAndGenerateOperation(
           .replace(/^([А-ЯЁ][а-яё]+?)(?:овой|евой|ёвой|иной|ыной)(?=$|\s)/u, '$1а');
       }
     }
-    const alimonyRes = resolveAlimonyPayable7641(
-      priorVirtualState,
-      resolvedAlimonyRecipientName,
-      resolvedAlimonyRecipientInn
-    );
+    const alimonyRes = !isMultiAlimony
+      ? resolveAlimonyPayable7641(
+          priorVirtualState,
+          resolvedAlimonyRecipientName,
+          resolvedAlimonyRecipientInn
+        )
+      : null;
     if (alimonyRes) {
       if (!resolvedAlimonyRecipientName && alimonyRes.recipientName) {
         resolvedAlimonyRecipientName = alimonyRes.recipientName;
@@ -3209,6 +3340,12 @@ export function bindAndGenerateOperation(
       if (row7641 && row7641.endCredit >= 0.01) {
         effectiveDraftAmount = row7641.endCredit;
         amountMode = 'from_account_balance';
+        const openSubs7641 = (runningOsv.subcontoRowsByAccount?.['76.41'] ?? []).filter(
+          (s) => s.endCredit >= 0.01
+        );
+        if (isMultiAlimony && openSubs7641.length > 0) {
+          resolvedAlimonyRecipientName = openSubs7641.map((s) => s.subcontoLabel).join('; ');
+        }
         calculationProvenance = `Сумма удержанных алиментов определена по кредитовому сальдо счёта 76.41 на ${draft.date || 'дату выплаты'}: ${row7641.endCredit.toFixed(2)} ₽`;
         amountCalculationNote = calculationProvenance;
       }
@@ -3244,8 +3381,12 @@ export function bindAndGenerateOperation(
     }
   }
 
-  // 6a-0e. Supplier Payment ('bank_out'): resolve missing counterparty & sum unpaid 60.01 invoices by subject stems
-  if (category === 'bank_out' && (!cpName || effectiveDraftAmount < 0.01)) {
+  // 6a-0e. Supplier Payment ('bank_out'): resolve missing counterparty & sum unpaid 60.01 invoices by subject stems (excluding buyer advance refunds)
+  if (
+    category === 'bank_out' &&
+    !/возврат\p{L}*.*(?:аванс|предоплат)/iu.test(descLower) &&
+    (!cpName || effectiveDraftAmount < 0.01)
+  ) {
     unpaid6001Resolution = resolveUnpaidSupplier6001ByKeywords(
       priorVirtualState,
       `${nomName} ${draft.description}`,
@@ -4211,7 +4352,8 @@ export function bindAndGenerateOperation(
       case 'bank_in': {
         const isNoteInterestReceipt =
           /(?:%%|процент\p{L}*).*(?:от\s+банк|вексел|ценн\p{L}*\s+бумаг)/iu.test(descLower) ||
-          /(?:от\s+банк\p{L}*|вексел|ценн\p{L}*\s+бумаг).*(?:%%|процент\p{L}*)/iu.test(descLower);
+          /(?:от\s+банк\p{L}*|вексел|ценн\p{L}*\s+бумаг).*(?:%%|процент\p{L}*)/iu.test(descLower) ||
+          /задолженност\p{L}*\s+по\s+(?:%%|процент)/iu.test(descLower);
         let isAdvance = !isNoteInterestReceipt && /аванс|предоплат/i.test(descLower);
         if (!isNoteInterestReceipt && !isAdvance && batchContext && cpName) {
           const normCpIn = normalizeEntityKey(cpName);
@@ -4279,13 +4421,16 @@ export function bindAndGenerateOperation(
       case 'founder_contribution': {
         const founderSub = cpName || employeeName || 'Учредитель';
         const isAssetContribution =
-          /бытовк|станок|станк|леса|бетоносмесител|оборудован|основн\p{L}*\s+средств|компьютер|автомобил|помещен|имуществ|ос(?=$|[^\p{L}])/iu.test(
+          /в\s+виде\s+|бытовк|станок|станк|леса|бетоносмесител|оборудован|основн\p{L}*\s+средств|компьютер|автомобил|помещен|имуществ|ос(?=$|[^\p{L}])/iu.test(
             descLower
           ) && !/денежн|наличн|на\s+р\/с|на\s+расчетн/iu.test(descLower);
         if (isAssetContribution) {
           const inKindMatch = draft.description.match(/в\s+виде\s+([^\n(.,;]+)/iu);
           const assetLabel =
             nomName || (inKindMatch?.[1] ? inKindMatch[1].trim() : 'Внеоборотный актив (вклад в УК)');
+          if (!nomName) {
+            nomName = assetLabel;
+          }
           pushEntry(
             '08.04.1',
             '75.01',
@@ -4743,7 +4888,7 @@ export function bindAndGenerateOperation(
             'Оплата поставщику через подотчётное лицо (Авансовый отчёт — вкладка «Оплата»)'
           );
         } else if (
-          /(?:приобретен|приобрел|получен|поступил)\p{L}*\s+и\s+(?:оплачен|оплатил)\p{L}*|на\s+основании\s+[^\n]{0,65}произведен\p{L}*\s+оплат|произведен\p{L}*\s+оплат\p{L}*\s+на\s+основании|оплат\p{L}*\s+(?:поставщику\s+)?произведен/iu.test(
+          /(?:приобретен|приобрел|получен|поступил|купил)\p{L}*\s+и\s+(?:оплачен|оплатил)\p{L}*|на\s+основании\s+[^\n]{0,65}произведен\p{L}*\s+оплат|произведен\p{L}*\s+оплат\p{L}*\s+на\s+основании|оплат\p{L}*\s+(?:поставщику\s+)?произведен/iu.test(
             descLower
           )
         ) {
@@ -5060,26 +5205,62 @@ export function bindAndGenerateOperation(
       case 'hr_hire':
       case 'writ_of_execution':
       case 'contract_event':
+      case 'customer_invoice':
+      case 'supplier_invoice':
       case 'policy_event': {
-        // Non-posting directory/policy/HR registration events (0 balance-sheet entries)
+        // Non-posting directory/policy/HR/invoice registration events (0 balance-sheet entries)
         break;
       }
 
       case 'alimony_payout': {
-        const recSub = [
-          resolvedAlimonyRecipientName || 'Получатель алиментов',
-          resolvedAlimonyRecipientInn ? `ИНН ${resolvedAlimonyRecipientInn}` : '',
-        ]
-          .filter(Boolean)
-          .join(' / ');
-        pushEntry(
-          '76.41',
-          '51',
-          totalWithVat,
-          recSub,
-          bankSubconto,
-          `Перечисление удержанных алиментов по исполнительному листу (${resolvedAlimonyRecipientName || 'получателю'})`
+        const runningOsv7641 = batchContext
+          ? calculateOsvReport({
+              db1C,
+              operations: priorOps,
+              dateTo: draft.date || undefined,
+              reportingYear: batchContext.reportingYear,
+              includeQueuedOperations: true,
+            })
+          : null;
+        const openSubs7641 = (runningOsv7641?.subcontoRowsByAccount?.['76.41'] ?? []).filter(
+          (s) => s.endCredit >= 0.01
         );
+        const openSum7641 = round2(openSubs7641.reduce((acc, s) => acc + s.endCredit, 0));
+        if (openSubs7641.length >= 1 && Math.abs(openSum7641 - totalWithVat) < 0.05) {
+          for (const sub of openSubs7641) {
+            pushEntry(
+              '76.41',
+              '51',
+              sub.endCredit,
+              sub.subcontoLabel,
+              bankSubconto,
+              `Перечисление удержанных алиментов по исполнительному листу (${sub.subcontoLabel})`
+            );
+          }
+        } else {
+          const matchedSub = openSubs7641.find(
+            (s) =>
+              Math.abs(s.endCredit - totalWithVat) < 0.05 ||
+              (resolvedAlimonyRecipientName &&
+                normalizeEntityKey(s.subcontoLabel) === normalizeEntityKey(resolvedAlimonyRecipientName))
+          );
+          const recSub =
+            matchedSub?.subcontoLabel ||
+            [
+              resolvedAlimonyRecipientName || 'Получатель алиментов',
+              resolvedAlimonyRecipientInn ? `ИНН ${resolvedAlimonyRecipientInn}` : '',
+            ]
+              .filter(Boolean)
+              .join(' / ');
+          pushEntry(
+            '76.41',
+            '51',
+            totalWithVat,
+            recSub,
+            bankSubconto,
+            `Перечисление удержанных алиментов по исполнительному листу (${resolvedAlimonyRecipientName || 'получателю'})`
+          );
+        }
         break;
       }
 
@@ -5088,20 +5269,40 @@ export function bindAndGenerateOperation(
           /с\s+р\/с|с\s+расчетн\p{L}*\s+счет|оплачен\p{L}*\s+с\s+р\/с|безналичн/iu.test(descLower) ||
           draft.explicitCredit === '51';
         const finKtAcc = paidDirectlyFromBank ? '51' : '76.09';
-        const finDtSub =
-          resolvedFinancialNotesSummary || nomName || 'Долговые ценные бумаги (векселя)';
         const finKtSub =
           finKtAcc === '51'
             ? bankSubconto
             : cpSubconto || cpName || 'Прочие дебиторы и кредиторы (продавец ценных бумаг)';
-        pushEntry(
-          '58.02',
-          finKtAcc,
-          totalWithVat,
-          finDtSub,
-          finKtSub,
-          draft.description || 'Приобретение долговых ценных бумаг (векселей) — счёт 58.02'
-        );
+        if (resolvedFinancialNotesList && resolvedFinancialNotesList.length > 0) {
+          const existing5802Count = priorVirtualState.financialInvestments.filter(
+            (f) => f.account === '58.02'
+          ).length;
+          resolvedFinancialNotesList.forEach((n, idx) => {
+            const paperIdx = existing5802Count + idx + 1;
+            const noteOfficialName =
+              n.label ||
+              `Вексель №${paperIdx} (${n.principal.toLocaleString('ru-RU')} ₽ под ${n.ratePercent}%)`;
+            pushEntry(
+              '58.02',
+              finKtAcc,
+              n.principal,
+              noteOfficialName,
+              finKtSub,
+              `Приобретение долговой ценной бумаги: ${noteOfficialName} (счёт 58.02)`
+            );
+          });
+        } else {
+          const finDtSub =
+            resolvedFinancialNotesSummary || nomName || 'Долговые ценные бумаги (векселя)';
+          pushEntry(
+            '58.02',
+            finKtAcc,
+            totalWithVat,
+            finDtSub,
+            finKtSub,
+            draft.description || 'Приобретение долговых ценных бумаг (векселей) — счёт 58.02'
+          );
+        }
         break;
       }
 
@@ -5116,7 +5317,7 @@ export function bindAndGenerateOperation(
               '76.09',
               '91.01',
               item.interestAmount,
-              item.note.name,
+              item.note.counterpartyName || cpName || item.note.name,
               'Проценты к получению по ценным бумагам (векселям)',
               `Начислены проценты по ${item.note.name}: ${item.formulaLabel}`,
               { amountRuleNote: item.formulaLabel }
@@ -6906,7 +7107,7 @@ export function bindAndGenerateOperation(
     }
   }
 
-  // --- 7b. Active Account Non-Negative Ledger Guard (10.*, 41.*, 43, 50.01) ---
+  // --- 7b. Active Account & Subconto Non-Negative Ledger Guard (10.*, 41.*, 43, 08.04.1, 01.01, 50.01) ---
   if (
     batchContext &&
     entries.some(
@@ -6915,6 +7116,8 @@ export function bindAndGenerateOperation(
         (e.credit.startsWith('10.') ||
           e.credit.startsWith('41.') ||
           e.credit === '43' ||
+          e.credit === '08.04.1' ||
+          e.credit === '01.01' ||
           e.credit === '50.01')
     )
   ) {
@@ -6929,13 +7132,31 @@ export function bindAndGenerateOperation(
     for (const r of guardOsv.leafRows) {
       availByAcc.set(r.code, round2(r.endDebit - r.endCredit));
     }
+    const availSubcontosByAcc = new Map<string, Array<{ label: string; bal: number }>>();
+    for (const [acc, subs] of Object.entries(guardOsv.subcontoRowsByAccount ?? {})) {
+      const list = subs
+        .map((s) => ({ label: s.subcontoLabel, bal: round2(s.endDebit - s.endCredit) }))
+        .filter((s) => s.bal >= 0.01);
+      if (list.length > 0) availSubcontosByAcc.set(acc, list);
+    }
+
     for (const e of entries) {
       if (!e.isOffBalance && e.debit) {
         availByAcc.set(e.debit, round2((availByAcc.get(e.debit) ?? 0) + e.amount));
+        const rawDtSub = e.debitSubconto || cpName || nomName || employeeName || '';
+        const normDtSub = normalizeSubcontoLabel(rawDtSub, e.debit);
+        const list = availSubcontosByAcc.get(e.debit) ?? [];
+        const existingSub = list.find((s) => s.label === normDtSub);
+        if (existingSub) {
+          existingSub.bal = round2(existingSub.bal + e.amount);
+        } else {
+          list.push({ label: normDtSub, bal: e.amount });
+        }
+        availSubcontosByAcc.set(e.debit, list);
       }
     }
 
-    // 1)Cash register 50.01: if payout exceeds cash on hand, replenish from 51 by check
+    // 1) Cash register 50.01: if payout exceeds cash on hand, replenish from 51 by check
     const cashCredits = round2(
       entries
         .filter((e) => !e.isOffBalance && e.credit === '50.01')
@@ -6956,31 +7177,97 @@ export function bindAndGenerateOperation(
       availByAcc.set('50.01', round2(cashAvail + cashShortfall));
     }
 
-    // 2) Inventory 10.*, 41.*, 43: reroute/split across positive sibling subaccounts so no active stock goes negative
+    // Helper to allocate a credit on an active inventory/asset account across open positive subcontos (FIFO / stem match)
+    const allocateAcrossSubcontos = (
+      baseEntry: AccountingEntry,
+      accCode: string,
+      amtToAllocate: number
+    ): AccountingEntry[] => {
+      const subs = (availSubcontosByAcc.get(accCode) ?? []).filter((s) => s.bal >= 0.01);
+      if (subs.length === 0) {
+        return [{ ...baseEntry, credit: accCode, amount: amtToAllocate }];
+      }
+      const normReq = normalizeSubcontoLabel(baseEntry.creditSubconto, accCode);
+      const reqStems = extractKeywordStems1C(`${baseEntry.creditSubconto} ${draft.description}`);
+      const sorted = [...subs].sort((a, b) => {
+        const aExact = a.label === normReq ? 1 : 0;
+        const bExact = b.label === normReq ? 1 : 0;
+        if (aExact !== bExact) return bExact - aExact;
+        const aStemHits = extractKeywordStems1C(a.label).filter((ls) =>
+          reqStems.some((rs) => stemsMatch1C(rs, ls))
+        ).length;
+        const bStemHits = extractKeywordStems1C(b.label).filter((ls) =>
+          reqStems.some((rs) => stemsMatch1C(rs, ls))
+        ).length;
+        if (aStemHits !== bStemHits) return bStemHits - aStemHits;
+        const aExactAmt = Math.abs(a.bal - amtToAllocate) < 0.02 ? 1 : 0;
+        const bExactAmt = Math.abs(b.bal - amtToAllocate) < 0.02 ? 1 : 0;
+        if (aExactAmt !== bExactAmt) return bExactAmt - aExactAmt;
+        return 0;
+      });
+
+      const out: AccountingEntry[] = [];
+      let rem = amtToAllocate;
+      let partIdx = 0;
+      for (const s of sorted) {
+        if (rem < 0.01) break;
+        if (s.bal < 0.01) continue;
+        const take = round2(Math.min(rem, s.bal));
+        s.bal = round2(s.bal - take);
+        rem = round2(rem - take);
+        partIdx++;
+        const nextDtSub =
+          baseEntry.debit === '01.01' && accCode === '08.04.1'
+            ? s.label
+            : baseEntry.debitSubconto;
+        out.push({
+          ...baseEntry,
+          id: partIdx === 1 ? baseEntry.id : `${baseEntry.id}-sub${partIdx}`,
+          credit: accCode,
+          debitSubconto: nextDtSub,
+          creditSubconto: s.label === 'Без аналитики (субконто)' ? baseEntry.creditSubconto : s.label,
+          amount: take,
+        });
+      }
+      if (rem >= 0.01) {
+        if (out.length > 0) {
+          out[out.length - 1].amount = round2(out[out.length - 1].amount + rem);
+        } else {
+          out.push({ ...baseEntry, credit: accCode, amount: rem });
+        }
+      }
+      return out;
+    };
+
+    // 2) Inventory & OS (10.*, 41.*, 43, 08.04.1, 01.01): align subcontos and reroute/split across positive sibling subaccounts if needed
     const rewrittenEntries: AccountingEntry[] = [];
     for (const e of entries) {
       if (
         !e.isOffBalance &&
-        (e.credit.startsWith('10.') || e.credit.startsWith('41.') || e.credit === '43')
+        (e.credit.startsWith('10.') ||
+          e.credit.startsWith('41.') ||
+          e.credit === '43' ||
+          e.credit === '08.04.1' ||
+          e.credit === '01.01')
       ) {
         const rootPrefix = e.credit.startsWith('10.')
           ? '10.'
           : e.credit.startsWith('41.')
             ? '41.'
-            : '43';
+            : e.credit;
         const curAvail = Math.max(0, availByAcc.get(e.credit) ?? 0);
         if (curAvail >= e.amount - 0.01) {
           availByAcc.set(e.credit, round2(curAvail - e.amount));
-          rewrittenEntries.push(e);
+          rewrittenEntries.push(...allocateAcrossSubcontos(e, e.credit, e.amount));
         } else {
           let remToCover = e.amount;
           if (curAvail >= 0.01) {
             const takeOwn = round2(Math.min(remToCover, curAvail));
             availByAcc.set(e.credit, round2(curAvail - takeOwn));
             remToCover = round2(remToCover - takeOwn);
-            rewrittenEntries.push({ ...e, amount: takeOwn });
+            rewrittenEntries.push(...allocateAcrossSubcontos(e, e.credit, takeOwn));
           }
-          if (remToCover >= 0.01 && rootPrefix !== '43') {
+          if (remToCover >= 0.01 && (rootPrefix === '10.' || rootPrefix === '41.')) {
             const siblingCandidates = Array.from(availByAcc.entries())
               .filter(([code, bal]) => code.startsWith(rootPrefix) && code !== e.credit && bal >= 0.01)
               .sort((a, b) => b[1] - a[1]);
@@ -6989,13 +7276,13 @@ export function bindAndGenerateOperation(
               const takeSib = round2(Math.min(remToCover, sibBal));
               availByAcc.set(sibAcc, round2(sibBal - takeSib));
               remToCover = round2(remToCover - takeSib);
-              rewrittenEntries.push({
-                ...e,
-                id: `${e.id}-${sibAcc}`,
-                credit: sibAcc,
-                amount: takeSib,
-              });
+              rewrittenEntries.push(
+                ...allocateAcrossSubcontos({ ...e, id: `${e.id}-${sibAcc}` }, sibAcc, takeSib)
+              );
             }
+          }
+          if (remToCover >= 0.01) {
+            rewrittenEntries.push(...allocateAcrossSubcontos(e, e.credit, remToCover));
           }
         }
       } else {
@@ -7069,9 +7356,15 @@ export function bindAndGenerateOperation(
     readinessNote = resolvedPeriodicPaymentAmount
       ? `Договор зарегистрирован (ставка ${resolvedPeriodicPaymentAmount.toLocaleString('ru-RU')} ₽/период, без проводок при подписании)`
       : 'Договор зарегистрирован в справочнике 1С (без проводок при подписании)';
+  } else if (category === 'customer_invoice' || category === 'supplier_invoice') {
+    readinessStatus = 'ready';
+    readinessNote =
+      finalOpAmount >= 0.01
+        ? `Счёт на оплату учтён (${finalOpAmount.toLocaleString('ru-RU')} ₽, 0 проводок — заказ сохранён)`
+        : 'Счёт на оплату зарегистрирован в 1С:БП 3.0 (0 проводок)';
   } else if (category === 'policy_event') {
     readinessStatus = 'ready';
-    readinessNote = 'Параметр учётной политики 1С:БП 3.0 учтён (без проводок)';
+    readinessNote = 'Параметр учётной политики / вычета 1С:БП 3.0 учтён (без проводок)';
   } else if (category === 'vat_deduction' && finalOpAmount < 0.01) {
     amountMode = 'calculated_by_1c';
     readinessStatus = 'ready';
@@ -7328,6 +7621,8 @@ export function recalculateOperationsChronologically(
         needsCpMissing ||
         op.category === 'closing' ||
         op.category === 'contract_event' ||
+        op.category === 'customer_invoice' ||
+        op.category === 'supplier_invoice' ||
         op.category === 'policy_event' ||
         op.category === 'writ_of_execution' ||
         op.category === 'alimony_payout' ||
@@ -7531,13 +7826,17 @@ export function isMisclassifiedLegacyOperation(op: QueuedOperation): boolean {
         'hr_hire',
         'writ_of_execution',
         'contract_event',
+        'customer_invoice',
+        'supplier_invoice',
         'policy_event',
+        'closing',
         'alimony_payout',
         'financial_investment',
         'financial_interest_accrual',
         'financial_disposal',
         'vat_deduction',
         'bank_out',
+        'bank_in',
         'payroll_accrual',
         'payroll_payout',
         'tax_payment',
@@ -7704,8 +8003,13 @@ export function sanitizeHydratedOperations(
     const legacyBrokenPayroll =
       op.docType1C === 'НачислениеЗарплаты' &&
       (op.readinessStatus === 'critical_error' || op.entries.length === 0);
+    const hasBillionInnAmountBug =
+      op.amount >= 500_000_000 &&
+      /\b\d{9,}\b/.test(op.description) &&
+      !/(?:млрд|миллиард)/iu.test(op.description);
     const shouldRebuild =
       hadCorruptedShortName ||
+      hasBillionInnAmountBug ||
       isMisclassifiedLegacyOperation(op) ||
       legacyBrokenPayroll ||
       !op.readinessStatus ||
@@ -7715,7 +8019,7 @@ export function sanitizeHydratedOperations(
       (isFounderOp && (op.category !== 'founder_contribution' || !rawTrimmed));
 
     if (shouldRebuild) {
-      const resetClass = isMisclassifiedLegacyOperation(op) || isFounderOp;
+      const resetClass = isMisclassifiedLegacyOperation(op) || isFounderOp || hasBillionInnAmountBug;
       const rebuilt = bindAndGenerateOperation(
         {
           rowKey: op.rowKey,
@@ -7725,7 +8029,7 @@ export function sanitizeHydratedOperations(
           incomingDocNumber: op.incomingDocNumber,
           incomingDocDate: op.incomingDocDate,
           description: op.description,
-          amount: op.amount,
+          amount: hasBillionInnAmountBug ? 0 : op.amount,
           monthlySalary: op.monthlySalary,
           employeePosition: op.employeePosition,
           injuryInsuranceRate: op.injuryInsuranceRate,

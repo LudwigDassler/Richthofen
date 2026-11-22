@@ -471,6 +471,44 @@ export function sortEgrulCandidatesByRank(
   );
 }
 
+export function isKnownMajorFederalCounterparty(rawQueryName: string): boolean {
+  const qNorm = normalizeEntityKey(rawQueryName);
+  if (!qNorm) return false;
+  return KNOWN_MAJOR_RUSSIAN_COUNTERPARTIES.some((item) => {
+    if (normalizeEntityKey(item.name) === qNorm) return true;
+    return item.aliases.some((al) => {
+      const alNorm = normalizeEntityKey(al);
+      return alNorm === qNorm || (alNorm.length >= 5 && qNorm.includes(alNorm));
+    });
+  });
+}
+
+export function filterCandidatesForHomeRegion(
+  candidates: EgrulCandidate[],
+  rawQueryName: string,
+  homeRegionCode = '78'
+): EgrulCandidate[] {
+  if (!candidates || candidates.length === 0) return [];
+  const activeOnly = candidates.filter((c) => c.isActive);
+  const pool = activeOnly.length > 0 ? activeOnly : candidates;
+
+  if (!homeRegionCode || isKnownMajorFederalCounterparty(rawQueryName)) {
+    return pool;
+  }
+
+  const neighbors = NEIGHBOR_REGIONS_MAP[homeRegionCode] ?? [];
+  return activeOnly.filter((c) => {
+    const candReg = c.region || c.inn.slice(0, 2);
+    const kppReg = c.kpp.slice(0, 2);
+    return (
+      candReg === homeRegionCode ||
+      kppReg === homeRegionCode ||
+      neighbors.includes(candReg) ||
+      (kppReg.length === 2 && neighbors.includes(kppReg))
+    );
+  });
+}
+
 export function selectBestEgrulCandidate(
   candidates: EgrulCandidate[],
   rawQueryOrOpts?: string | { targetName?: string; homeRegionCode?: string },
@@ -485,7 +523,9 @@ export function selectBestEgrulCandidate(
     typeof rawQueryOrOpts === 'object' && rawQueryOrOpts?.homeRegionCode
       ? rawQueryOrOpts.homeRegionCode
       : regionPrefixHint;
-  const sorted = sortEgrulCandidatesByRank(candidates, rawName, effRegion);
+  const regionFiltered = filterCandidatesForHomeRegion(candidates, rawName, effRegion);
+  if (regionFiltered.length === 0) return null;
+  const sorted = sortEgrulCandidatesByRank(regionFiltered, rawName, effRegion);
   return sorted[0] ?? null;
 }
 
@@ -884,10 +924,11 @@ export function resolveCounterpartyByStrictPriority(
     };
   }
 
-  // Priority 3: Real FNS EGRUL / DaData lookup result (region-ranked)
+  // Priority 3: Real FNS EGRUL / DaData lookup result (strictly filtered to home region / neighbors unless major federal company)
   const rawCandidates = input.egrulCandidates ?? [];
-  if (rawCandidates.length > 0) {
-    const sorted = sortEgrulCandidatesByRank(rawCandidates, trimmedName, regionHint);
+  const eligibleCandidates = filterCandidatesForHomeRegion(rawCandidates, trimmedName, regionHint);
+  if (eligibleCandidates.length > 0) {
+    const sorted = sortEgrulCandidatesByRank(eligibleCandidates, trimmedName, regionHint);
     const best = sorted[0];
     return {
       name: trimmedName || best.name,

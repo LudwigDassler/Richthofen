@@ -456,8 +456,8 @@ export function Tab3AuditAutofix() {
 
         {/* Before → After Pipeline Convergence Summary */}
         {autoFixSummary && (
-          <div className="mt-3.5 pt-3.5 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs tabular-nums text-slate-600 dark:text-slate-300">
-            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+          <div className="mt-3.5 pt-3.5 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 text-xs tabular-nums text-slate-600 dark:text-slate-300">
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 min-w-0">
               <span className="font-semibold text-slate-900 dark:text-slate-100">
                 Сводка конвейера автоисправления (До → После):
               </span>
@@ -491,11 +491,11 @@ export function Tab3AuditAutofix() {
               </span>
             </div>
             <span
-              className={
+              className={`shrink-0 whitespace-nowrap inline-flex items-center rounded-lg px-2.5 py-1 font-medium ${
                 autoFixSummary.isOsvBalanced
-                  ? 'font-medium text-emerald-700 dark:text-emerald-400'
-                  : 'font-medium text-rose-600 dark:text-rose-400'
-              }
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border border-emerald-200/70 dark:border-emerald-800/60'
+                  : 'bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 border border-rose-200/70 dark:border-rose-800/60'
+              }`}
             >
               {autoFixSummary.isOsvBalanced
                 ? 'Баланс ОСВ (Σ Дт = Σ Кт): сходится'

@@ -257,6 +257,8 @@ export type DocType1CBP30 =
   | 'ОперацияПоПлатежнойКарте'
   | 'СчетФактураПолученный'
   | 'СчетФактураВыданный'
+  | 'СчетПокупателю'
+  | 'СчетОтПоставщика'
   | 'ВыдачаНаличных'
   | 'ПоступлениеНаличных'
   | 'НачислениеЗарплаты'
@@ -272,6 +274,8 @@ export type DocType1CBP30 =
   | 'ВводОстатков';
 
 export type OperationCategory =
+  | 'customer_invoice'
+  | 'supplier_invoice'
   | 'contract_event'
   | 'policy_event'
   | 'bank_out'
@@ -818,6 +822,28 @@ export interface VirtualOpenSettlement1C {
   originDate: string;
 }
 
+export interface VirtualOpenOrder1C {
+  key: string;
+  direction: 'buyer' | 'supplier';
+  docType1C: 'СчетПокупателю' | 'СчетОтПоставщика' | 'ОперацияБух';
+  counterpartyName: string;
+  counterpartyInn: string;
+  contractName: string;
+  contractNumber?: string;
+  totalAmount: number;
+  remainingAmount: number;
+  periodicAmount?: number;
+  durationMonths?: number;
+  vatRate: number;
+  vatRule: 'included' | 'on_top' | 'none';
+  subjectSummary: string;
+  keywordStems: string[];
+  status: 'open' | 'fulfilled' | 'cancelled';
+  originOpId?: string;
+  originOpNumber?: number;
+  originDate: string;
+}
+
 export interface Virtual1CStateSnapshot {
   counterparties: VirtualCounterparty1C[];
   contracts: VirtualContract1C[];
@@ -827,6 +853,7 @@ export interface Virtual1CStateSnapshot {
   writsOfExecution: VirtualWritOfExecution1C[];
   financialInvestments: VirtualFinancialInvestment1C[];
   openSettlements: VirtualOpenSettlement1C[];
+  openOrders: VirtualOpenOrder1C[];
 }
 
 export interface Virtual1CStateTimelineResult {

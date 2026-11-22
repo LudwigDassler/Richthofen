@@ -710,64 +710,98 @@ export function runAuditDiagnostics(params: {
     }
   }
 
-  // 3. Unoffset advances (одновременный остаток на 60.01 и 60.02 или 62.01 и 62.02)
+  // 3. Unoffset advances: ONLY when the SAME counterparty simultaneously has open balances on 60.01 & 60.02 (or 62.01 & 62.02)
   const acc6001 = osv.leafRows.find((r) => r.code === '60.01');
   const acc6002 = osv.leafRows.find((r) => r.code === '60.02');
   if (acc6001 && acc6002 && acc6001.endCredit > 0.01 && acc6002.endDebit > 0.01) {
-    const offsetAmt = Math.min(acc6001.endCredit, acc6002.endDebit);
-    issues.push({
-      id: 'unoffset-advance-60',
-      fixId: 'offset_advances_60_62',
-      severity: 'warning',
-      category: 'unoffset_advance',
-      accountCode: '60',
-      title: 'Незачтённые авансы поставщикам (счета 60.01 и 60.02)',
-      description: `Одновременно числится кредиторская задолженность на 60.01 (${acc6001.endCredit.toFixed(2)} ₽) и выданный аванс на 60.02 (${acc6002.endDebit.toFixed(2)} ₽). Возможен зачёт на сумму до ${offsetAmt.toFixed(2)} ₽.`,
-      accountingReason: `Развёрнутое сальдо по счёту 60 искажает строки бухгалтерского баланса (дебиторскую и кредиторскую задолженность). При поступлении ТМЦ/услуг после предоплаты должна формироваться проводка зачёта аванса Дт 60.01 Кт 60.02 на сумму ${offsetAmt.toFixed(2)} ₽.`,
-      quickFixLabel: 'Автоматический зачёт Дт 60.01 Кт 60.02 кнопкой «Исправить»',
-      guide1C: {
-        menuPath: 'Покупки → Поступление (акты, накладные, УПД) (или Покупки → Корректировка долга)',
-        documentKind: 'Поступление (акт, накладная, УПД)',
-        checkPoints: [
-          'В документе поступления проверьте ссылку «Расчеты»: Счет расчетов = 60.01, Счет авансов = 60.02, Зачет авансов = «Автоматически»',
-          'Проверьте, что в Списании с р/с и в Поступлении выбран один и тот же элемент справочника «Договоры»',
-          'Если договоры разные — оформите документ «Покупки → Корректировка долга» с видом операции «Зачет авансов»',
-        ],
-        repostInstruction: 'Перепроведите банковскую выписку и затем документ поступления («Провести и закрыть»)',
-        verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 60 (флаги «По субсчетам», «Контрагенты», «Договоры»)',
-      },
-      canAutoFixBy1C: true,
-      autoFixActionLabel: 'Сформировать зачёт авансов поставщикам (Дт 60.01 Кт 60.02)',
-    });
+    const subs6001 = osv.subcontoRowsByAccount['60.01'] ?? [];
+    const subs6002 = osv.subcontoRowsByAccount['60.02'] ?? [];
+    let sameCpOffset60 = 0;
+    const sameCpNames60: string[] = [];
+    for (const s1 of subs6001) {
+      if (s1.endCredit <= 0.01) continue;
+      const k1 = normalizeEntityKey(s1.subcontoLabel.split('/')[0]);
+      if (!k1) continue;
+      const s2 = subs6002.find(
+        (cand) => cand.endDebit > 0.01 && normalizeEntityKey(cand.subcontoLabel.split('/')[0]) === k1
+      );
+      if (s2) {
+        sameCpOffset60 = round2(sameCpOffset60 + Math.min(s1.endCredit, s2.endDebit));
+        sameCpNames60.push(s1.subcontoLabel.split('/')[0].trim());
+      }
+    }
+    if (sameCpOffset60 > 0.01) {
+      issues.push({
+        id: 'unoffset-advance-60',
+        fixId: 'offset_advances_60_62',
+        severity: 'warning',
+        category: 'unoffset_advance',
+        accountCode: '60',
+        title: 'Незачтённые авансы поставщикам (счета 60.01 и 60.02)',
+        description: `По контрагенту(ам) ${sameCpNames60.join(', ')} одновременно числится кредиторская задолженность на 60.01 и выданный аванс на 60.02. Необходим зачёт на сумму ${sameCpOffset60.toFixed(2)} ₽.`,
+        accountingReason: `Развёрнутое сальдо по одному и тому же поставщику на счёте 60 искажает строки бухгалтерского баланса. При поступлении ТМЦ/услуг после предоплаты должна формироваться проводка зачёта аванса Дт 60.01 Кт 60.02 на сумму ${sameCpOffset60.toFixed(2)} ₽.`,
+        quickFixLabel: 'Автоматический зачёт Дт 60.01 Кт 60.02 кнопкой «Исправить»',
+        guide1C: {
+          menuPath: 'Покупки → Поступление (акты, накладные, УПД) (или Покупки → Корректировка долга)',
+          documentKind: 'Поступление (акт, накладная, УПД)',
+          checkPoints: [
+            'В документе поступления проверьте ссылку «Расчеты»: Счет расчетов = 60.01, Счет авансов = 60.02, Зачет авансов = «Автоматически»',
+            'Проверьте, что в Списании с р/с и в Поступлении выбран один и тот же элемент справочника «Договоры»',
+            'Если договоры разные — оформите документ «Покупки → Корректировка долга» с видом операции «Зачет авансов»',
+          ],
+          repostInstruction: 'Перепроведите банковскую выписку и затем документ поступления («Провести и закрыть»)',
+          verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 60 (флаги «По субсчетам», «Контрагенты», «Договоры»)',
+        },
+        canAutoFixBy1C: true,
+        autoFixActionLabel: 'Сформировать зачёт авансов поставщикам (Дт 60.01 Кт 60.02)',
+      });
+    }
   }
 
   const acc6201 = osv.leafRows.find((r) => r.code === '62.01');
   const acc6202 = osv.leafRows.find((r) => r.code === '62.02');
   if (acc6201 && acc6202 && acc6201.endDebit > 0.01 && acc6202.endCredit > 0.01) {
-    const offsetAmt = Math.min(acc6201.endDebit, acc6202.endCredit);
-    issues.push({
-      id: 'unoffset-advance-62',
-      fixId: 'offset_advances_60_62',
-      severity: 'warning',
-      category: 'unoffset_advance',
-      accountCode: '62',
-      title: 'Незачтённые авансы покупателей (счета 62.01 и 62.02)',
-      description: `Одновременно числится дебиторская задолженность на 62.01 (${acc6201.endDebit.toFixed(2)} ₽) и полученный аванс на 62.02 (${acc6202.endCredit.toFixed(2)} ₽). Возможен зачёт на сумму до ${offsetAmt.toFixed(2)} ₽.`,
-      accountingReason: `При отгрузке в счёт полученной предоплаты должен быть выполнен зачёт Дт 62.02 Кт 62.01 (${offsetAmt.toFixed(2)} ₽), иначе завышаются дебиторская и кредиторская задолженности и не применяется вычет НДС с аванса (Дт 68.02 Кт 76.АВ).`,
-      quickFixLabel: 'Автоматический зачёт Дт 62.02 Кт 62.01 кнопкой «Исправить»',
-      guide1C: {
-        menuPath: 'Продажи → Реализация (акты, накладные, УПД) (или Продажи → Корректировка долга)',
-        documentKind: 'Реализация (акт, накладная, УПД)',
-        checkPoints: [
-          'В документе реализации проверьте гиперссылку «Расчеты»: Счет расчетов = 62.01, Счет авансов = 62.02, Зачет авансов = «Автоматически»',
-          'Сверьте «Договор» с документом «Поступление на расчетный счет»',
-        ],
-        repostInstruction: 'Перепроведите поступление оплаты и реализацию в хронологическом порядке, затем сформируйте «Формирование записей книги покупок»',
-        verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 62 и Анализ субконто «Контрагенты»',
-      },
-      canAutoFixBy1C: true,
-      autoFixActionLabel: 'Сформировать зачёт авансов покупателей (Дт 62.02 Кт 62.01)',
-    });
+    const subs6201 = osv.subcontoRowsByAccount['62.01'] ?? [];
+    const subs6202 = osv.subcontoRowsByAccount['62.02'] ?? [];
+    let sameCpOffset62 = 0;
+    const sameCpNames62: string[] = [];
+    for (const s1 of subs6201) {
+      if (s1.endDebit <= 0.01) continue;
+      const k1 = normalizeEntityKey(s1.subcontoLabel.split('/')[0]);
+      if (!k1) continue;
+      const s2 = subs6202.find(
+        (cand) => cand.endCredit > 0.01 && normalizeEntityKey(cand.subcontoLabel.split('/')[0]) === k1
+      );
+      if (s2) {
+        sameCpOffset62 = round2(sameCpOffset62 + Math.min(s1.endDebit, s2.endCredit));
+        sameCpNames62.push(s1.subcontoLabel.split('/')[0].trim());
+      }
+    }
+    if (sameCpOffset62 > 0.01) {
+      issues.push({
+        id: 'unoffset-advance-62',
+        fixId: 'offset_advances_60_62',
+        severity: 'warning',
+        category: 'unoffset_advance',
+        accountCode: '62',
+        title: 'Незачтённые авансы покупателей (счета 62.01 и 62.02)',
+        description: `По покупателю(ям) ${sameCpNames62.join(', ')} одновременно числится дебиторская задолженность на 62.01 и полученный аванс на 62.02. Необходим зачёт на сумму ${sameCpOffset62.toFixed(2)} ₽.`,
+        accountingReason: `При отгрузке в счёт полученной предоплаты должен быть выполнен зачёт Дт 62.02 Кт 62.01 (${sameCpOffset62.toFixed(2)} ₽), иначе завышаются дебиторская и кредиторская задолженности и не применяется вычет НДС с аванса (Дт 68.02 Кт 76.АВ).`,
+        quickFixLabel: 'Автоматический зачёт Дт 62.02 Кт 62.01 кнопкой «Исправить»',
+        guide1C: {
+          menuPath: 'Продажи → Реализация (акты, накладные, УПД) (или Продажи → Корректировка долга)',
+          documentKind: 'Реализация (акт, накладная, УПД)',
+          checkPoints: [
+            'В документе реализации проверьте гиперссылку «Расчеты»: Счет расчетов = 62.01, Счет авансов = 62.02, Зачет авансов = «Автоматически»',
+            'Сверьте «Договор» с документом «Поступление на расчетный счет»',
+          ],
+          repostInstruction: 'Перепроведите поступление оплаты и реализацию в хронологическом порядке, затем сформируйте «Формирование записей книги покупок»',
+          verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 62 и Анализ субконто «Контрагенты»',
+        },
+        canAutoFixBy1C: true,
+        autoFixActionLabel: 'Сформировать зачёт авансов покупателей (Дт 62.02 Кт 62.01)',
+      });
+    }
   }
 
   // Check unaccrued VAT on remaining buyer advances (62.02 > 0 in OSNO without sufficient 76.АВ)
@@ -2575,9 +2609,7 @@ export function autoFixAllBy1CDb(params: {
   const issuesBeforeList = runAuditDiagnostics({ db1C, operations, osv: osvBefore });
   const issuesBeforeCount = issuesBeforeList.length;
   const autofixableBeforeCount = issuesBeforeList.filter((i) => i.canAutoFixBy1C).length;
-  const criticalBeforeCount = operations.filter(
-    (o) => o.includeInProcessing && o.readinessStatus === 'critical_error'
-  ).length;
+  const criticalBeforeCount = issuesBeforeList.filter((i) => i.severity === 'error').length;
 
   const homeRegion = inferOrganizationRegionCode({
     organizationInn: db1C?.organization.inn,
@@ -2647,6 +2679,31 @@ export function autoFixAllBy1CDb(params: {
             op.id
           );
         }
+      }
+
+      // Pass Stage 1a-guard: Scrub accidental 10-digit INN / 9+-digit identifier parsed as ruble sum (>= 500M ₽)
+      if (
+        op.amount >= 500_000_000 &&
+        /\b\d{9,}\b/.test(op.description) &&
+        !/(?:млрд|миллиард)/iu.test(op.description)
+      ) {
+        const prevCorruptedAmt = op.amount;
+        const safeCheck = extractRequisitesFromFreeText(op.description, reportingYear);
+        op.amount = safeCheck.inlineAmount && safeCheck.inlineAmount < 500_000_000 ? safeCheck.inlineAmount : 0;
+        op.amountMode = op.amount >= 0.01 ? 'explicit' : 'required_missing';
+        op.entries = [];
+        fixedCount++;
+        log.push(
+          `Очищена ложная сумма-реквизит (${prevCorruptedAmt.toLocaleString('ru-RU')} ₽ → ${op.amount.toLocaleString('ru-RU')} ₽)`
+        );
+        recordChange(
+          `Ложная сумма из ИНН/реквизита: ${prevCorruptedAmt.toLocaleString('ru-RU')} ₽`,
+          `Очищено для пересчёта по регистру (${op.amount.toLocaleString('ru-RU')} ₽)`,
+          'Защита от принятия 10-значного ИНН / КПП / р/с за денежную сумму',
+          'reclassify_1c_doc',
+          'reclassify_misidentified_doc',
+          op.id
+        );
       }
 
       // Pass Stage 1b: Extract inline requisites from text if missing
@@ -2770,6 +2827,8 @@ export function autoFixAllBy1CDb(params: {
               other.category === 'hr_hire' ||
               other.category === 'writ_of_execution' ||
               other.category === 'contract_event' ||
+              other.category === 'customer_invoice' ||
+              other.category === 'supplier_invoice' ||
               other.category === 'policy_event') &&
             (!targetOp.date || !other.date || other.date <= targetOp.date)
           ) {
@@ -3978,9 +4037,7 @@ export function autoFixAllBy1CDb(params: {
     operations: workingOperations,
     osv: finalOsv,
   });
-  const criticalAfterCount = workingOperations.filter(
-    (o) => o.includeInProcessing && o.readinessStatus === 'critical_error'
-  ).length;
+  const criticalAfterCount = finalIssues.filter((i) => i.severity === 'error').length;
 
   const executionSummary: AutofixExecutionSummary = {
     passesExecuted,

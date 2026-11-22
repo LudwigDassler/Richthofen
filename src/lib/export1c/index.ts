@@ -201,7 +201,9 @@ export function buildExportBundle(params: {
         const ctrKind =
           op.category === 'bank_in' ||
           op.category === 'sale_goods' ||
-          op.category === 'sale_services'
+          op.category === 'sale_services' ||
+          op.category === 'customer_invoice' ||
+          op.docType1C === 'СчетПокупателю'
             ? 'СПокупателем'
             : 'СПоставщиком';
         ctrMap.set(key, {
@@ -1037,6 +1039,43 @@ function generateBslModule(params: {
         `\t\t\tСообщить("Зарегистрированы физлицо ${debtorFio} и получатель ${recipientName} для исполнительного листа (76.41)");`
       );
       lines.push('\t\tКонецПопытки;');
+    } else if (op.docType1C === 'СчетПокупателю') {
+      const nomItem = escapeBsl(op.nomenclatureName || op.description || 'Работы / услуги по счёту');
+      lines.push('\t\tПопытка');
+      lines.push('\t\t\tДокСч = Документы.СчетНаОплатуПокупателю.СоздатьДокумент();');
+      lines.push(`\t\t\tДокСч.Дата = ${dateExpr};`);
+      lines.push('\t\t\tДокСч.Организация = ОрганизацияСсылка;');
+      if (op.counterpartyName) {
+        lines.push(
+          `\t\t\tКонтрСч = НайтиИлиСоздатьКонтрагента("${escapeBsl(op.counterpartyName)}", "${escapeBsl(op.counterpartyName)}", "${escapeBsl(op.counterpartyInn)}", "${escapeBsl(op.counterpartyKpp)}", "${escapeBsl(op.counterpartyKind)}");`
+        );
+        lines.push('\t\t\tДокСч.Контрагент = КонтрСч;');
+        lines.push(
+          `\t\t\tДокСч.ДоговорКонтрагента = НайтиИлиСоздатьДоговор(КонтрСч, "${escapeBsl(op.contractName || 'Основной договор')}", "${escapeBsl(op.contractNumber || '1')}", ${toBslDateExpr(op.contractDate || op.date)}, "СПокупателем");`
+        );
+      }
+      if (op.amount >= 0.01) {
+        lines.push('\t\t\tСтрСч = ДокСч.Товары.Добавить();');
+        lines.push(`\t\t\tСтрСч.Номенклатура = НайтиИлиСоздатьНоменклатуру("${nomItem}", Истина, "${to1CVatEnumName(op.vatRate, op.vatRule)}");`);
+        lines.push('\t\t\tСтрСч.Количество = 1;');
+        lines.push(`\t\t\tСтрСч.Цена = ${op.amount.toFixed(2)};`);
+        lines.push(`\t\t\tСтрСч.Сумма = ${op.amount.toFixed(2)};`);
+      }
+      lines.push(`\t\t\tДокСч.Комментарий = "${descEsc}";`);
+      lines.push('\t\t\tДокСч.Записать(РежимЗаписиДокумента.Проведение);');
+      lines.push('\t\tИсключение');
+      lines.push(`\t\t\tСообщить("Счёт покупателю учтён: ${descEsc}");`);
+      lines.push('\t\tКонецПопытки;');
+    } else if (op.docType1C === 'СчетОтПоставщика') {
+      lines.push('\t\tПопытка');
+      lines.push('\t\t\tДокСчП = Документы.СчетНаОплатуПоставщика.СоздатьДокумент();');
+      lines.push(`\t\t\tДокСчП.Дата = ${dateExpr};`);
+      lines.push('\t\t\tДокСчП.Организация = ОрганизацияСсылка;');
+      lines.push(`\t\t\tДокСчП.Комментарий = "${descEsc}";`);
+      lines.push('\t\t\tДокСчП.Записать(РежимЗаписиДокумента.Запись);');
+      lines.push('\t\tИсключение');
+      lines.push(`\t\t\tСообщить("Счёт от поставщика учтён: ${descEsc}");`);
+      lines.push('\t\tКонецПопытки;');
     } else {
       // Universal ОперацияБух for НачислениеЗарплаты, КорректировкаДолга, ЗакрытиеМесяца, СФ на аванс, Касса, ручные операции
       // Guarantees exact RSBU double-entry (and unilateral off-balance МЦ) movements in РегистрБухгалтерии.Хозрасчетный
@@ -1407,7 +1446,11 @@ function generateEnterpriseDataXml(params: {
                                                 ? 'Документ.НачислениеЗарплаты'
                                                 : op.docType1C === 'КорректировкаДолга'
                                                   ? 'Документ.КорректировкаДолга'
-                                                  : 'Документ.ОперацияБух';
+                                                  : op.docType1C === 'СчетПокупателю'
+                                                    ? 'Документ.СчетНаОплатуПокупателю'
+                                                    : op.docType1C === 'СчетОтПоставщика'
+                                                      ? 'Документ.СчетНаОплатуПоставщика'
+                                                      : 'Документ.ОперацияБух';
 
     xml.push(`    <${edTag}>`);
     xml.push('      <КлючевыеСвойства>');
