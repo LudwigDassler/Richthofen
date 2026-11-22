@@ -507,12 +507,15 @@ export function inferNomenclatureCatalogMeta1C(
     explicitMaterialAccount === '10.10' ||
     explicitMaterialAccount === '10.09' ||
     category === 'workwear_issue' ||
-    /спецодежд|спецобув|костюм|комбинезон|халат|каск|перчатк|рукавиц|жилет|ботинк|сапог|куртк|инвентар|хозпринадлежност/iu.test(
+    /спецодежд|спецобув|костюм|комбинезон|халат|каск|перчатк|рукавиц|жилет|ботинк|сапог|куртк|инвентар|хозпринадлежност|принтер|оргтехник|офисн\p{L}*\s+мебел|стул|стол(?=$|[^\p{L}])|кресл|шкаф|стеллаж/iu.test(
       lower
     )
   ) {
     const isInv =
-      explicitMaterialAccount === '10.09' || /инвентар|хозпринадлежност/iu.test(lower);
+      explicitMaterialAccount === '10.09' ||
+      /инвентар|хозпринадлежност|принтер|оргтехник|офисн\p{L}*\s+мебел|стул|стол(?=$|[^\p{L}])|кресл|шкаф|стеллаж/iu.test(
+        lower
+      );
     return {
       itemKind: 'Спецодежда и инвентарь',
       defaultAccount: isInv ? '10.09' : '10.10',
@@ -522,7 +525,7 @@ export function inferNomenclatureCatalogMeta1C(
 
   if (
     explicitMaterialAccount === '10.08' ||
-    /кирпич|цемент|бетон|песок|щебен|гравий|арматур|доск|брус|плитк|гипсокартон|штукатурк|шпатлевк|рубероид|шифер|профнастил|труб\p{L}*\s+(?:стальн|пвх|полипропилен)/iu.test(
+    /кирпич|цемент|бетон|раствор|песок|щебен|гравий|арматур|доск|брус|плитк|потолочн\p{L}*\s+плит|керамогранит|металлопрофил|утеплител|обо[ий]|паркет|рейк|плинтус|газонн\p{L}*\s+трав|гипсокартон|штукатурк|шпатлевк|рубероид|шифер|профнастил|труб\p{L}*\s+(?:стальн|пвх|полипропилен)/iu.test(
       lower
     )
   ) {
@@ -1413,8 +1416,9 @@ export function advanceVirtual1CStateWithOperation(
         const aStems = extractKeywordStems1C(a.name);
         return targetStems.some((ts) => aStems.some((as) => stemsMatch(ts, as)));
       }) ||
-      (/доставк|монтаж|пусконалад|сборк/iu.test(op.description) && pendingOn08.length === 1
-        ? pendingOn08[0]
+      (/доставк|монтаж|пусконалад|сборк|подключен|настройк|поступление\s+доп/iu.test(op.description) &&
+      pendingOn08.length >= 1
+        ? pendingOn08[pendingOn08.length - 1]
         : undefined);
 
     if (existingOs) {
@@ -1798,6 +1802,21 @@ export function advanceVirtual1CStateWithOperation(
     // 62.02 (passive): Credit increases buyer advance; Debit offsets it
     if (entry.credit === '62.02') pushOpenSettlement('62.02', entry.amount);
     if (entry.debit === '62.02') paydownOpenSettlement('62.02', entry.amount, entry.debitSubconto);
+
+    // 51 <- 76.09: Receipt of accrued promissory note / security interest reduces unpaid accruedInterestAmount
+    if (entry.debit === '51' && entry.credit === '76.09') {
+      const notesWithInterest = state.financialInvestments.filter(
+        (f) => (f.accruedInterestAmount ?? 0) >= 0.01
+      );
+      let remReceived = entry.amount;
+      for (const n of notesWithInterest) {
+        if (remReceived < 0.01) break;
+        const curAcc = n.accruedInterestAmount || 0;
+        const clearAmt = Math.min(curAcc, remReceived);
+        n.accruedInterestAmount = round2(Math.max(0, curAcc - clearAmt));
+        remReceived = round2(remReceived - clearAmt);
+      }
+    }
 
     // Credit 76.41 -> alimony accrued in payroll!
     if (entry.credit === '76.41') {

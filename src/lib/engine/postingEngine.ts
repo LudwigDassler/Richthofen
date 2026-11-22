@@ -573,6 +573,7 @@ export interface RawDraftOperationInput {
   directionHint?: 'in' | 'out';
   docTypeHint?: DocType1CBP30;
   categoryHint?: OperationCategory;
+  actionSequenceHint?: string;
   explicitDebit?: string;
   explicitCredit?: string;
   explicitCorrespondences?: ExplicitCorrespondenceHint1C[];
@@ -645,13 +646,31 @@ export function stemRuItemKey(raw: string): string {
     'списана',
     'списано',
     'списаны',
+    'списание',
+    'списания',
+    'передача',
+    'передачи',
+    'отпуск',
+    'расход',
     'отпущен',
+    'производство',
+    'производства',
+    'работ',
+    'работы',
+    'материал',
+    'материалы',
+    'материалов',
+    'полученные',
+    'полученных',
+    'благоустройства',
+    'благоустройство',
     'склад',
     'склада',
     'для',
     'при',
     'или',
     'со',
+    'на',
     'сроком',
     'срок',
     'полезного',
@@ -715,14 +734,14 @@ export function inferMaterialSubaccount1C(itemAndDesc: string): {
     return { materialAccount: '10.10', offBalanceAccount: 'МЦ.02' };
   }
   if (
-    /инвентар|хозпринадлежност|хозтовар|инструмент|лопат|дрел|перфоратор|стремянк|швабр|ведро/iu.test(
+    /инвентар|хозпринадлежност|хозтовар|инструмент|лопат|дрел|перфоратор|стремянк|швабр|ведро|принтер|оргтехник|офисн\p{L}*\s+мебел|стул|стол(?=$|[^\p{L}])|кресл|шкаф|стеллаж|канцтовар|бумаг/iu.test(
       lower
     )
   ) {
     return { materialAccount: '10.09', offBalanceAccount: 'МЦ.04' };
   }
   if (
-    /кирпич|цемент|бетон|раствор|арматур|песок|песк|щебен|щебн|гравий|доск|пиломатериал|брус|фанер|гипсокартон|утеплител|минват|шифер|черепиц|штукатурк|шпаклевк|шпатлевк|сух\p{L}*\s+смес|газоблок|пеноблок|шлакоблок|керамзит|грунтовк|краск|эмал|стройматериал|строительн\p{L}*\s+материал/iu.test(
+    /кирпич|цемент|бетон|раствор|арматур|песок|песк|щебен|щебн|гравий|доск|пиломатериал|брус|фанер|гипсокартон|утеплител|минват|шифер|черепиц|штукатурк|шпаклевк|шпатлевк|сух\p{L}*\s+смес|газоблок|пеноблок|шлакоблок|керамзит|грунтовк|краск|эмал|стройматериал|строительн\p{L}*\s+материал|потолочн\p{L}*\s+плит|керамогранит|металлопрофил|обо[ий]|паркет|рейк|плинтус|газонн\p{L}*\s+трав|лак\s+паркетн/iu.test(
       lower
     )
   ) {
@@ -770,7 +789,7 @@ export function detectOperationClassification(
 
   // 0a. Organizational / Accounting Policy / WIP Note / Reporting Instruction (0 postings)
   if (
-    /(?:утвержден|принят|установлен|издан)\p{L}*.*(?:учетн\p{L}*\s+политик|лимит\s+(?:остатка\s+)?касс|штатн\p{L}*\s+расписан|приказ\s+об\s+учетн)|отрази\p{L}*\s+незавер[шщ]енн\p{L}*\s+производств|инвентаризаци\p{L}*\s+нзп/iu.test(
+    /(?:утвержден|принят|установлен|издан)\p{L}*.*(?:учетн\p{L}*\s+политик|лимит\s+(?:остатка\s+)?касс|штатн\p{L}*\s+расписан|приказ\s+об\s+учетн)|(?:отрази|отраж[её]н)\p{L}*\s+незавер[шщ][её]нн\p{L}*\s+производств|инвентаризаци\p{L}*\s+нзп/iu.test(
       itemAndDescText
     ) ||
     (/(?:сформировать|сформирован\p{L}*)\s+(?:осв|оборотно-сальдов|бухгалтерск\p{L}*\s+отчетност)|закрыть\s+период/iu.test(
@@ -1057,7 +1076,7 @@ export function detectOperationClassification(
       category: 'employee_settlement_73',
       docType1C: /с\s+р\/с|с\s+расчетн|перечислен/iu.test(itemAndDescText)
         ? 'СписаниеСРасчетногоСчета'
-        : /из\s+касс|выдан\p{L}*\s+из\s+касс/iu.test(itemAndDescText)
+        : /из\s+касс|через\s+касс|выдан\p{L}*\s+из\s+касс|наличн/iu.test(itemAndDescText)
           ? 'ВыдачаНаличных'
           : /в\s+касс|внесен\p{L}*\s+в\s+касс/iu.test(itemAndDescText)
             ? 'ПоступлениеНаличных'
@@ -1480,9 +1499,10 @@ export function detectOperationClassification(
   // 13b. Employee Writ of Execution Registration (Исполнительный лист — удержание алиментов 76.41)
   if (
     draft.explicitCredit === '76.41' ||
-    /поступил\p{L}*\s+исполнительн\p{L}*\s+лист|исполнительн\p{L}*\s+лист.*(?:алимент|удержан|заработк|доход|в\s+пользу\s+[а-яё]|взыскан\p{L}*\s+с\s+[а-яё])|взыскан\p{L}*\s+алимент/iu.test(
-      itemAndDescText
-    )
+    (!/неуй?стойк|штраф|пен[ия]|по\s+дог/iu.test(itemAndDescText) &&
+      /поступил\p{L}*\s+исполнительн\p{L}*\s+лист|исполнительн\p{L}*\s+лист.*(?:алимент|удержан|заработк|доход|в\s+пользу\s+[а-яё]|взыскан\p{L}*\s+с\s+[а-яё])|взыскан\p{L}*\s+алимент/iu.test(
+        itemAndDescText
+      ))
   ) {
     return {
       category: 'writ_of_execution',
@@ -1558,7 +1578,9 @@ export function detectOperationClassification(
     (draft.directionHint === 'out' ||
       /возврат\p{L}*\s+(?:части\s+|частичн\p{L}*\s+|неиспользованн\p{L}*\s+)?аванс|произведен\p{L}*\s+(?:частичн\p{L}*\s+)?возврат\s+аванс|(?:перечислен|оплачен|уплачен|списан)\p{L}*\s+(?:с\s+р\/с(?:ч)?\s+|с\s+расчетн\p{L}*\s+счета\s+)?(?:\d+\s*%\s*)?(?:ежемесячн\p{L}*\s+|очередн\p{L}*\s+|окончательн\p{L}*\s+)?(?:платеж|оплат|доплат|аванс|предоплат|задолженност|долг|остаток|сумма|денежн|средств|по\s+счету|по\s+договору|поставщик|подрядчик|исполнител|арендодател|за\s+\p{L}+|полученн\p{L}*\s+(?:материал|товар|услуг|работ))|произведен\p{L}*\s+(?:окончательн\p{L}*\s+)?(?:расчет|оплат\p{L}*|доплат\p{L}*|платеж)|списание\s+с\s+(?:р\/с|расчетн)|платежное\s+поручение\s+исходящ|оплата\s+(?:по\s+счету|счета|поставщику)/iu.test(
         itemAndDescText
-      ))
+      ) ||
+      (/^\s*(?:оплачен\p{L}*|оплатил\p{L}*)\s+/iu.test(itemAndDescText) &&
+        !/^(?:приобретен|получен|поступил|оказан|выполнен)/iu.test(itemAndDescText.trim())))
   ) {
     const isBuyerRefund = /возврат\p{L}*.*аванс/iu.test(itemAndDescText);
     return {
@@ -1612,9 +1634,12 @@ export function detectOperationClassification(
   // 20. Purchases: Equipment & Capex Delivery/Mounting on 08.04.1 -> Goods (41.01) -> Materials (10.*) -> Services (20/26/44)
   const isCapexEquipmentDeliveryOrMounting =
     !(!isCompositePurchaseAndPayment && /оплачен|перечислен|списан\p{L}*\s+с\s+р\/с/iu.test(itemAndDescText)) &&
-    /(?:доставк|монтаж|пусконалад|сборк|установк)\p{L}*.*(?:приобретенн\p{L}*\s+|поступивш\p{L}*\s+|купленн\p{L}*\s+)?(?:оборудован|станок|станк|бетоносмесител|бетономешалк|компрессор|генератор|трансформатор|погрузчик|экскаватор|производственн\p{L}*\s+лини|леса\s+строительн|строительн\p{L}*\s+леса|минитрактор|плоттер|бытовк|объект\p{L}*\s+ос(?=$|[^\p{L}]))/iu.test(
+    (/(?:доставк|монтаж|пусконалад|сборк|установк|подключен|настройк)\p{L}*.*(?:приобретенн\p{L}*\s+|поступивш\p{L}*\s+|купленн\p{L}*\s+)?(?:оборудован|станок|станк|бетоносмесител|бетономешалк|компрессор|генератор|трансформатор|погрузчик|экскаватор|производственн\p{L}*\s+лини|леса\s+строительн|строительн\p{L}*\s+леса|минитрактор|плоттер|бытовк|объект\p{L}*\s+ос(?=$|[^\p{L}]))/iu.test(
       itemAndDescText
-    );
+    ) ||
+      /включен\p{L}*\s+в\s+стоимост\p{L}*\s+(?:ос(?=$|[^\p{L}])|основн\p{L}*\s+средств|оборудован)|поступление\s+доп\.?\s*расход.*(?:ос(?=$|[^\p{L}])|оборудован|бетоносмесител|плоттер|станк)/iu.test(
+        itemAndDescText
+      ));
   if (
     matchedNomKind === 'Оборудование' ||
     matchedNomKind === 'ОС' ||
@@ -1637,16 +1662,21 @@ export function detectOperationClassification(
 
   if (
     matchedNomKind === 'Товар' ||
-    /(?:приобретен|приобрел|поступил|закуплен)\p{L}*.*подарк/iu.test(itemAndDescText)
+    /(?:приобретен|приобрел|поступил|закуплен)\p{L}*.*(?:подарк|оконн\p{L}*\s+блок)/iu.test(itemAndDescText)
   ) {
     return { category: 'purchase_goods', docType1C: 'ПоступлениеТоваровУслуг', documentSubKind1C: 'Товары (накладная, УПД)' };
   }
-  if (matchedNomKind === 'Материал') {
+  if (
+    matchedNomKind === 'Материал' ||
+    /включен\p{L}*\s+в\s+стоимост\p{L}*\s+материал|доставк\p{L}*.*материал.*поступление\s+доп\.?\s*расход/iu.test(
+      itemAndDescText
+    )
+  ) {
     return { category: 'purchase_materials', docType1C: 'ПоступлениеТоваровУслуг', documentSubKind1C: 'Материалы (накладная, УПД)' };
   }
   if (
     matchedNomKind === 'Услуга' ||
-    /аренд|услуг|связ|интернет|телефон|электроэнерг|коммунальн|доставк|транспортн|перевозк|реклам|консультац|обслуживан|нотариус|юридическ|аудиторск|ведени\p{L}*\s+бухгалтерск|озеленен|благоустройств|работ\p{L}*.*выполнен\p{L}*.*на\s+основании\s+акт|на\s+основании\s+(?:счета[,\s]+)?акт\p{L}*|охран|уборк|ремонт|(?:вступительн\p{L}*|членск\p{L}*|целев\p{L}*)?\s*взнос\p{L}*.*(?:саморегулируем|(?:^|[^\p{L}])сро(?=$|[^\p{L}])|союз\s+строител|ассоциац)|сертификац|лицензи|подписк/iu.test(
+    /аренд|услуг|связ|интернет|телефон|электроэнерг|коммунальн|доставк|транспортн|перевозк|реклам|консультац|обслуживан|нотариус|юридическ|аудиторск|ведени\p{L}*\s+бухгалтерск|озеленен|благоустройств.*(?:выполнен|оказан|акт)|работ\p{L}*.*выполнен\p{L}*.*на\s+основании\s+акт|на\s+основании\s+(?:счета[,\s]+)?акт\p{L}*|охран|уборк|ремонт|(?:вступительн\p{L}*|членск\p{L}*|целев\p{L}*)?\s*взнос\p{L}*.*(?:саморегулируем|(?:^|[^\p{L}])сро(?=$|[^\p{L}])|союз\s+строител|ассоциац)|сертификац|лицензи|подписк/iu.test(
       itemAndDescText
     )
   ) {
@@ -1654,7 +1684,7 @@ export function detectOperationClassification(
   }
 
   if (
-    /материал|сырь[её]|канцтовар|бумаг|топлив|бензин|дизел|солярк|гсм|смазк|автомасл|моторн\p{L}*\s+масл|машинн\p{L}*\s+масл|антифриз|тосол|керосин|запчаст|инвентар|хозтовар|хозпринадлежност|спецодежд|спецоснастк|спецобув|рабоч\p{L}*\s+одежд|форменн\p{L}*\s+одежд|(?:^|[^\p{L}])сиз(?=$|[^\p{L}])|каск|халат|комбинезон|кирпич|цемент|бетон|раствор|арматур|песок|щебен|гравий|доск|пиломатериал|брус|фанер|плит\p{L}*\s+пвх|заготовк\p{L}*\s+мдф|стеклопакет|фурнитур|клей|герметик|пен\p{L}*\s+монтажн|гипсокартон|утеплител|минват|шифер|штукатурк|шпаклевк|грунтовк|краск|стройматериал|металл|профил|кабел|провод|метиз|крепеж|саморез|электрод/iu.test(
+    /материал|сырь[её]|канцтовар|бумаг|топлив|бензин|дизел|солярк|гсм|смазк|автомасл|моторн\p{L}*\s+масл|машинн\p{L}*\s+масл|антифриз|тосол|керосин|запчаст|инвентар|хозтовар|хозпринадлежност|принтер|оргтехник|офисн\p{L}*\s+мебел|стул|стол(?=$|[^\p{L}])|кресл|шкаф|стеллаж|спецодежд|спецоснастк|спецобув|рабоч\p{L}*\s+одежд|форменн\p{L}*\s+одежд|(?:^|[^\p{L}])сиз(?=$|[^\p{L}])|каск|халат|комбинезон|кирпич|цемент|бетон|раствор|арматур|песок|щебен|гравий|доск|пиломатериал|брус|фанер|плит\p{L}*\s+пвх|потолочн\p{L}*\s+плит|керамогранит|металлопрофил|заготовк\p{L}*\s+мдф|стеклопакет|фурнитур|клей|герметик|пен\p{L}*\s+монтажн|гипсокартон|утеплител|минват|шифер|штукатурк|шпаклевк|грунтовк|краск|лак|обо[ий]|паркет|рейк|плинтус|газонн\p{L}*\s+трав|стройматериал|металл|профил|кабел|провод|метиз|крепеж|саморез|электрод/iu.test(
       itemAndDescText
     )
   ) {
@@ -1741,9 +1771,19 @@ function resolveStockBatchCost(params: {
     db1C,
     priorOperations,
   } = params;
-  // Multi-item comma/semicolon list ("плита ПВХ, заготовка МДФ, клей")
-  if (!requestedQty && /[,;]/.test(itemText)) {
-    const parts = itemText
+  // Strip trailing destination / purpose clauses so item matching focuses purely on the material/product name
+  const cleanedItemText = itemText
+    .replace(
+      /\s+(?:на\s+объект|в[о]?\s+(?:основн\p{L}*\s+|вспомогательн\p{L}*\s+)?производств|на\s+производств|для\s+производств|на\s+строительств|для\s+благоустройств|в\s+эксплуатац|в\s+цех|покупател|заказчик).*$/iu,
+      ''
+    )
+    .trim();
+
+  // Multi-item comma/semicolon list ("(плита ПВХ 284 шт, заготовка МДФ 284 шт, клей 284 шт)" or "кирпич, строительный раствор")
+  const parentheticalList = itemText.match(/\(([^()]*[,;][^()]*)\)/u)?.[1];
+  const multiListCandidate = parentheticalList || (/[,;]/.test(cleanedItemText) ? cleanedItemText : '');
+  if (multiListCandidate) {
+    const parts = multiListCandidate
       .split(/[,;]+/)
       .map((s) => s.trim())
       .filter((s) => s.length >= 2);
@@ -1753,15 +1793,21 @@ function resolveStockBatchCost(params: {
       let chosenSubAcc = preferredAccount;
       const partNotes: string[] = [];
       for (const p of parts) {
+        const qtyMatch = p.match(/(\d+(?:[.,]\d+)?)\s*(?:шт|ед|кг|тонн|т(?=$|\s|\.)|м2|м3|упак|компл)/iu);
+        const partQty = qtyMatch?.[1] ? Number(qtyMatch[1].replace(',', '.')) : undefined;
+        const partName = p
+          .replace(/(\d+(?:[.,]\d+)?)\s*(?:шт|ед|кг|тонн|т(?=$|\s|\.)|м2|м3|упак|компл)\.?/giu, ' ')
+          .trim();
         const subRes = resolveStockBatchCost({
           ...params,
-          itemText: p,
+          itemText: partName || p,
+          requestedQty: partQty && partQty > 0 ? partQty : undefined,
         });
         if (subRes && subRes.amount > 0.01) {
           sumAmt = round2(sumAmt + subRes.amount);
           chosenSubAcc = subRes.account;
           resolvedCount += 1;
-          partNotes.push(`${p}: ${subRes.amount.toFixed(2)} ₽`);
+          partNotes.push(`${partName || p}: ${subRes.amount.toFixed(2)} ₽`);
         }
       }
       if (resolvedCount >= 1 && sumAmt > 0.01) {
@@ -1775,7 +1821,7 @@ function resolveStockBatchCost(params: {
     }
   }
 
-  const stem = stemRuItemKey(itemText);
+  const stem = stemRuItemKey(cleanedItemText || itemText);
   const stemTokens = stem
     ? stem
         .split(' ')
@@ -1846,6 +1892,31 @@ function resolveStockBatchCost(params: {
         chosenAcc = acc;
         chosen = val;
       }
+    }
+  }
+
+  // Fallback for workwear (10.10) when recipient names or synonyms ("рабочая одежда" vs "спецодежда") prevented token match
+  if ((!chosen || chosen.netAmt <= 0.01) && preferredAccount === '10.10' && stemTokens.length > 0) {
+    let fallbackNetAmt = 0;
+    let fallbackNetQty = 0;
+    for (const pOp of priorOperations) {
+      if (!pOp.includeInProcessing || pOp.isDuplicateIn1C) continue;
+      if (opDate && pOp.date && pOp.date > opDate) continue;
+      for (const e of pOp.entries) {
+        if (e.isOffBalance) continue;
+        if (e.debit === '10.10') {
+          fallbackNetAmt = round2(fallbackNetAmt + e.amount);
+          fallbackNetQty = round2(fallbackNetQty + (pOp.quantity ?? 0));
+        }
+        if (e.credit === '10.10') {
+          fallbackNetAmt = round2(fallbackNetAmt - e.amount);
+          fallbackNetQty = round2(fallbackNetQty - (pOp.quantity ?? 0));
+        }
+      }
+    }
+    if (fallbackNetAmt > 0.01) {
+      chosenAcc = '10.10';
+      chosen = { netAmt: fallbackNetAmt, netQty: Math.max(0, fallbackNetQty) };
     }
   }
 
@@ -2150,6 +2221,7 @@ export function bindAndGenerateOperation(
 
   const founderShareOp =
     draft.categoryHint === 'founder_contribution' ||
+    preClassification.category === 'founder_contribution' ||
     preClassification.category === 'charter_capital' ||
     preClassification.category === 'dividends_accrual' ||
     preClassification.category === 'dividends_payout' ||
@@ -2173,6 +2245,8 @@ export function bindAndGenerateOperation(
       } else {
         cpName = normalizeGenitiveFioToNominative(extractedFounderFio);
       }
+    } else if (employeeName) {
+      cpName = normalizeGenitiveFioToNominative(employeeName);
     } else if (db1C) {
       const mentionedPerson = findPersonMentionedInDescription1C(draft.description, db1C);
       if (mentionedPerson) {
@@ -2575,7 +2649,9 @@ export function bindAndGenerateOperation(
   // --- 5. Bind Warehouse, ExpenseItem, CashFlowItem ---
   const isCapexServiceExpense =
     category === 'purchase_equipment' &&
-    /(?:доставк|транспорт|перевозк|монтаж|пусконалад|сборк|установк)/iu.test(draft.description);
+    /(?:доставк|транспорт|перевозк|монтаж|пусконалад|сборк|установк|подключен|настройк|доп\.?\s*расход|включен\p{L}*\s+в\s+стоимост)/iu.test(
+      draft.description
+    );
 
   const internalDefaultWarehouseCategories: OperationCategory[] = [
     'materials_writeoff',
@@ -2891,7 +2967,30 @@ export function bindAndGenerateOperation(
       };
     }
   }
-  if (!nomName && category === 'purchase_materials') {
+  if (
+    category === 'purchase_materials' &&
+    /включен\p{L}*\s+в\s+стоимост\p{L}*\s+материал|поступление\s+доп\.?\s*расход/iu.test(draft.description)
+  ) {
+    const prevMatOp = [...(batchContext?.priorOperations ?? [])]
+      .reverse()
+      .find(
+        (o) =>
+          o.includeInProcessing &&
+          o.category === 'purchase_materials' &&
+          o.nomenclatureName &&
+          (!draft.date || !o.date || o.date <= draft.date)
+      );
+    if (prevMatOp) {
+      nomName = prevMatOp.nomenclatureName;
+      if (!draft.materialAccountHint && prevMatOp.materialAccount) {
+        draft = { ...draft, materialAccountHint: prevMatOp.materialAccount };
+      }
+      nomBinding = {
+        status: 'new_for_1c',
+        note: `Доп. расходы включены в фактическую себестоимость партии «${prevMatOp.nomenclatureName}» (ФСБУ 5/2019)`,
+      };
+    }
+  } else if (!nomName && category === 'purchase_materials') {
     const mMat = draft.description.match(
       /(?:поступил[аои]?|приобретен[аоы]?|закуплен[аоы]?|оприходован[аоы]?)\s+([а-яёa-z][^\n(,;—-]{2,55}?)(?=\s+(?:от|у|поставщик|на\s+сумм|в\s+сумме|стоимост|по\s+цен|в\s+т\.?\s*ч|$))/iu
     );
@@ -3379,7 +3478,13 @@ export function bindAndGenerateOperation(
   }
 
   // 6c. Compute empty amount from linked earlier operation (e.g., 100% advance in Row 2 -> goods receipt in Row 3)
-  if (effectiveDraftAmount < 0.01 && priorOps.length > 0 && doesOperationRequireCounterparty(category)) {
+  if (
+    effectiveDraftAmount < 0.01 &&
+    priorOps.length > 0 &&
+    doesOperationRequireCounterparty(category) &&
+    category !== 'founder_contribution' &&
+    category !== 'charter_capital'
+  ) {
     const normCp = normalizeEntityKey(cpName);
     const normNom = normalizeEntityKey(nomName);
 
@@ -3421,7 +3526,16 @@ export function bindAndGenerateOperation(
         prev.entries.some((e) => e.debit === '60.02')
       ) {
         const availAdv = computeCounterpartyAdvanceBalance('60.02', cpName, cpInn, db1C, priorOps);
-        const fallbackAmt = availAdv > 0.01 ? availAdv : prev.amount;
+        const fullInvoiceInPrev =
+          prev.quantity && prev.quantity > 0 && prev.unitPrice && prev.unitPrice > 0
+            ? round2(prev.quantity * prev.unitPrice)
+            : 0;
+        const fallbackAmt =
+          fullInvoiceInPrev >= 0.01
+            ? fullInvoiceInPrev
+            : availAdv > 0.01
+              ? availAdv
+              : prev.amount;
         effectiveDraftAmount = fallbackAmt;
         if (!effectiveQty && prev.quantity) effectiveQty = prev.quantity;
         if (!effectiveUnitPrice && prev.unitPrice) effectiveUnitPrice = prev.unitPrice;
@@ -3430,7 +3544,10 @@ export function bindAndGenerateOperation(
         }
         if (inheritedVatRule === undefined) inheritedVatRule = prev.vatRule;
         if (inheritedVatRate === undefined && prev.vatRate > 0) inheritedVatRate = prev.vatRate;
-        amountCalculationNote = `Сумма определена по связанному авансу поставщику «${cpName}» от ${prev.date} (счёт 60.02): ${effectiveDraftAmount.toFixed(2)} ₽`;
+        amountCalculationNote =
+          fullInvoiceInPrev >= 0.01
+            ? `Сумма накладной определена по условиям счёта от ${prev.date} (${prev.quantity} × ${prev.unitPrice?.toFixed(2)} ₽ = ${effectiveDraftAmount.toFixed(2)} ₽; аванс зачтён)`
+            : `Сумма определена по связанному авансу поставщику «${cpName}» от ${prev.date} (счёт 60.02): ${effectiveDraftAmount.toFixed(2)} ₽`;
         calculationProvenance = amountCalculationNote;
         break;
       }
@@ -3508,7 +3625,9 @@ export function bindAndGenerateOperation(
     ['materials_writeoff', 'workwear_issue', 'warehouse_transfer'].includes(category)
   ) {
     const stockRes = resolveStockBatchCost({
-      itemText: nomName || draft.description,
+      itemText: /\([^()]*[,;][^()]*\)/u.test(draft.description)
+        ? draft.description
+        : nomName || draft.description,
       preferredAccount: resolvedMaterialAccount,
       accountPrefixFilter: ['10', '41'],
       requestedQty: effectiveQty,
@@ -4093,7 +4212,30 @@ export function bindAndGenerateOperation(
         const isNoteInterestReceipt =
           /(?:%%|процент\p{L}*).*(?:от\s+банк|вексел|ценн\p{L}*\s+бумаг)/iu.test(descLower) ||
           /(?:от\s+банк\p{L}*|вексел|ценн\p{L}*\s+бумаг).*(?:%%|процент\p{L}*)/iu.test(descLower);
-        const isAdvance = !isNoteInterestReceipt && /аванс|предоплат/i.test(descLower);
+        let isAdvance = !isNoteInterestReceipt && /аванс|предоплат/i.test(descLower);
+        if (!isNoteInterestReceipt && !isAdvance && batchContext && cpName) {
+          const normCpIn = normalizeEntityKey(cpName);
+          const hasPriorShipment = priorOps.some(
+            (o) =>
+              o.includeInProcessing &&
+              normalizeEntityKey(o.counterpartyName) === normCpIn &&
+              o.entries.some((e) => e.debit === '62.01')
+          );
+          const hasDbReceivable = db1C?.postings.some(
+            (p) =>
+              p.debit === '62.01' &&
+              normalizeEntityKey(`${p.counterpartyName ?? ''} ${p.debitSubconto.join(' ')}`).includes(
+                normCpIn
+              )
+          );
+          if (
+            !hasPriorShipment &&
+            !hasDbReceivable &&
+            !db1C?.rawBalances.some((b) => b.account === '62.01' && b.rawDebit > 0)
+          ) {
+            isAdvance = true;
+          }
+        }
         const ktAcc = isNoteInterestReceipt ? '76.09' : isAdvance ? '62.02' : '62.01';
         let bankInAmt = totalWithVat;
         if (isNoteInterestReceipt && bankInAmt < 0.01) {
@@ -4135,18 +4277,21 @@ export function bindAndGenerateOperation(
       }
 
       case 'founder_contribution': {
+        const founderSub = cpName || employeeName || 'Учредитель';
         const isAssetContribution =
           /бытовк|станок|станк|леса|бетоносмесител|оборудован|основн\p{L}*\s+средств|компьютер|автомобил|помещен|имуществ|ос(?=$|[^\p{L}])/iu.test(
             descLower
           ) && !/денежн|наличн|на\s+р\/с|на\s+расчетн/iu.test(descLower);
         if (isAssetContribution) {
-          const assetLabel = nomName || 'Внеоборотный актив (вклад в УК)';
+          const inKindMatch = draft.description.match(/в\s+виде\s+([^\n(.,;]+)/iu);
+          const assetLabel =
+            nomName || (inKindMatch?.[1] ? inKindMatch[1].trim() : 'Внеоборотный актив (вклад в УК)');
           pushEntry(
             '08.04.1',
             '75.01',
             totalWithVat,
             assetLabel,
-            cpName || 'Учредитель',
+            founderSub,
             draft.description || 'Получен вклад учредителя в уставный капитал основным средством'
           );
           if (/введен\p{L}*.*в\s+эксплуатац|принят\p{L}*\s+к\s+уч[её]т/iu.test(descLower)) {
@@ -4166,7 +4311,7 @@ export function bindAndGenerateOperation(
             '75.01',
             totalWithVat,
             cashOrBankDt === '51' ? bankSubconto : cashFlowItemName,
-            cpName || 'Учредитель',
+            founderSub,
             draft.description || 'Взнос учредителя в уставный капитал (оплата доли)'
           );
         }
@@ -4219,7 +4364,61 @@ export function bindAndGenerateOperation(
       }
 
       case 'penalty_claim': {
-        if (docType1C === 'СписаниеСРасчетногоСчета') {
+        const normDescPenalty = draft.description.replace(/ё/gi, 'е');
+        const penaltyMatches = Array.from(
+          normDescPenalty.matchAll(
+            /(неуй?стойк\p{L}*|пен[ияей]\p{L}*|штраф\p{L}*)\s*(?:=|в\s+размере|на\s+сумму|в\s+сумме)?\s*(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.?)?(?:\s*\(([^()]*)\))?/giu
+          )
+        );
+        const hasInlineAccrual = /начислен/iu.test(normDescPenalty) && penaltyMatches.length > 0;
+        const hasBankWriteoff =
+          docType1C === 'СписаниеСРасчетногоСчета' ||
+          /списан\p{L}*.*(?:р\/с|расчетн)|перечислен|уплачен|оплачен/iu.test(normDescPenalty);
+
+        if (hasInlineAccrual) {
+          let sumSanctions = 0;
+          for (const m of penaltyMatches) {
+            const kindWord = (m[1] || '').toLowerCase();
+            const rawVal = Number((m[2] || '0').replace(/[\s\u00A0]/g, '').replace(',', '.'));
+            const hint = (m[3] || '').toLowerCase();
+            if (!Number.isFinite(rawVal) || rawVal < 0.01) continue;
+            sumSanctions = round2(sumSanctions + rawVal);
+            const dtSanction = /99/.test(hint) ? '99.01.1' : '91.02';
+            pushEntry(
+              dtSanction,
+              '76.02',
+              round2(rawVal),
+              dtSanction.startsWith('99')
+                ? 'Причитающиеся налоговые и иные штрафные санкции'
+                : 'Штрафы, пени и неустойки к уплате',
+              cpSubconto || cpName || 'Контрагент по претензии',
+              `Начислен${kindWord.startsWith('штраф') ? ' штраф' : 'а неустойка'} по исполнительному листу / договору`
+            );
+          }
+          if (hasBankWriteoff) {
+            if (sumSanctions >= 0.01) {
+              pushEntry(
+                '76.02',
+                '51',
+                sumSanctions,
+                cpSubconto || cpName || 'Контрагент по претензии',
+                bankSubconto,
+                'Списаны с расчётного счёта начисленные штрафные санкции по исполнительному листу'
+              );
+            }
+            const principalPayoff = round2(Math.max(0, totalWithVat - sumSanctions));
+            if (principalPayoff >= 0.01 && /задолженност|основн\p{L}*\s+долг/iu.test(normDescPenalty)) {
+              pushEntry(
+                '60.01',
+                '51',
+                principalPayoff,
+                cpSubconto || cpName || 'Поставщик',
+                bankSubconto,
+                `Погашена основная задолженность поставщику «${cpName || 'Контрагент'}» по исполнительному листу`
+              );
+            }
+          }
+        } else if (docType1C === 'СписаниеСРасчетногоСчета') {
           pushEntry(
             '76.02',
             '51',
@@ -4333,6 +4532,55 @@ export function bindAndGenerateOperation(
               employeeName || 'Подотчётное лицо',
               'Принят к вычету НДС по счёту-фактуре / БСО к авансовому отчёту'
             );
+          }
+        }
+        if (
+          /неизрасходованн\p{L}*.*(?:возвращ|внесен|сдан)\p{L}*.*в\s+касс|(?:возвращ|сдан)\p{L}*\s+остаток.*в\s+касс/iu.test(
+            descLower
+          )
+        ) {
+          const normEmp71 = normalizeEntityKey(employeeName);
+          let open71 = 0;
+          for (const pOp of priorOps) {
+            if (!pOp.includeInProcessing || pOp.isDuplicateIn1C) continue;
+            if (draft.date && pOp.date && pOp.date > draft.date) continue;
+            for (const e of pOp.entries) {
+              if (
+                e.debit === '71.01' &&
+                (!normEmp71 ||
+                  normalizeEntityKey(`${pOp.employeeName} ${e.debitSubconto}`).includes(normEmp71))
+              ) {
+                open71 = round2(open71 + e.amount);
+              }
+              if (
+                e.credit === '71.01' &&
+                (!normEmp71 ||
+                  normalizeEntityKey(`${pOp.employeeName} ${e.creditSubconto}`).includes(normEmp71))
+              ) {
+                open71 = round2(open71 - e.amount);
+              }
+            }
+          }
+          const unspentReturn = round2(open71 - totalWithVat);
+          if (unspentReturn >= 0.01) {
+            pushEntry(
+              '50.01',
+              '71.01',
+              unspentReturn,
+              'Возврат от подотчетного лица',
+              employeeName || 'Подотчётное лицо',
+              'Возврат неизрасходованных подотчётных сумм в кассу по ПКО'
+            );
+            if (/и\s+(?:сдан|внесен|зачислен)\p{L}*.*(?:в\s+банк|на\s+р(?:асчетн\p{L}*\s+)?\/?сч)/iu.test(descLower)) {
+              pushEntry(
+                '51',
+                '50.01',
+                unspentReturn,
+                bankSubconto,
+                'Взнос наличными в банк',
+                'Взнос возвращённого остатка подотчётных сумм из кассы на расчётный счёт'
+              );
+            }
           }
         }
         break;
@@ -4482,14 +4730,17 @@ export function bindAndGenerateOperation(
             'Принят к вычету НДС по счёту-фактуре поставщика'
           );
         }
-        if (/через\s+подотчетн\p{L}*\s+лиц/iu.test(descLower)) {
+        const paidViaAccountablePerson =
+          /через\s+(?:подотчетн\p{L}*\s+лиц|[а-яё]+\s+[а-яё]\.\s*[а-яё]\.?)/iu.test(descLower) ||
+          /авансов\p{L}*\s+отчет/iu.test(draft.actionSequenceHint ?? '');
+        if (paidViaAccountablePerson) {
           pushEntry(
             '60.01',
             '71.01',
             round2(totalWithVat - offsetAmt),
             cpSubconto || cpName,
             employeeName || 'Подотчётное лицо',
-            'Оплата поставщику через подотчётное лицо (Авансовый отчёт)'
+            'Оплата поставщику через подотчётное лицо (Авансовый отчёт — вкладка «Оплата»)'
           );
         } else if (
           /(?:приобретен|приобрел|получен|поступил)\p{L}*\s+и\s+(?:оплачен|оплатил)\p{L}*|на\s+основании\s+[^\n]{0,65}произведен\p{L}*\s+оплат|произведен\p{L}*\s+оплат\p{L}*\s+на\s+основании|оплат\p{L}*\s+(?:поставщику\s+)?произведен/iu.test(
@@ -4505,12 +4756,15 @@ export function bindAndGenerateOperation(
             'Оплата поставщику с расчётного счёта'
           );
         }
+        const combinedWriteoffHint = `${descLower} ${(draft.actionSequenceHint ?? '').toLowerCase()}`;
         if (
-          /(?:[.;,]\s*|\s+и\s+)(?:передан|списан|отпущен)\p{L}*.*(?:на\s+объект|в\s+производств|на\s+производств|производств\p{L}*\s+работ|в\s+эксплуатац)/iu.test(
-            descLower
+          /(?:[.;,]\s*|\s+и\s+|на\s+основании\s+ввести\s+)[^.;]*(?:переда(?:н|ч)\p{L}*|списан\p{L}*|отпущен\p{L}*).*(?:на\s+объект|в\s+производств|на\s+производств|производств\p{L}*\s+работ|для\s+благоустройств|в\s+эксплуатац)/iu.test(
+            combinedWriteoffHint
           )
         ) {
-          const costAcc = resolvedCostAccount || '20.01';
+          const isOfficeOrExploitation =
+            matAcc === '10.09' || /в\s+эксплуатац|принтер|офисн\p{L}*\s+мебел/iu.test(combinedWriteoffHint);
+          const costAcc = isOfficeOrExploitation ? '26' : resolvedCostAccount || '20.01';
           pushEntry(
             costAcc,
             matAcc,
@@ -4521,6 +4775,17 @@ export function bindAndGenerateOperation(
             matSubconto,
             `Передача материалов со счёта ${matAcc} в производство / эксплуатацию`
           );
+          if (matAcc === '10.09' || matAcc === '10.10') {
+            pushEntry(
+              matAcc === '10.10' ? 'МЦ.02' : 'МЦ.04',
+              '',
+              netWithoutVat,
+              `${employeeName || 'МОЛ организации'} / ${nomName || 'Инвентарь'}`,
+              '',
+              'Принят на забалансовый контроль малоценный инвентарь в эксплуатации',
+              { isOffBalance: true, allowZeroCalculated: true }
+            );
+          }
         }
         break;
       }
@@ -4760,7 +5025,9 @@ export function bindAndGenerateOperation(
           costAcc,
           '02.01',
           totalWithVat,
-          expenseItemName || 'Амортизация',
+          costAcc === '20.01'
+            ? [nomGroup, expenseItemName || 'Амортизация'].filter(Boolean).join(' / ')
+            : expenseItemName || 'Амортизация',
           nomName || 'Основные средства в организации',
           draft.description || 'Начислена амортизация основных средств за месяц',
           {
@@ -4777,7 +5044,9 @@ export function bindAndGenerateOperation(
           costAcc,
           '69.09',
           totalWithVat,
-          expenseItemName || 'Страховые взносы',
+          costAcc === '20.01'
+            ? [nomGroup, expenseItemName || 'Страховые взносы'].filter(Boolean).join(' / ')
+            : expenseItemName || 'Страховые взносы',
           'Страховые взносы по единому тарифу',
           draft.description || 'Начислены страховые взносы',
           {
@@ -4921,79 +5190,57 @@ export function bindAndGenerateOperation(
               ? bookCost
               : round2(bookCost + prevAccrued + remInterest);
 
-        if (isEndorsedToSupplier && !isEndorsedWithInterest) {
-          if (transferValue >= 0.01) {
+        const totalAccruedIncludedInTransfer =
+          isEndorsedToSupplier && !isEndorsedWithInterest ? 0 : round2(prevAccrued + remInterest);
+        const proceeds9101 = round2(transferValue - totalAccruedIncludedInTransfer);
+        if (proceeds9101 >= 0.01) {
+          pushEntry(
+            '76.09',
+            '91.01',
+            proceeds9101,
+            settlementSub,
+            'Выбытие (передача/погашение) ценных бумаг',
+            `Отражён прочий доход от выбытия ${noteSub}`
+          );
+        } else if (proceeds9101 <= -0.01) {
+          pushEntry(
+            '91.02',
+            '76.09',
+            Math.abs(proceeds9101),
+            'Прочие расходы при выбытии ценных бумаг',
+            settlementSub,
+            `Списана разница при выбытии ${noteSub}`
+          );
+        }
+        if (bookCost >= 0.01) {
+          pushEntry(
+            '91.02',
+            '58.02',
+            bookCost,
+            'Списание балансовой стоимости ценных бумаг',
+            noteSub,
+            `Списана балансовая стоимость выбывшего ${noteSub} (ПБУ 19/02)`
+          );
+        }
+        if (transferValue >= 0.01) {
+          if (isEndorsedToSupplier) {
             pushEntry(
               '60.01',
-              '91.01',
+              '76.09',
               transferValue,
               cpSubconto || cpName || 'Поставщик',
-              'Выбытие (передача) ценных бумаг в счёт оплаты поставщику',
-              `Передан ${noteSub} поставщику в счёт оплаты задолженности`
-            );
-          }
-          if (bookCost >= 0.01) {
-            pushEntry(
-              '91.02',
-              '58.02',
-              bookCost,
-              'Списание балансовой стоимости ценных бумаг',
-              noteSub,
-              `Списана балансовая стоимость выбывшего ${noteSub} (ПБУ 19/02)`
-            );
-          }
-        } else {
-          const totalAccruedOn7609 = round2(prevAccrued + remInterest);
-          const proceeds9101 = round2(transferValue - totalAccruedOn7609);
-          if (proceeds9101 >= 0.01) {
-            pushEntry(
-              '76.09',
-              '91.01',
-              proceeds9101,
               settlementSub,
-              'Выбытие (передача/погашение) ценных бумаг',
-              `Отражён прочий доход от выбытия ${noteSub}`
+              `Зачтена стоимость переданного ${noteSub} в счёт оплаты поставщику`
             );
-          } else if (proceeds9101 <= -0.01) {
+          } else {
             pushEntry(
-              '91.02',
+              '51',
               '76.09',
-              Math.abs(proceeds9101),
-              'Прочие расходы при выбытии ценных бумаг',
+              transferValue,
+              bankSubconto,
               settlementSub,
-              `Списана разница при выбытии ${noteSub}`
+              `Поступили денежные средства при погашении ${noteSub}`
             );
-          }
-          if (bookCost >= 0.01) {
-            pushEntry(
-              '91.02',
-              '58.02',
-              bookCost,
-              'Списание балансовой стоимости ценных бумаг',
-              noteSub,
-              `Списана балансовая стоимость выбывшего ${noteSub} (ПБУ 19/02)`
-            );
-          }
-          if (transferValue >= 0.01) {
-            if (isEndorsedToSupplier) {
-              pushEntry(
-                '60.01',
-                '76.09',
-                transferValue,
-                cpSubconto || cpName || 'Поставщик',
-                settlementSub,
-                `Зачтена стоимость переданного ${noteSub} в счёт оплаты поставщику`
-              );
-            } else {
-              pushEntry(
-                '51',
-                '76.09',
-                transferValue,
-                bankSubconto,
-                settlementSub,
-                `Поступили денежные средства при погашении ${noteSub}`
-              );
-            }
           }
         }
 
@@ -5124,11 +5371,14 @@ export function bindAndGenerateOperation(
           );
         }
         if (isOsSaleDisposal && totalWithVat >= 0.01) {
+          const buyerSub =
+            cpSubconto ||
+            (cpName ? `${cpName} / ${contractName || 'Основной договор'}` : 'Покупатель ОС');
           pushEntry(
             '62.01',
             '91.01',
             totalWithVat,
-            cpSubconto || cpName || 'Покупатель ОС',
+            buyerSub,
             'Реализация основных средств',
             `Отражена выручка от продажи ОС «${assetSub}»`
           );
@@ -5141,6 +5391,45 @@ export function bindAndGenerateOperation(
               'Налог (взносы): начислено / уплачено',
               'Начислен НДС при реализации основного средства'
             );
+          }
+          if (batchContext && cpName) {
+            const availAdv6202 = computeCounterpartyAdvanceBalance(
+              '62.02',
+              cpName,
+              cpInn,
+              db1C,
+              priorOps
+            );
+            const offsetAmt = round2(Math.min(totalWithVat, availAdv6202));
+            if (offsetAmt >= 0.01) {
+              pushEntry(
+                '62.02',
+                '62.01',
+                offsetAmt,
+                buyerSub,
+                buyerSub,
+                'Зачёт ранее полученного аванса покупателя при реализации ОС'
+              );
+              const hasPrior76AV = priorOps.some(
+                (o) =>
+                  o.includeInProcessing &&
+                  normalizeEntityKey(o.counterpartyName) === normalizeEntityKey(cpName) &&
+                  o.entries.some((e) => e.debit === '76.АВ')
+              );
+              if (hasPrior76AV && vatRate > 0) {
+                const restVat = round2((offsetAmt * vatRate) / (100 + vatRate));
+                if (restVat >= 0.01) {
+                  pushEntry(
+                    '68.02',
+                    '76.АВ',
+                    restVat,
+                    'Налог (взносы): начислено / уплачено',
+                    cpName,
+                    'Принят к вычету НДС с зачтённого аванса при реализации ОС (п. 8 ст. 171 НК РФ)'
+                  );
+                }
+              }
+            }
           }
         }
         break;
@@ -5160,14 +5449,31 @@ export function bindAndGenerateOperation(
 
         if (totalWithVat < 0.01) {
           for (const row19 of open19Rows) {
-            pushEntry(
-              '68.02',
-              row19.code,
-              row19.endDebit,
-              'Налог (взносы): начислено / уплачено',
-              cpName || 'Счета-фактуры полученные',
-              `Принят к вычету накопленный НДС со счёта ${row19.code}`
+            const subs19 = (runningOsv19.subcontoRowsByAccount?.[row19.code] ?? []).filter(
+              (s) => s.endDebit >= 0.01
             );
+            const sumSubs19 = round2(subs19.reduce((acc, s) => acc + s.endDebit, 0));
+            if (subs19.length > 0 && Math.abs(sumSubs19 - row19.endDebit) < 0.02) {
+              for (const s19 of subs19) {
+                pushEntry(
+                  '68.02',
+                  row19.code,
+                  s19.endDebit,
+                  'Налог (взносы): начислено / уплачено',
+                  s19.subcontoLabel === 'Без аналитики (субконто)' ? '' : s19.subcontoLabel,
+                  `Принят к вычету накопленный НДС со счёта ${row19.code} (${s19.subcontoLabel})`
+                );
+              }
+            } else {
+              pushEntry(
+                '68.02',
+                row19.code,
+                row19.endDebit,
+                'Налог (взносы): начислено / уплачено',
+                cpName || 'Счета-фактуры полученные',
+                `Принят к вычету накопленный НДС со счёта ${row19.code}`
+              );
+            }
           }
         } else {
           let vatSubAcc = '19.03';
@@ -5335,7 +5641,8 @@ export function bindAndGenerateOperation(
           matchedNomKind === 'Продукция' ||
           /(?:поставлен|отгружен|реализован|прода)\p{L}*\s+(?:готов\p{L}*\s+|собственн\p{L}*\s+)?продукц|готов\p{L}*\s+продукц|издели/iu.test(
             descLower
-          );
+          ) ||
+          /отчет\p{L}*\s+производств|д\s*43\s*к\s*20/iu.test(draft.actionSequenceHint ?? '');
         const preferredSaleStockAcc = isFinishedGoods ? '43' : matchedNomAccount || '41.01';
         const batchCogs = resolveStockBatchCost({
           itemText: nomName || draft.description,
@@ -5357,6 +5664,37 @@ export function bindAndGenerateOperation(
               .join(' / '),
             `Списана себестоимость реализованных ТМЦ со счёта ${batchCogs.account}`
           );
+        } else if (isFinishedGoods) {
+          const runningOsv20 = calculateOsvReport({
+            db1C,
+            operations: priorOps,
+            dateTo: draft.date || undefined,
+            reportingYear: batchContext?.reportingYear,
+            includeQueuedOperations: true,
+          });
+          const row2001 = runningOsv20.leafRows.find((r) => r.code === '20.01');
+          const openWipCost = round2(row2001?.endDebit ?? 0);
+          if (openWipCost >= 0.01) {
+            const prodSubconto = [nomName || 'Готовая продукция', warehouseName || 'Основной склад']
+              .filter(Boolean)
+              .join(' / ');
+            pushEntry(
+              '43',
+              '20.01',
+              openWipCost,
+              prodSubconto,
+              nomGroup,
+              `Выпуск готовой продукции из производства (Отчёт производства за смену — ${effectiveQty ? `${effectiveQty} шт.` : 'партия'})`
+            );
+            pushEntry(
+              '90.02.1',
+              '43',
+              openWipCost,
+              nomGroup,
+              prodSubconto,
+              'Списана себестоимость реализованной готовой продукции со счёта 43'
+            );
+          }
         } else if (effectiveQty && effectiveQty > 0) {
           let unitCost = estimateUnitCostFrom1C(nomName, preferredSaleStockAcc, db1C);
           if (!unitCost && priorOps.length > 0) {
@@ -5659,61 +5997,146 @@ export function bindAndGenerateOperation(
         let added9002 = 0;
         let added9008 = 0;
 
-        const bal25 = runningOsv.leafRows.find((r) => r.code.startsWith('25'))?.endDebit ?? 0;
+        const row25Leaf = runningOsv.leafRows.find((r) => r.code.startsWith('25'));
+        const bal25 = row25Leaf?.endDebit ?? 0;
         if (bal25 > 0.01) {
-          pushEntry(
-            '20.01',
-            '25',
-            bal25,
-            nomGroup,
-            'Общепроизводственные расходы',
-            'Распределение счёта 25 на счёт 20.01'
-          );
+          const subs25 = (runningOsv.subcontoRowsByAccount?.['25'] ?? []).filter((s) => s.endDebit >= 0.01);
+          const sumSubs25 = round2(subs25.reduce((acc, s) => acc + s.endDebit, 0));
+          if (subs25.length > 0 && Math.abs(sumSubs25 - bal25) < 0.02) {
+            for (const s25 of subs25) {
+              pushEntry(
+                '20.01',
+                '25',
+                s25.endDebit,
+                nomGroup,
+                s25.subcontoLabel === 'Без аналитики (субконто)' ? '' : s25.subcontoLabel,
+                'Распределение счёта 25 на счёт 20.01'
+              );
+            }
+          } else {
+            pushEntry(
+              '20.01',
+              '25',
+              bal25,
+              nomGroup,
+              'Общепроизводственные расходы',
+              'Распределение счёта 25 на счёт 20.01'
+            );
+          }
           extraDepr20 = round2(extraDepr20 + bal25);
         }
 
-        const bal20 = round2(
-          (runningOsv.leafRows.find((r) => r.code === '20.01')?.endDebit ?? 0) + extraDepr20
-        );
+        const leafEnd20 = runningOsv.leafRows.find((r) => r.code === '20.01')?.endDebit ?? 0;
+        const bal20 = round2(leafEnd20 + extraDepr20);
         if (bal20 > 0.01) {
-          pushEntry(
-            '90.02.1',
-            '20.01',
-            bal20,
-            nomGroup,
-            nomGroup,
-            'Закрытие счёта 20.01 в себестоимость продаж'
+          const subs20 = (runningOsv.subcontoRowsByAccount?.['20.01'] ?? []).filter(
+            (s) => s.endDebit >= 0.01
           );
+          const sumSubs20 = round2(subs20.reduce((acc, s) => acc + s.endDebit, 0));
+          if (subs20.length > 0 && Math.abs(sumSubs20 - leafEnd20) < 0.02) {
+            for (const s20 of subs20) {
+              pushEntry(
+                '90.02.1',
+                '20.01',
+                s20.endDebit,
+                nomGroup,
+                s20.subcontoLabel === 'Без аналитики (субконто)' ? '' : s20.subcontoLabel,
+                `Закрытие счёта 20.01 в себестоимость продаж (${s20.subcontoLabel})`
+              );
+            }
+            if (extraDepr20 > 0.01) {
+              pushEntry(
+                '90.02.1',
+                '20.01',
+                extraDepr20,
+                nomGroup,
+                bal25 > 0.01 ? nomGroup : 'Амортизация',
+                'Закрытие регламентных расходов 20.01 в себестоимость продаж'
+              );
+            }
+          } else {
+            pushEntry(
+              '90.02.1',
+              '20.01',
+              bal20,
+              nomGroup,
+              nomGroup,
+              'Закрытие счёта 20.01 в себестоимость продаж'
+            );
+          }
           added9002 = round2(added9002 + bal20);
         }
 
-        const bal26 = round2(
-          (runningOsv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0) + extraDepr26
-        );
+        const leafEnd26 = runningOsv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0;
+        const bal26 = round2(leafEnd26 + extraDepr26);
         if (bal26 > 0.01) {
           const target26 = directCosting ? '90.08.1' : '90.02.1';
-          pushEntry(
-            target26,
-            '26',
-            bal26,
-            nomGroup,
-            'Общехозяйственные расходы',
-            'Закрытие счёта 26 («Директ-костинг»)'
+          const subs26 = (runningOsv.subcontoRowsByAccount?.['26'] ?? []).filter(
+            (s) => s.endDebit >= 0.01
           );
+          const sumSubs26 = round2(subs26.reduce((acc, s) => acc + s.endDebit, 0));
+          if (subs26.length > 0 && Math.abs(sumSubs26 - leafEnd26) < 0.02) {
+            for (const s26 of subs26) {
+              pushEntry(
+                target26,
+                '26',
+                s26.endDebit,
+                nomGroup,
+                s26.subcontoLabel === 'Без аналитики (субконто)' ? '' : s26.subcontoLabel,
+                `Закрытие счёта 26 («Директ-костинг»: ${s26.subcontoLabel})`
+              );
+            }
+            if (extraDepr26 > 0.01) {
+              pushEntry(
+                target26,
+                '26',
+                extraDepr26,
+                nomGroup,
+                'Амортизация',
+                'Закрытие амортизации со счёта 26 («Директ-костинг»)'
+              );
+            }
+          } else {
+            pushEntry(
+              target26,
+              '26',
+              bal26,
+              nomGroup,
+              'Общехозяйственные расходы',
+              'Закрытие счёта 26 («Директ-костинг»)'
+            );
+          }
           if (directCosting) added9008 = round2(added9008 + bal26);
           else added9002 = round2(added9002 + bal26);
         }
 
         const bal44 = runningOsv.leafRows.find((r) => r.code === '44.01')?.endDebit ?? 0;
         if (bal44 > 0.01) {
-          pushEntry(
-            '90.02.1',
-            '44.01',
-            bal44,
-            nomGroup,
-            'Издержки обращения',
-            'Закрытие счёта 44.01'
+          const subs44 = (runningOsv.subcontoRowsByAccount?.['44.01'] ?? []).filter(
+            (s) => s.endDebit >= 0.01
           );
+          const sumSubs44 = round2(subs44.reduce((acc, s) => acc + s.endDebit, 0));
+          if (subs44.length > 0 && Math.abs(sumSubs44 - bal44) < 0.02) {
+            for (const s44 of subs44) {
+              pushEntry(
+                '90.02.1',
+                '44.01',
+                s44.endDebit,
+                nomGroup,
+                s44.subcontoLabel === 'Без аналитики (субконто)' ? '' : s44.subcontoLabel,
+                `Закрытие счёта 44.01 (${s44.subcontoLabel})`
+              );
+            }
+          } else {
+            pushEntry(
+              '90.02.1',
+              '44.01',
+              bal44,
+              nomGroup,
+              'Издержки обращения',
+              'Закрытие счёта 44.01'
+            );
+          }
           added9002 = round2(added9002 + bal44);
         }
 
@@ -5913,7 +6336,7 @@ export function bindAndGenerateOperation(
       }
 
       case 'charter_capital': {
-        const founderSub = cpName || 'Учредители организации';
+        const founderSub = cpName || employeeName || 'Учредители организации';
         pushEntry(
           '75.01',
           '80.09',
@@ -6300,9 +6723,9 @@ export function bindAndGenerateOperation(
               'Удержан НДФЛ 13% с суммы материальной помощи свыше 4 000 ₽ (п. 28 ст. 217 НК РФ)'
             );
           }
-          if (/выплачен|выдан|из\s+касс|с\s+р\/с|на\s+карт|перечислен/iu.test(descLower)) {
+          if (/выплачен|выдан|из\s+касс|через\s+касс|с\s+р\/с|на\s+карт|перечислен/iu.test(descLower)) {
             const moneyKt =
-              docType1C === 'ВыдачаНаличных' || /из\s+касс|наличн/iu.test(descLower) ? '50.01' : '51';
+              docType1C === 'ВыдачаНаличных' || /из\s+касс|через\s+касс|наличн/iu.test(descLower) ? '50.01' : '51';
             const netPayout = round2(aidGross - aidNdfl);
             if (netPayout >= 0.01) {
               pushEntry(
@@ -6741,6 +7164,7 @@ export function bindAndGenerateOperation(
     disposedFinancialNoteId: resolvedDisposedNoteId,
     periodicPaymentAmount: resolvedPeriodicPaymentAmount,
     interestRatePercent: resolvedInterestRatePercent,
+    actionSequenceHint: draft.actionSequenceHint,
     explicitCorrespondences: inlineCorr.length > 0 ? inlineCorr : undefined,
     resolverTrace: resolverStep01Trace,
     vatRate,
@@ -6931,6 +7355,12 @@ export function recalculateOperationsChronologically(
         op.category === 'os_commissioning' ||
         op.category === 'materials_writeoff' ||
         op.category === 'workwear_issue' ||
+        op.category === 'purchase_materials' ||
+        op.category === 'purchase_goods' ||
+        op.category === 'expense_report' ||
+        op.category === 'penalty_claim' ||
+        op.category === 'founder_contribution' ||
+        op.category === 'employee_settlement_73' ||
         op.category === 'sale_goods' ||
         op.category === 'sale_services';
 
@@ -6978,6 +7408,7 @@ export function recalculateOperationsChronologically(
           disposedFinancialNoteId: op.disposedFinancialNoteId,
           periodicPaymentAmount: op.periodicPaymentAmount,
           interestRatePercent: op.interestRatePercent,
+          actionSequenceHint: op.actionSequenceHint,
           explicitCorrespondences: op.explicitCorrespondences,
           vatRate: op.vatRate,
           vatRule: op.vatRule,

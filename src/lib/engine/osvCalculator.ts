@@ -126,9 +126,18 @@ interface MovementRecord {
   description: string;
 }
 
-function normalizeSubcontoLabel(raw?: string): string {
+function normalizeSubcontoLabel(raw?: string, acc?: string): string {
   const clean = (raw ?? '').trim();
-  return clean || 'Без аналитики (субконто)';
+  if (!clean) return 'Без аналитики (субконто)';
+  // In 1C:BP 3.0 Chart of Accounts, on 20.01 / 20.02 / 23 Subconto 1 is Номенклатурные группы (balance-bearing)
+  // while Subconto 2 (Статьи затрат) is marked «Только обороты» so production output (43 <- 20.01) & month-end close cleanly.
+  if (acc === '20.01' || acc === '20.02' || acc === '23') {
+    return clean.split(/\s+\/\s+/)[0].trim() || clean;
+  }
+  if (acc && (acc.startsWith('60') || acc.startsWith('62') || acc.startsWith('76'))) {
+    return clean.replace(/\s+\/\s+Основной договор$/iu, '').trim() || clean;
+  }
+  return clean;
 }
 
 export function calculateOsvReport(params: {
@@ -219,7 +228,7 @@ export function calculateOsvReport(params: {
 
   const addSubcontoStartNet = (acc: string, subcontoRaw: string | undefined, delta: number) => {
     if (!acc || acc === '000' || Math.abs(delta) < 0.005) return;
-    const subLabel = normalizeSubcontoLabel(subcontoRaw);
+    const subLabel = normalizeSubcontoLabel(subcontoRaw, acc);
     const subMap = baseSubcontoStartNetMap.get(acc) ?? new Map<string, number>();
     subMap.set(subLabel, round2((subMap.get(subLabel) ?? 0) + delta));
     baseSubcontoStartNetMap.set(acc, subMap);
@@ -307,7 +316,7 @@ export function calculateOsvReport(params: {
 
   const addSubcontoPeriodStart = (acc: string, subRaw: string, delta: number) => {
     if (!acc || acc === '000') return;
-    const label = normalizeSubcontoLabel(subRaw);
+    const label = normalizeSubcontoLabel(subRaw, acc);
     const sm = subcontoStartMap.get(acc) ?? new Map<string, number>();
     sm.set(label, round2((sm.get(label) ?? 0) + delta));
     subcontoStartMap.set(acc, sm);
@@ -315,7 +324,7 @@ export function calculateOsvReport(params: {
 
   const addSubcontoTurn = (acc: string, subRaw: string, side: 'dt' | 'kt', amt: number) => {
     if (!acc || acc === '000') return;
-    const label = normalizeSubcontoLabel(subRaw);
+    const label = normalizeSubcontoLabel(subRaw, acc);
     const sm = subcontoTurnMap.get(acc) ?? new Map<string, { dt: number; kt: number }>();
     const cur = sm.get(label) ?? { dt: 0, kt: 0 };
     if (side === 'dt') cur.dt = round2(cur.dt + amt);

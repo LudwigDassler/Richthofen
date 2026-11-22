@@ -271,6 +271,16 @@ function resolveOperationAmountAndLinksCore(
       'начислен',
       'получен',
       'выполнен',
+      'реализован',
+      'отгружен',
+      'поставлен',
+      'готов',
+      'накладн',
+      'поступил',
+      'передан',
+      'списан',
+      'приобретен',
+      'оказан',
     ]);
     const qStemsForward = extractKeywordStems1C(
       `${input.nomenclatureName || ''} ${input.description}`
@@ -729,6 +739,85 @@ function resolveOperationAmountAndLinksCore(
     }
   }
 
+  if (input.category === 'founder_contribution') {
+    const founderKey = normalizePersonIdentityKey1C(
+      linkedCpName || input.employeeName || input.description
+    );
+    const founderSurname = founderKey.split(/\s+/)[0] || '';
+    let open7501 = 0;
+    const links7501: ResolverSourceLink1C[] = [];
+
+    input.priorOperations.forEach((p, idx) => {
+      if (p.includeInProcessing === false) return;
+      for (const e of p.entries) {
+        const dtSubNorm = normalizePersonIdentityKey1C(
+          e.debitSubconto || p.counterpartyName || p.employeeName || ''
+        );
+        const ktSubNorm = normalizePersonIdentityKey1C(
+          e.creditSubconto || p.counterpartyName || p.employeeName || ''
+        );
+        if (e.debit === '75.01') {
+          if (
+            !founderSurname ||
+            !dtSubNorm ||
+            dtSubNorm.includes('учредител') ||
+            dtSubNorm.includes(founderSurname)
+          ) {
+            open7501 = round2(open7501 + e.amount);
+            links7501.push({
+              opId: p.id,
+              opNumber: idx + 1,
+              date: p.date,
+              label: `Формирование доли в УК #${idx + 1} от ${formatRuDateShort(p.date)} (+${fmtMoney(e.amount)})`,
+            });
+          }
+        }
+        if (e.credit === '75.01') {
+          if (
+            !founderSurname ||
+            !ktSubNorm ||
+            ktSubNorm.includes('учредител') ||
+            ktSubNorm.includes(founderSurname)
+          ) {
+            open7501 = round2(open7501 - e.amount);
+          }
+        }
+      }
+    });
+
+    if (open7501 < 0.01) {
+      const osv75 = calculateOsvReport({
+        db1C: input.db1C,
+        operations: input.priorOperations,
+        dateTo: input.date || undefined,
+        includeQueuedOperations: true,
+      });
+      const row7501 = osv75.leafRows.find((r) => r.code === '75.01' && r.endDebit >= 0.01);
+      if (row7501) {
+        open7501 = round2(row7501.endDebit);
+      }
+    }
+
+    if (open7501 >= 0.01) {
+      return {
+        resolvedAmount: open7501,
+        amountMode: 'from_account_balance',
+        counterpartyName: linkedCpName || input.employeeName || undefined,
+        vatRate: 0,
+        vatRule: 'none',
+        step01Breakdown: {
+          resolverLevel: 5,
+          resolverLevelName: LEVEL_NAMES[5],
+          summaryFormula: `Задолженность учредителя по вкладу в уставный капитал (Дт 75.01) = ${fmtMoney(open7501)}`,
+          steps: [
+            `Сумма вклада учредителя определена по открытому дебетовому сальдо счёта 75.01 «Расчёты по вкладам в уставный (складочный) капитал» (${fmtMoney(open7501)}).`,
+          ],
+          sourceLinks: links7501,
+        },
+      };
+    }
+  }
+
   // ============================================================================
   // LEVEL 3: Semantic binding to open debt / advance from prior days (60 / 62)
   // ============================================================================
@@ -1177,134 +1266,146 @@ function resolveOperationAmountAndLinksCore(
   // ============================================================================
   // LEVEL 4: Recurring / periodic operations (lease/rent, telecom, registered contracts)
   // ============================================================================
-  const cpNormForRec = normalizeCounterpartyKey1C(linkedCpName);
-  const qStemsRec = extractKeywordStems1C(input.description);
-  const recurringContracts = stateBefore.contracts.filter(
-    (c) => (c.periodicAmount ?? 0) >= 0.01
-  );
-  const matchedRecContract =
-    recurringContracts.find(
-      (c) => cpNormForRec && normalizeCounterpartyKey1C(c.counterpartyName) === cpNormForRec
-    ) ||
-    recurringContracts.find((c) =>
-      (c.keywordStems ?? []).some((ks) => qStemsRec.some((qs) => stemsMatch1C(ks, qs)))
+  const isRecurringEligibleCategory = [
+    'purchase_services',
+    'sale_services',
+    'bank_out',
+    'cash_out',
+    'bank_in',
+    'cash_in',
+    'bank_fee',
+  ].includes(input.category);
+
+  if (isRecurringEligibleCategory) {
+    const cpNormForRec = normalizeCounterpartyKey1C(linkedCpName);
+    const qStemsRec = extractKeywordStems1C(input.description);
+    const recurringContracts = stateBefore.contracts.filter(
+      (c) => (c.periodicAmount ?? 0) >= 0.01
     );
+    const matchedRecContract =
+      recurringContracts.find(
+        (c) => cpNormForRec && normalizeCounterpartyKey1C(c.counterpartyName) === cpNormForRec
+      ) ||
+      recurringContracts.find((c) =>
+        (c.keywordStems ?? []).some((ks) => qStemsRec.some((qs) => stemsMatch1C(ks, qs)))
+      );
 
-  if (matchedRecContract && (matchedRecContract.periodicAmount ?? 0) >= 0.01) {
-    const recAmt = round2(matchedRecContract.periodicAmount!);
-    return {
-      resolvedAmount: recAmt,
-      amountMode: 'from_related_doc',
-      counterpartyName: linkedCpName || matchedRecContract.counterpartyName,
-      contractName: linkedContract || matchedRecContract.name,
-      vatRate: matchedRecContract.vatRate ?? input.vatRate,
-      vatRule: matchedRecContract.vatRule ?? input.vatRule,
-      step01Breakdown: {
-        resolverLevel: 4,
-        resolverLevelName: LEVEL_NAMES[4],
-        summaryFormula: `Периодический платёж по договору «${matchedRecContract.name}» (${matchedRecContract.counterpartyName}) = ${fmtMoney(recAmt)}`,
-        steps: [
-          `В базе зарегистрирован договор с контрагентом «${matchedRecContract.counterpartyName}» с регулярной ставкой ${fmtMoney(recAmt)}.`,
-          `Сумма и ставка НДС подтянуты автоматически из условий договора.`,
-        ],
-        sourceLinks: [
-          {
-            opId: matchedRecContract.firstSeenOpId,
-            opNumber: matchedRecContract.firstSeenOpNumber,
-            date: matchedRecContract.firstSeenDate || matchedRecContract.date,
-            label: matchedRecContract.firstSeenOpNumber
-              ? `Договор из операции #${matchedRecContract.firstSeenOpNumber} (${matchedRecContract.counterpartyName})`
-              : `Договор базы 1С (${matchedRecContract.counterpartyName})`,
-          },
-        ],
-      },
-    };
-  }
-
-  // Forward contract scan (when an act/accrual row precedes the contract registration row in the task table)
-  for (let fIdx = 0; fIdx < futureOps.length; fIdx++) {
-    const fut = futureOps[fIdx];
-    if (fut.includeInProcessing === false) continue;
-    const isContractRow =
-      fut.category === 'contract_event' || /заключен\p{L}*\s+договор/iu.test(fut.description);
-    if (!isContractRow) continue;
-    const recTerms = extractRecurringContractTerms1C(fut.description);
-    const futPeriodicAmt = round2(fut.periodicPaymentAmount ?? recTerms?.periodicAmount ?? 0);
-    if (futPeriodicAmt < 0.01) continue;
-    const futCpNorm = normalizeCounterpartyKey1C(fut.counterpartyName);
-    const sameCp = cpNormForRec && futCpNorm && cpNormForRec === futCpNorm;
-    const futStems = extractKeywordStems1C(fut.description);
-    const sharedStems = qStemsRec.filter((qs) => futStems.some((fs) => stemsMatch1C(fs, qs)));
-    if (sameCp || sharedStems.length >= 2) {
-      const futNum = input.priorOperations.length + 2 + fIdx;
+    if (matchedRecContract && (matchedRecContract.periodicAmount ?? 0) >= 0.01) {
+      const recAmt = round2(matchedRecContract.periodicAmount!);
       return {
-        resolvedAmount: futPeriodicAmt,
+        resolvedAmount: recAmt,
         amountMode: 'from_related_doc',
-        counterpartyName: linkedCpName || fut.counterpartyName,
-        counterpartyInn: linkedCpInn || fut.counterpartyInn,
-        counterpartyKpp: linkedCpKpp || fut.counterpartyKpp,
-        contractName: linkedContract || fut.contractName,
-        vatRate: recTerms?.vatRate ?? fut.vatRate ?? input.vatRate,
-        vatRule: recTerms?.vatRule ?? fut.vatRule ?? input.vatRule,
+        counterpartyName: linkedCpName || matchedRecContract.counterpartyName,
+        contractName: linkedContract || matchedRecContract.name,
+        vatRate: matchedRecContract.vatRate ?? input.vatRate,
+        vatRule: matchedRecContract.vatRule ?? input.vatRule,
         step01Breakdown: {
           resolverLevel: 4,
           resolverLevelName: LEVEL_NAMES[4],
-          summaryFormula: `Периодический платёж по условиям договора (${fut.counterpartyName || linkedCpName}) = ${fmtMoney(futPeriodicAmt)}`,
+          summaryFormula: `Периодический платёж по договору «${matchedRecContract.name}» (${matchedRecContract.counterpartyName}) = ${fmtMoney(recAmt)}`,
           steps: [
-            `В контуре задания найдена запись о договоре #${futNum} от ${formatRuDateShort(fut.date)} («${fut.description}») с регулярной платой ${fmtMoney(futPeriodicAmt)}.`,
-            `Сумма и параметры НДС подтянуты автоматически из условий договора.`,
+            `В базе зарегистрирован договор с контрагентом «${matchedRecContract.counterpartyName}» с регулярной ставкой ${fmtMoney(recAmt)}.`,
+            `Сумма и ставка НДС подтянуты автоматически из условий договора.`,
           ],
           sourceLinks: [
             {
-              opId: fut.id,
-              opNumber: futNum,
-              date: fut.date,
-              label: `Договор из операции #${futNum} от ${formatRuDateShort(fut.date)} (${fmtMoney(futPeriodicAmt)})`,
+              opId: matchedRecContract.firstSeenOpId,
+              opNumber: matchedRecContract.firstSeenOpNumber,
+              date: matchedRecContract.firstSeenDate || matchedRecContract.date,
+              label: matchedRecContract.firstSeenOpNumber
+                ? `Договор из операции #${matchedRecContract.firstSeenOpNumber} (${matchedRecContract.counterpartyName})`
+                : `Договор базы 1С (${matchedRecContract.counterpartyName})`,
             },
           ],
         },
       };
     }
-  }
 
-  // Also check prior periodic operations in priorOperations (e.g. rent / internet / RKO in previous month)
-  if (/аренд|связ|интернет|обслуживан|рко|охрана|подписк|абонент/iu.test(input.description)) {
-    for (let idx = input.priorOperations.length - 1; idx >= 0; idx--) {
-      const prev = input.priorOperations[idx];
-      if (prev.amount < 0.01 || prev.includeInProcessing === false) continue;
-      const prevCpNorm = normalizeCounterpartyKey1C(prev.counterpartyName);
-      const sameCp = cpNormForRec && prevCpNorm === cpNormForRec;
-      const prevStems = extractKeywordStems1C(prev.description);
-      const sharedStems = qStemsRec.filter((qs) =>
-        prevStems.some((ps) => stemsMatch1C(ps, qs))
-      );
+    // Forward contract scan (when an act/accrual row precedes the contract registration row in the task table)
+    for (let fIdx = 0; fIdx < futureOps.length; fIdx++) {
+      const fut = futureOps[fIdx];
+      if (fut.includeInProcessing === false) continue;
+      const isContractRow =
+        fut.category === 'contract_event' || /заключен\p{L}*\s+договор/iu.test(fut.description);
+      if (!isContractRow) continue;
+      const recTerms = extractRecurringContractTerms1C(fut.description);
+      const futPeriodicAmt = round2(fut.periodicPaymentAmount ?? recTerms?.periodicAmount ?? 0);
+      if (futPeriodicAmt < 0.01) continue;
+      const futCpNorm = normalizeCounterpartyKey1C(fut.counterpartyName);
+      const sameCp = cpNormForRec && futCpNorm && cpNormForRec === futCpNorm;
+      const futStems = extractKeywordStems1C(fut.description);
+      const sharedStems = qStemsRec.filter((qs) => futStems.some((fs) => stemsMatch1C(fs, qs)));
       if (sameCp || sharedStems.length >= 2) {
+        const futNum = input.priorOperations.length + 2 + fIdx;
         return {
-          resolvedAmount: prev.amount,
+          resolvedAmount: futPeriodicAmt,
           amountMode: 'from_related_doc',
-          counterpartyName: linkedCpName || prev.counterpartyName,
-          counterpartyInn: linkedCpInn || prev.counterpartyInn,
-          counterpartyKpp: linkedCpKpp || prev.counterpartyKpp,
-          contractName: linkedContract || prev.contractName,
-          vatRate: prev.vatRate,
-          vatRule: prev.vatRule,
+          counterpartyName: linkedCpName || fut.counterpartyName,
+          counterpartyInn: linkedCpInn || fut.counterpartyInn,
+          counterpartyKpp: linkedCpKpp || fut.counterpartyKpp,
+          contractName: linkedContract || fut.contractName,
+          vatRate: recTerms?.vatRate ?? fut.vatRate ?? input.vatRate,
+          vatRule: recTerms?.vatRule ?? fut.vatRule ?? input.vatRule,
           step01Breakdown: {
             resolverLevel: 4,
             resolverLevelName: LEVEL_NAMES[4],
-            summaryFormula: `Регулярная операция по аналогии с периодом ${formatRuDateShort(prev.date)} = ${fmtMoney(prev.amount)}`,
+            summaryFormula: `Периодический платёж по условиям договора (${fut.counterpartyName || linkedCpName}) = ${fmtMoney(futPeriodicAmt)}`,
             steps: [
-              `Найдена аналогичная периодическая операция #${idx + 1} от ${formatRuDateShort(prev.date)} («${prev.description}») на сумму ${fmtMoney(prev.amount)}.`,
+              `В контуре задания найдена запись о договоре #${futNum} от ${formatRuDateShort(fut.date)} («${fut.description}») с регулярной платой ${fmtMoney(futPeriodicAmt)}.`,
+              `Сумма и параметры НДС подтянуты автоматически из условий договора.`,
             ],
             sourceLinks: [
               {
-                opId: prev.id,
-                opNumber: idx + 1,
-                date: prev.date,
-                label: `Операция #${idx + 1} от ${formatRuDateShort(prev.date)} (${fmtMoney(prev.amount)})`,
+                opId: fut.id,
+                opNumber: futNum,
+                date: fut.date,
+                label: `Договор из операции #${futNum} от ${formatRuDateShort(fut.date)} (${fmtMoney(futPeriodicAmt)})`,
               },
             ],
           },
         };
+      }
+    }
+
+    // Also check prior periodic operations in priorOperations (e.g. rent / internet / RKO in previous month)
+    if (/аренд|связ|интернет|обслуживан|рко|охрана|подписк|абонент/iu.test(input.description)) {
+      for (let idx = input.priorOperations.length - 1; idx >= 0; idx--) {
+        const prev = input.priorOperations[idx];
+        if (prev.amount < 0.01 || prev.includeInProcessing === false) continue;
+        const prevCpNorm = normalizeCounterpartyKey1C(prev.counterpartyName);
+        const sameCp = cpNormForRec && prevCpNorm === cpNormForRec;
+        const prevStems = extractKeywordStems1C(prev.description);
+        const sharedStems = qStemsRec.filter((qs) =>
+          prevStems.some((ps) => stemsMatch1C(ps, qs))
+        );
+        if (sameCp || sharedStems.length >= 2) {
+          return {
+            resolvedAmount: prev.amount,
+            amountMode: 'from_related_doc',
+            counterpartyName: linkedCpName || prev.counterpartyName,
+            counterpartyInn: linkedCpInn || prev.counterpartyInn,
+            counterpartyKpp: linkedCpKpp || prev.counterpartyKpp,
+            contractName: linkedContract || prev.contractName,
+            vatRate: prev.vatRate,
+            vatRule: prev.vatRule,
+            step01Breakdown: {
+              resolverLevel: 4,
+              resolverLevelName: LEVEL_NAMES[4],
+              summaryFormula: `Регулярная операция по аналогии с периодом ${formatRuDateShort(prev.date)} = ${fmtMoney(prev.amount)}`,
+              steps: [
+                `Найдена аналогичная периодическая операция #${idx + 1} от ${formatRuDateShort(prev.date)} («${prev.description}») на сумму ${fmtMoney(prev.amount)}.`,
+              ],
+              sourceLinks: [
+                {
+                  opId: prev.id,
+                  opNumber: idx + 1,
+                  date: prev.date,
+                  label: `Операция #${idx + 1} от ${formatRuDateShort(prev.date)} (${fmtMoney(prev.amount)})`,
+                },
+              ],
+            },
+          };
+        }
       }
     }
   }
@@ -1662,6 +1763,59 @@ function resolveOperationAmountAndLinksCore(
                 },
               ]
             : [],
+        },
+      };
+    }
+  }
+
+  if (input.category === 'penalty_claim') {
+    const inlineMatches = Array.from(
+      input.description.matchAll(
+        /(?:неуй?стойк\p{L}*|штраф\p{L}*|пен[ияей])\s*(?:в\s+размере\s*|составил\p{L}*\s*|=|:|—|-)\s*(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)/giu
+      )
+    );
+    let penaltySum = 0;
+    const parts: string[] = [];
+    for (const m of inlineMatches) {
+      const val = round2(Number(m[1].replace(/[\s\u00A0]/g, '').replace(',', '.')) || 0);
+      if (val > 0) {
+        penaltySum = round2(penaltySum + val);
+        parts.push(fmtMoney(val));
+      }
+    }
+    let principalDebt = 0;
+    if (
+      /списан\p{L}*.*(?:в\s+размере\s+задолженност|задолженност)/iu.test(input.description) &&
+      linkedCpName
+    ) {
+      const unpaid = resolveUnpaidSupplier6001ByKeywords(
+        stateBefore,
+        input.description,
+        linkedCpName
+      );
+      if (unpaid && unpaid.totalUnpaidAmount >= 0.01) {
+        principalDebt = unpaid.totalUnpaidAmount;
+        parts.push(`долг по договору ${fmtMoney(principalDebt)}`);
+      }
+    }
+    const totalClaim = round2(penaltySum + principalDebt);
+    if (totalClaim >= 0.01) {
+      return {
+        resolvedAmount: totalClaim,
+        amountMode: 'from_related_doc',
+        counterpartyName: linkedCpName || undefined,
+        counterpartyInn: linkedCpInn || undefined,
+        counterpartyKpp: linkedCpKpp || undefined,
+        vatRate: 0,
+        vatRule: 'none',
+        step01Breakdown: {
+          resolverLevel: 3,
+          resolverLevelName: LEVEL_NAMES[3],
+          summaryFormula: `${parts.join(' + ')} = ${fmtMoney(totalClaim)}`,
+          steps: [
+            `Из условия исполнительного листа / претензии определены санкции (${fmtMoney(penaltySum)})${principalDebt > 0 ? ` и основной долг поставщику по счёту 60.01 (${fmtMoney(principalDebt)})` : ''}.`,
+          ],
+          sourceLinks: extraLinks,
         },
       };
     }

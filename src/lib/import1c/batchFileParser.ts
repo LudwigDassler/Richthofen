@@ -297,7 +297,7 @@ export function isNonPostingManagementOrPolicyText(text: string): boolean {
     return true;
   }
   if (
-    /(?:утвержден|принят|установлен|издан)\p{L}*.*(?:учетн\p{L}*\s+политик|лимит\s+(?:остатка\s+)?касс|штатн\p{L}*\s+расписан|приказ\s+об\s+учетн)|выдана\s+доверенность|отрази\p{L}*\s+незавер[шщ]енн\p{L}*\s+производств|инвентаризаци\p{L}*\s+нзп/iu.test(
+    /(?:утвержден|принят|установлен|издан)\p{L}*.*(?:учетн\p{L}*\s+политик|лимит\s+(?:остатка\s+)?касс|штатн\p{L}*\s+расписан|приказ\s+об\s+учетн)|выдана\s+доверенность|(?:отрази|отраж[её]н)\p{L}*\s+незавер[шщ][её]нн\p{L}*\s+производств|инвентаризаци\p{L}*\s+нзп/iu.test(
       clean
     )
   ) {
@@ -1511,6 +1511,11 @@ function mapTabularRowToDraft(params: {
   const vatRateCell = getFormattedCol([/^ставка\s*ндс/i, /^%\s*ндс/i, /^ндс$/i]);
   const debitCell = normalizeAccountCode1C(getFormattedCol([/^счет\s*дт/i, /^счет\s*затрат/i, /^дебет$/i, /^дт$/i]));
   const creditCell = normalizeAccountCode1C(getFormattedCol([/^счет\s*кт/i, /^кредит$/i, /^кт$/i]));
+  const actionSeqCell = getFormattedCol([
+    /последовательност.*действ/i,
+    /порядок.*действ/i,
+    /инструкц.*1с/i,
+  ]);
 
   // Skip summary/total rows ("Итого", "Всего", "Сальдо")
   const joinedText = `${description} ${counterpartyCell} ${nomCell}`.trim();
@@ -1645,6 +1650,7 @@ function mapTabularRowToDraft(params: {
       periodicPaymentAmount: extracted.periodicPaymentAmountHint,
       interestRatePercent: extracted.interestRatePercentHint,
       directionHint,
+      actionSequenceHint: actionSeqCell || undefined,
       explicitDebit: debitCell || undefined,
       explicitCredit: creditCell || undefined,
       explicitCorrespondences: extracted.explicitCorrespondences?.length

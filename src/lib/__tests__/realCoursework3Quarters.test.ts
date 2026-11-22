@@ -204,11 +204,23 @@ test('Real 3-quarter coursework CSV pipeline (207 operations): 100% OSV balance,
   assert.equal(findLeaf('08.04.1')?.endDebit ?? 0, 0, 'All 08.04.1 capex must be commissioned');
   assert.equal(findLeaf('01.09')?.endDebit ?? 0, 0, '01.09 OS disposal account must close to 0');
   assert.equal(findLeaf('01.09')?.endCredit ?? 0, 0, '01.09 OS disposal account must close to 0');
+  assert.equal(findLeaf('10.01')?.endDebit ?? 0, 0, '10.01 raw materials must be written off to 0');
+  assert.equal(findLeaf('10.08')?.endDebit ?? 0, 0, '10.08 construction materials must be written off to 0');
+  assert.equal(findLeaf('10.10')?.endDebit ?? 0, 0, '10.10 workwear must be issued to exploitation');
+  assert.equal(findLeaf('41.01')?.endDebit ?? 0, 0, '41.01 resale goods must close to 0');
+  assert.equal(findLeaf('43')?.turnoverDebit ?? 0, 2016400, '43 finished goods output must equal 2 016 400.00 ₽');
+  assert.equal(findLeaf('43')?.endDebit ?? 0, 0, '43 finished goods must close to 0 after shipment');
   assert.equal(findLeaf('20.01')?.endDebit ?? 0, 0, '20.01 main production must close to 0');
   assert.equal(findLeaf('26')?.endDebit ?? 0, 0, '26 general expenses must close to 0');
   assert.equal(findLeaf('19.01')?.endDebit ?? 0, 0, '19.01 VAT must be deducted');
   assert.equal(findLeaf('19.03')?.endDebit ?? 0, 0, '19.03 VAT must be deducted');
   assert.equal(findLeaf('19.04')?.endDebit ?? 0, 0, '19.04 VAT must be deducted');
+  assert.equal(findLeaf('71.01')?.endDebit ?? 0, 0, '71.01 accountable persons must close to 0');
+  assert.equal(findLeaf('71.01')?.endCredit ?? 0, 0, '71.01 accountable persons must close to 0');
+  assert.equal(findLeaf('73.03')?.endDebit ?? 0, 0, '73.03 material aid must close to 0');
+  assert.equal(findLeaf('73.03')?.endCredit ?? 0, 0, '73.03 material aid must close to 0');
+  assert.equal(findLeaf('75.01')?.endDebit ?? 0, 0, '75.01 founder shares must close to 0');
+  assert.equal(findLeaf('75.01')?.endCredit ?? 0, 0, '75.01 founder shares must close to 0');
   assert.equal(findLeaf('76.09')?.endDebit ?? 0, 0, '76.09 interest/note settlements must close to 0');
   assert.equal(findLeaf('76.09')?.endCredit ?? 0, 0, '76.09 interest/note settlements must close to 0');
   assert.ok((findLeaf('51')?.endDebit ?? 0) > 0, '51 bank account must have positive debit balance');
@@ -218,6 +230,23 @@ test('Real 3-quarter coursework CSV pipeline (207 operations): 100% OSV balance,
   const autofixable = issues.filter((i) => i.canAutoFixBy1C);
   assert.equal(autofixable.length, 0, 'Expected 0 remaining autofixable audit issues');
   assert.equal(issues.length, 0, 'Expected 0 audit issues after autofix');
+
+  // Subconto & AuditorHints invariants: 0 unoffset_advances warnings and 0 red subconto rows
+  const unoffsetHints = (yearOsv.auditorHints ?? []).filter((h) => h.checkType === 'unoffset_advances');
+  assert.equal(
+    unoffsetHints.length,
+    0,
+    `Expected 0 unoffset_advances hints, got: ${unoffsetHints.map((h) => h.title).join(' | ')}`
+  );
+  for (const accCode of ['20.01', '26', '60.01', '60.02', '62.01', '62.02', '71.01', '73.03', '75.01']) {
+    const subs = yearOsv.subcontoRowsByAccount?.[accCode] ?? [];
+    const redSubs = subs.filter((s) => s.hasRedEnd);
+    assert.equal(
+      redSubs.length,
+      0,
+      `Expected 0 red subconto rows on ${accCode}, got: ${redSubs.map((s) => `${s.subcontoLabel} (${s.endDebit}/${s.endCredit})`).join(', ')}`
+    );
+  }
 
   // Account Card (movementsByAccount) invariants on leaf & synthetic group accounts (e.g. "51", "10", "60", "90")
   for (const code of ['51', '10', '60', '62', '90']) {

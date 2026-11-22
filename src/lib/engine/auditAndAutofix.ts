@@ -1442,6 +1442,7 @@ export function runAuditDiagnostics(params: {
     if (
       op.entries.length === 0 &&
       !doesSpecAllowZeroPostings(op.category) &&
+      !(op.category === 'vat_deduction' && op.amountMode === 'calculated_by_1c') &&
       ((!op.needsAmount && op.amount >= 0.01) || op.amountMode === 'calculated_by_1c')
     ) {
       issues.push({
@@ -1655,54 +1656,150 @@ export function generatePeriodClosingOperations(params: {
   const nomGroup =
     db1C?.nomenclatureGroups[0]?.name || 'Основная номенклатурная группа';
 
-  // 1. Advance Offset (Зачёт авансов 60.01—60.02 and 62.02—62.01)
-  const acc6001 = osv.leafRows.find((r) => r.code === '60.01');
-  const acc6002 = osv.leafRows.find((r) => r.code === '60.02');
-  const offset60 =
-    acc6001 && acc6002 ? round2(Math.min(acc6001.endCredit, acc6002.endDebit)) : 0;
+  // 1. Advance Offset (Зачёт авансов 60.01—60.02 and 62.02—62.01 strictly per counterparty subconto!)
+  const subs6001 = (osv.subcontoRowsByAccount?.['60.01'] ?? []).filter(
+    (s) => s.subcontoLabel !== 'Без аналитики (субконто)' && s.endCredit >= 0.01
+  );
+  const subs6002 = (osv.subcontoRowsByAccount?.['60.02'] ?? []).filter(
+    (s) => s.subcontoLabel !== 'Без аналитики (субконто)' && s.endDebit >= 0.01
+  );
+  const rem6002 = new Map(subs6002.map((s) => [s.subcontoLabel, round2(s.endDebit)]));
+  const pairs60: Array<{ dtSub: string; ktSub: string; amount: number }> = [];
 
-  const acc6201 = osv.leafRows.find((r) => r.code === '62.01');
-  const acc6202 = osv.leafRows.find((r) => r.code === '62.02');
-  const offset62 =
-    acc6201 && acc6202 ? round2(Math.min(acc6201.endDebit, acc6202.endCredit)) : 0;
+  for (const dSub of subs6001) {
+    let remDebt = round2(dSub.endCredit);
+    if (remDebt < 0.01) continue;
+    const exactAdv = rem6002.get(dSub.subcontoLabel) ?? 0;
+    if (exactAdv >= 0.01) {
+      const off = round2(Math.min(remDebt, exactAdv));
+      pairs60.push({ dtSub: dSub.subcontoLabel, ktSub: dSub.subcontoLabel, amount: off });
+      remDebt = round2(remDebt - off);
+      rem6002.set(dSub.subcontoLabel, round2(exactAdv - off));
+    }
+    if (remDebt >= 0.01) {
+      const baseKey = normalizeEntityKey(dSub.subcontoLabel.split('/')[0] ?? '');
+      if (baseKey) {
+        for (const [advLabel, advVal] of rem6002.entries()) {
+          if (advVal < 0.01 || remDebt < 0.01) continue;
+          const advBase = normalizeEntityKey(advLabel.split('/')[0] ?? '');
+          if (advBase === baseKey) {
+            const off = round2(Math.min(remDebt, advVal));
+            pairs60.push({ dtSub: dSub.subcontoLabel, ktSub: advLabel, amount: off });
+            remDebt = round2(remDebt - off);
+            rem6002.set(advLabel, round2(advVal - off));
+          }
+        }
+      }
+    }
+  }
+
+  const subs6201 = (osv.subcontoRowsByAccount?.['62.01'] ?? []).filter(
+    (s) => s.subcontoLabel !== 'Без аналитики (субконто)' && s.endDebit >= 0.01
+  );
+  const subs6202 = (osv.subcontoRowsByAccount?.['62.02'] ?? []).filter(
+    (s) => s.subcontoLabel !== 'Без аналитики (субконто)' && s.endCredit >= 0.01
+  );
+  const rem6202 = new Map(subs6202.map((s) => [s.subcontoLabel, round2(s.endCredit)]));
+  const subs76AV = new Map(
+    (osv.subcontoRowsByAccount?.['76.АВ'] ?? [])
+      .filter((s) => s.endDebit >= 0.01)
+      .map((s) => [normalizeEntityKey(s.subcontoLabel.split('/')[0] ?? ''), { label: s.subcontoLabel, rem: round2(s.endDebit) }])
+  );
+  const pairs62: Array<{ dtSub: string; ktSub: string; amount: number; vatRestore?: { sub: string; amt: number } }> = [];
+
+  for (const dSub of subs6201) {
+    let remDebt = round2(dSub.endDebit);
+    if (remDebt < 0.01) continue;
+    const baseKey = normalizeEntityKey(dSub.subcontoLabel.split('/')[0] ?? '');
+    const record62Offset = (advLabel: string, off: number) => {
+      let vatRestore: { sub: string; amt: number } | undefined;
+      const avEntry = baseKey ? subs76AV.get(baseKey) : undefined;
+      if (avEntry && avEntry.rem >= 0.01) {
+        const calcVat = round2(Math.min(avEntry.rem, (off * 20) / 120));
+        if (calcVat >= 0.01) {
+          vatRestore = { sub: avEntry.label, amt: calcVat };
+          avEntry.rem = round2(avEntry.rem - calcVat);
+        }
+      }
+      pairs62.push({ dtSub: advLabel, ktSub: dSub.subcontoLabel, amount: off, vatRestore });
+    };
+
+    const exactAdv = rem6202.get(dSub.subcontoLabel) ?? 0;
+    if (exactAdv >= 0.01) {
+      const off = round2(Math.min(remDebt, exactAdv));
+      record62Offset(dSub.subcontoLabel, off);
+      remDebt = round2(remDebt - off);
+      rem6202.set(dSub.subcontoLabel, round2(exactAdv - off));
+    }
+    if (remDebt >= 0.01 && baseKey) {
+      for (const [advLabel, advVal] of rem6202.entries()) {
+        if (advVal < 0.01 || remDebt < 0.01) continue;
+        const advBase = normalizeEntityKey(advLabel.split('/')[0] ?? '');
+        if (advBase === baseKey) {
+          const off = round2(Math.min(remDebt, advVal));
+          record62Offset(advLabel, off);
+          remDebt = round2(remDebt - off);
+          rem6202.set(advLabel, round2(advVal - off));
+        }
+      }
+    }
+  }
+
+  const offset60 = round2(pairs60.reduce((s, p) => s + p.amount, 0));
+  const offset62 = round2(pairs62.reduce((s, p) => s + p.amount, 0));
 
   if (offset60 > 0.01 || offset62 > 0.01) {
     const entries = [];
-    if (offset60 > 0.01) {
+    for (const p60 of pairs60) {
       entries.push({
         id: nextAutoFixId('auto-offset-60'),
         debit: '60.01',
         credit: '60.02',
-        debitSubconto: 'Контрагенты (поставщики)',
-        creditSubconto: 'Контрагенты (поставщики)',
-        amount: offset60,
-        description: 'Зачёт ранее выданного аванса поставщикам',
+        debitSubconto: p60.dtSub,
+        creditSubconto: p60.ktSub,
+        amount: p60.amount,
+        description: `Зачёт ранее выданного аванса поставщику (${p60.dtSub})`,
       });
+    }
+    if (offset60 > 0.01) {
       log.push(`Сформирован зачёт авансов поставщикам Дт 60.01 Кт 60.02 на ${offset60.toFixed(2)} ₽`);
       structuredChanges.push({
         id: nextAutoFixId('chg-offset-60'),
-        whatWas: `Развёрнутое сальдо: Кт 60.01 (${acc6001!.endCredit.toFixed(2)} ₽) и Дт 60.02 (${acc6002!.endDebit.toFixed(2)} ₽)`,
-        whatBecame: `Проводка зачёта аванса Дт 60.01 Кт 60.02 на сумму ${offset60.toFixed(2)} ₽`,
-        basis: 'Правила зачёта выданных авансов при поступлении ТМЦ/услуг (ПБУ / ФСБУ, 1С БП 3.0)',
+        whatWas: `Незачтённые авансы поставщикам на счетах 60.01 / 60.02 (${pairs60.length} субконто)`,
+        whatBecame: `Проводки зачёта аванса Дт 60.01 Кт 60.02 на сумму ${offset60.toFixed(2)} ₽`,
+        basis: 'Правила зачёта выданных авансов в разрезе контрагентов и договоров (1С БП 3.0)',
         category: 'advance_offset',
       });
     }
-    if (offset62 > 0.01) {
+    for (const p62 of pairs62) {
       entries.push({
         id: nextAutoFixId('auto-offset-62'),
         debit: '62.02',
         credit: '62.01',
-        debitSubconto: 'Контрагенты (покупатели)',
-        creditSubconto: 'Контрагенты (покупатели)',
-        amount: offset62,
-        description: 'Зачёт ранее полученного аванса от покупателей',
+        debitSubconto: p62.dtSub,
+        creditSubconto: p62.ktSub,
+        amount: p62.amount,
+        description: `Зачёт ранее полученного аванса покупателя (${p62.ktSub})`,
       });
+      if (p62.vatRestore) {
+        entries.push({
+          id: nextAutoFixId('auto-offset-76av'),
+          debit: '68.02',
+          credit: '76.АВ',
+          debitSubconto: 'Налог (взносы): начислено / уплачено',
+          creditSubconto: p62.vatRestore.sub,
+          amount: p62.vatRestore.amt,
+          description: `Принят к вычету НДС с зачтённого аванса покупателя (${p62.vatRestore.sub})`,
+        });
+      }
+    }
+    if (offset62 > 0.01) {
       log.push(`Сформирован зачёт авансов покупателей Дт 62.02 Кт 62.01 на ${offset62.toFixed(2)} ₽`);
       structuredChanges.push({
         id: nextAutoFixId('chg-offset-62'),
-        whatWas: `Развёрнутое сальдо: Дт 62.01 (${acc6201!.endDebit.toFixed(2)} ₽) и Кт 62.02 (${acc6202!.endCredit.toFixed(2)} ₽)`,
-        whatBecame: `Проводка зачёта аванса Дт 62.02 Кт 62.01 на сумму ${offset62.toFixed(2)} ₽`,
-        basis: 'Зачёт предоплаты покупателя в счёт выполненной реализации (1С БП 3.0)',
+        whatWas: `Незачтённые авансы покупателей на счетах 62.01 / 62.02 (${pairs62.length} субконто)`,
+        whatBecame: `Проводки зачёта аванса Дт 62.02 Кт 62.01 на сумму ${offset62.toFixed(2)} ₽`,
+        basis: 'Зачёт предоплаты покупателя в счёт выполненной реализации в разрезе договоров (1С БП 3.0)',
         category: 'advance_offset',
       });
     }
@@ -1758,10 +1855,14 @@ export function generatePeriodClosingOperations(params: {
   // 2. Advance VAT on remaining 62.02 balance (after offset62)
   const isOsno = (db1C?.accountingPolicy.taxSystem ?? 'ОСНО') === 'ОСНО';
   const vatRate = db1C?.accountingPolicy.vatRate ?? 20;
+  const acc6202 = osv.leafRows.find((r) => r.code === '62.02');
   const remaining6202 = round2((acc6202?.endCredit ?? 0) - offset62);
   if (isOsno && vatRate > 0 && remaining6202 > 0.01) {
     const expected76AV = round2((remaining6202 * vatRate) / (100 + vatRate));
-    const current76AV = osv.leafRows.find((r) => r.code === '76.АВ')?.endDebit ?? 0;
+    const restored76AV = round2(pairs62.reduce((s, p) => s + (p.vatRestore?.amt ?? 0), 0));
+    const current76AV = round2(
+      (osv.leafRows.find((r) => r.code === '76.АВ')?.endDebit ?? 0) - restored76AV
+    );
     const deltaVat = round2(expected76AV - current76AV);
     if (deltaVat > 1) {
       const advOp = operations.find((o) =>
@@ -1896,7 +1997,7 @@ export function generatePeriodClosingOperations(params: {
         id: nextAutoFixId(`close-depr-${osOp.id}`),
         debit: deprCostAcc,
         credit: '02.01',
-        debitSubconto: 'Амортизация',
+        debitSubconto: deprCostAcc === '20.01' ? [nomGroup, 'Амортизация'].filter(Boolean).join(' / ') : 'Амортизация',
         creditSubconto: assetLabel,
         amount: deprAmount,
         description: `Амортизация ОС «${assetLabel}» линейным способом (${baseCost.toFixed(2)} ₽ / ${spi} мес.${monthsDue > 1 ? ` × ${monthsDue} мес.` : ''})`,
@@ -1922,15 +2023,31 @@ export function generatePeriodClosingOperations(params: {
   const acc25 = osv.leafRows.find((r) => r.code === '25');
   const total25ToClose = round2(acc25?.endDebit ?? 0);
   if (total25ToClose > 0.01) {
-    closingEntries.push({
-      id: nextAutoFixId('close-25'),
-      debit: '20.01',
-      credit: '25',
-      debitSubconto: nomGroup,
-      creditSubconto: 'Общепроизводственные расходы',
-      amount: total25ToClose,
-      description: 'Распределение общепроизводственных расходов (счёт 25) в основное производство (20.01)',
-    });
+    const subs25 = (osv.subcontoRowsByAccount?.['25'] ?? []).filter((s) => s.endDebit >= 0.01);
+    const sumSubs25 = round2(subs25.reduce((s, r) => s + r.endDebit, 0));
+    if (subs25.length > 0 && Math.abs(sumSubs25 - total25ToClose) < 0.02) {
+      for (const s25 of subs25) {
+        closingEntries.push({
+          id: nextAutoFixId('close-25'),
+          debit: '20.01',
+          credit: '25',
+          debitSubconto: nomGroup,
+          creditSubconto: s25.subcontoLabel === 'Без аналитики (субконто)' ? '' : s25.subcontoLabel,
+          amount: s25.endDebit,
+          description: `Распределение общепроизводственных расходов (счёт 25: ${s25.subcontoLabel}) в основное производство (20.01)`,
+        });
+      }
+    } else {
+      closingEntries.push({
+        id: nextAutoFixId('close-25'),
+        debit: '20.01',
+        credit: '25',
+        debitSubconto: nomGroup,
+        creditSubconto: 'Общепроизводственные расходы',
+        amount: total25ToClose,
+        description: 'Распределение общепроизводственных расходов (счёт 25) в основное производство (20.01)',
+      });
+    }
     log.push(`Закрыт счёт 25 в Дт 20.01 на сумму ${total25ToClose.toFixed(2)} ₽`);
     structuredChanges.push({
       id: nextAutoFixId('chg-close-25'),
@@ -1942,29 +2059,60 @@ export function generatePeriodClosingOperations(params: {
   }
 
   const acc20 = osv.leafRows.find((r) => r.code === '20.01');
+  const base20EndDebit = round2(acc20?.endDebit ?? 0);
   const total20ToClose = round2(
-    (acc20?.endDebit ?? 0) +
+    base20EndDebit +
       total25ToClose +
       addedDeprTo20 +
       (!directCosting
         ? (osv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0) + addedDeprTo26
         : 0)
   );
-  const total26ToClose = round2((osv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0) + addedDeprTo26);
+  const base26EndDebit = round2(osv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0);
+  const total26ToClose = round2(base26EndDebit + addedDeprTo26);
 
   if (total26ToClose > 0.01) {
     const targetDt = directCosting ? '90.08.1' : '20.01';
-    closingEntries.push({
-      id: nextAutoFixId('close-26'),
-      debit: targetDt,
-      credit: '26',
-      debitSubconto: nomGroup,
-      creditSubconto: 'Общехозяйственные расходы',
-      amount: total26ToClose,
-      description: directCosting
-        ? 'Закрытие счёта 26 «Директ-костинг» в Дт 90.08.1'
-        : 'Закрытие счёта 26 в основное производство (20.01)',
-    });
+    const subs26 = (osv.subcontoRowsByAccount?.['26'] ?? []).filter((s) => s.endDebit >= 0.01);
+    const sumSubs26 = round2(subs26.reduce((s, r) => s + r.endDebit, 0));
+    if (subs26.length > 0 && Math.abs(sumSubs26 - base26EndDebit) < 0.02) {
+      for (const s26 of subs26) {
+        closingEntries.push({
+          id: nextAutoFixId('close-26'),
+          debit: targetDt,
+          credit: '26',
+          debitSubconto: nomGroup,
+          creditSubconto: s26.subcontoLabel === 'Без аналитики (субконто)' ? '' : s26.subcontoLabel,
+          amount: s26.endDebit,
+          description: directCosting
+            ? `Закрытие счёта 26 «Директ-костинг» (${s26.subcontoLabel}) в Дт 90.08.1`
+            : `Закрытие счёта 26 (${s26.subcontoLabel}) в основное производство (20.01)`,
+        });
+      }
+      if (addedDeprTo26 > 0.01) {
+        closingEntries.push({
+          id: nextAutoFixId('close-26-depr'),
+          debit: targetDt,
+          credit: '26',
+          debitSubconto: nomGroup,
+          creditSubconto: 'Амортизация',
+          amount: addedDeprTo26,
+          description: 'Закрытие амортизации со счёта 26',
+        });
+      }
+    } else {
+      closingEntries.push({
+        id: nextAutoFixId('close-26'),
+        debit: targetDt,
+        credit: '26',
+        debitSubconto: nomGroup,
+        creditSubconto: 'Общехозяйственные расходы',
+        amount: total26ToClose,
+        description: directCosting
+          ? 'Закрытие счёта 26 «Директ-костинг» в Дт 90.08.1'
+          : 'Закрытие счёта 26 в основное производство (20.01)',
+      });
+    }
     if (directCosting) addedTo9008 = total26ToClose;
     log.push(`Закрыт счёт 26 в Дт ${targetDt} на сумму ${total26ToClose.toFixed(2)} ₽`);
     structuredChanges.push({
@@ -1977,15 +2125,45 @@ export function generatePeriodClosingOperations(params: {
   }
 
   if (total20ToClose > 0.01) {
-    closingEntries.push({
-      id: nextAutoFixId('close-20'),
-      debit: '90.02.1',
-      credit: '20.01',
-      debitSubconto: nomGroup,
-      creditSubconto: nomGroup,
-      amount: total20ToClose,
-      description: 'Закрытие счёта 20.01 в себестоимость продаж (90.02.1)',
-    });
+    const subs20 = (osv.subcontoRowsByAccount?.['20.01'] ?? []).filter((s) => s.endDebit >= 0.01);
+    const sumSubs20 = round2(subs20.reduce((s, r) => s + r.endDebit, 0));
+    const extra20 = round2(
+      total25ToClose + addedDeprTo20 + (!directCosting ? total26ToClose : 0)
+    );
+    if (subs20.length > 0 && Math.abs(sumSubs20 - base20EndDebit) < 0.02) {
+      for (const s20 of subs20) {
+        closingEntries.push({
+          id: nextAutoFixId('close-20'),
+          debit: '90.02.1',
+          credit: '20.01',
+          debitSubconto: nomGroup,
+          creditSubconto: s20.subcontoLabel === 'Без аналитики (субконто)' ? '' : s20.subcontoLabel,
+          amount: s20.endDebit,
+          description: `Закрытие счёта 20.01 (${s20.subcontoLabel}) в себестоимость продаж (90.02.1)`,
+        });
+      }
+      if (extra20 > 0.01) {
+        closingEntries.push({
+          id: nextAutoFixId('close-20-extra'),
+          debit: '90.02.1',
+          credit: '20.01',
+          debitSubconto: nomGroup,
+          creditSubconto: nomGroup,
+          amount: extra20,
+          description: 'Закрытие регламентных расходов 20.01 в себестоимость продаж (90.02.1)',
+        });
+      }
+    } else {
+      closingEntries.push({
+        id: nextAutoFixId('close-20'),
+        debit: '90.02.1',
+        credit: '20.01',
+        debitSubconto: nomGroup,
+        creditSubconto: nomGroup,
+        amount: total20ToClose,
+        description: 'Закрытие счёта 20.01 в себестоимость продаж (90.02.1)',
+      });
+    }
     addedTo9002 = round2(addedTo9002 + total20ToClose);
     log.push(`Закрыт счёт 20.01 в Дт 90.02.1 на сумму ${total20ToClose.toFixed(2)} ₽`);
     structuredChanges.push({
@@ -2926,7 +3104,14 @@ export function autoFixAllBy1CDb(params: {
             vatAmount: 0,
           },
           db1C,
-          op.id
+          op.id,
+          {
+            priorOperations: buildChronoPriors(op),
+            reportingYear,
+            defaultBik,
+            defaultBankName: DEFAULT_SBERBANK_NAME,
+            assumeInvoiceOnVatPurchase: true,
+          }
         );
         if (rebuiltFounder.counterpartyName) {
           op = { ...rebuiltFounder, includeInProcessing: op.includeInProcessing };
@@ -3559,11 +3744,11 @@ export function autoFixAllBy1CDb(params: {
 
     // Pass Stage 5a: Reclassify red 60.01/60.02/62.01/62.02 balances and cover red 50.01 cash from 51
     let intermediateOsv = calculateCurrentOsv(chronoSyncedOps);
+    const redSubs6001 = (intermediateOsv.subcontoRowsByAccount?.['60.01'] ?? []).filter(
+      (s) => s.endCredit < -0.01 || s.endDebit > 0.01
+    );
     const row6001 = intermediateOsv.leafRows.find((r) => r.code === '60.01');
-    if (row6001 && row6001.hasRedEnd) {
-      const redSubs6001 = (intermediateOsv.subcontoRowsByAccount?.['60.01'] ?? []).filter(
-        (s) => s.endCredit < -0.01 || s.endDebit > 0.01
-      );
+    if ((row6001 && row6001.hasRedEnd) || redSubs6001.length > 0) {
       for (const op of chronoSyncedOps) {
         if (op.category === 'bank_out' || op.category === 'cash_out') {
           for (const e of op.entries) {
@@ -3597,40 +3782,30 @@ export function autoFixAllBy1CDb(params: {
       intermediateOsv = calculateCurrentOsv(chronoSyncedOps);
     }
 
+    const redSubs6002 = (intermediateOsv.subcontoRowsByAccount?.['60.02'] ?? []).filter(
+      (s) => s.endDebit < -0.01 || s.endCredit > 0.01
+    );
     const row6002 = intermediateOsv.leafRows.find((r) => r.code === '60.02');
-    if (row6002 && row6002.hasRedEnd) {
+    if ((row6002 && row6002.hasRedEnd) || redSubs6002.length > 0) {
       for (const op of chronoSyncedOps) {
         for (const e of op.entries) {
           if (e.credit === '60.02' && e.debit !== '60.01') {
-            e.credit = '60.01';
-            fixedCount++;
-            recordChange(
-              `Проводка Кт 60.02`,
-              `Кт 60.01 (расчёты с поставщиками)`,
-              'Устранение отрицательного сальдо по активному счёту авансов 60.02',
-              'advance_offset',
-              'flip_red_settlement_subaccount',
-              op.id
-            );
-          }
-        }
-      }
-      intermediateOsv = calculateCurrentOsv(chronoSyncedOps);
-    }
-
-    const row6201 = intermediateOsv.leafRows.find((r) => r.code === '62.01');
-    if (row6201 && row6201.hasRedEnd) {
-      for (const op of chronoSyncedOps) {
-        if (op.category === 'bank_in' || op.category === 'cash_in') {
-          for (const e of op.entries) {
-            if ((e.debit === '51' || e.debit === '50.01') && e.credit === '62.01') {
-              e.credit = '62.02';
-              e.description = 'Получен аванс от покупателя (переклассифицировано с 62.01)';
+            const subMatchesRed =
+              redSubs6002.length === 0 ||
+              redSubs6002.some((rs) => {
+                const rsKey = normalizeEntityKey(rs.subcontoLabel.split('/')[0] ?? '');
+                const eKey = normalizeEntityKey(
+                  (e.creditSubconto || op.counterpartyName || '').split('/')[0] ?? ''
+                );
+                return !rsKey || !eKey || rsKey === eKey;
+              });
+            if (subMatchesRed) {
+              e.credit = '60.01';
               fixedCount++;
               recordChange(
-                `Проводка поступления от «${op.counterpartyName}»: Дт ${e.debit} Кт 62.01`,
-                `Дт ${e.debit} Кт 62.02 (полученный аванс от покупателя)`,
-                'Устранение отрицательного сальдо по активному субсчёту 62.01',
+                `Проводка Кт 60.02`,
+                `Кт 60.01 (расчёты с поставщиками)`,
+                'Устранение отрицательного сальдо по активному счёту авансов 60.02',
                 'advance_offset',
                 'flip_red_settlement_subaccount',
                 op.id
@@ -3642,21 +3817,73 @@ export function autoFixAllBy1CDb(params: {
       intermediateOsv = calculateCurrentOsv(chronoSyncedOps);
     }
 
+    const redSubs6201 = (intermediateOsv.subcontoRowsByAccount?.['62.01'] ?? []).filter(
+      (s) => s.endDebit < -0.01 || s.endCredit > 0.01
+    );
+    const row6201 = intermediateOsv.leafRows.find((r) => r.code === '62.01');
+    if ((row6201 && row6201.hasRedEnd) || redSubs6201.length > 0) {
+      for (const op of chronoSyncedOps) {
+        if (op.category === 'bank_in' || op.category === 'cash_in') {
+          for (const e of op.entries) {
+            if ((e.debit === '51' || e.debit === '50.01') && e.credit === '62.01') {
+              const subMatchesRed =
+                redSubs6201.length === 0 ||
+                redSubs6201.some((rs) => {
+                  const rsKey = normalizeEntityKey(rs.subcontoLabel.split('/')[0] ?? '');
+                  const eKey = normalizeEntityKey(
+                    (e.creditSubconto || op.counterpartyName || '').split('/')[0] ?? ''
+                  );
+                  return !rsKey || !eKey || rsKey === eKey;
+                });
+              if (subMatchesRed) {
+                e.credit = '62.02';
+                e.description = 'Получен аванс от покупателя (переклассифицировано с 62.01)';
+                fixedCount++;
+                recordChange(
+                  `Проводка поступления от «${op.counterpartyName}»: Дт ${e.debit} Кт 62.01`,
+                  `Дт ${e.debit} Кт 62.02 (полученный аванс от покупателя)`,
+                  'Устранение отрицательного сальдо по активному субсчёту 62.01',
+                  'advance_offset',
+                  'flip_red_settlement_subaccount',
+                  op.id
+                );
+              }
+            }
+          }
+        }
+      }
+      intermediateOsv = calculateCurrentOsv(chronoSyncedOps);
+    }
+
+    const redSubs6202 = (intermediateOsv.subcontoRowsByAccount?.['62.02'] ?? []).filter(
+      (s) => s.endCredit < -0.01 || s.endDebit > 0.01
+    );
     const row6202 = intermediateOsv.leafRows.find((r) => r.code === '62.02');
-    if (row6202 && row6202.hasRedEnd) {
+    if ((row6202 && row6202.hasRedEnd) || redSubs6202.length > 0) {
       for (const op of chronoSyncedOps) {
         for (const e of op.entries) {
           if (e.debit === '62.02' && e.credit !== '62.01') {
-            e.debit = '62.01';
-            fixedCount++;
-            recordChange(
-              `Проводка Дт 62.02`,
-              `Дт 62.01 (расчёты с покупателями)`,
-              'Устранение отрицательного сальдо по пассивному счёту авансов 62.02',
-              'advance_offset',
-              'flip_red_settlement_subaccount',
-              op.id
-            );
+            const subMatchesRed =
+              redSubs6202.length === 0 ||
+              redSubs6202.some((rs) => {
+                const rsKey = normalizeEntityKey(rs.subcontoLabel.split('/')[0] ?? '');
+                const eKey = normalizeEntityKey(
+                  (e.debitSubconto || op.counterpartyName || '').split('/')[0] ?? ''
+                );
+                return !rsKey || !eKey || rsKey === eKey;
+              });
+            if (subMatchesRed) {
+              e.debit = '62.01';
+              fixedCount++;
+              recordChange(
+                `Проводка Дт 62.02`,
+                `Дт 62.01 (расчёты с покупателями)`,
+                'Устранение отрицательного сальдо по пассивному счёту авансов 62.02',
+                'advance_offset',
+                'flip_red_settlement_subaccount',
+                op.id
+              );
+            }
           }
         }
       }
@@ -3789,6 +4016,7 @@ export function autoFixSingleOperation(params: {
   calculateCurrentOsv: (ops: QueuedOperation[]) => OsvReport;
   periodEndDate: string;
   reportingYear?: number;
+  defaultBik?: string;
 }): {
   operations: QueuedOperation[];
   fixedCount: number;
@@ -3801,6 +4029,7 @@ export function autoFixSingleOperation(params: {
     calculateCurrentOsv: params.calculateCurrentOsv,
     periodEndDate: params.periodEndDate,
     reportingYear: params.reportingYear,
+    defaultBik: params.defaultBik,
   });
 
   const fixedTarget = full.operations.find((o) => o.id === params.operationId);
@@ -3822,6 +4051,7 @@ export function autoFixSingleOperation(params: {
   ];
   const recalcOps = recalculateOperationsChronologically(replacedList, params.db1C, {
     reportingYear: params.reportingYear,
+    defaultBik: params.defaultBik,
   });
   const opChanges = full.structuredChanges.filter((c) => c.operationId === params.operationId);
   const effectiveChanges =
