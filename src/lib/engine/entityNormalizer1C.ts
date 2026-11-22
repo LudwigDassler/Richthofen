@@ -461,6 +461,35 @@ export function extractCounterpartyFromText1C(text: string): string {
 }
 
 /**
+ * Normalizes employee / founder / accountable person display name to canonical nominative 1C form.
+ * Handles role-based placeholders like "Главный бухгалтер (ФИО студента)", "Главному бухгалтеру",
+ * "Гланому бухгалтеру" -> "Главный бухгалтер", as well as oblique Russian FIOs ("Сидорова С.С." -> "Сидоров С.С.").
+ */
+export function normalizeEmployeeOrFounderName1C(
+  raw: string,
+  options?: { obliqueContext?: boolean; genderHint?: 'M' | 'F' }
+): string {
+  const cleaned = (raw ?? '')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\(\s*фио\s+студента\s*\)/giu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+
+  if (/(?:^|\s)(?:главн\p{L}*|глан\p{L}*)\s+бухгалтер\p{L}*$/iu.test(cleaned)) {
+    return 'Главный бухгалтер';
+  }
+
+  // Strip leading job title or preposition if accidentally included ("ген.директор Федоров Ф.Ф.", "через Федорова Ф.Ф.", "каменщику Фадееву Ф.Ф.")
+  const strippedRole = cleaned.replace(
+    /^(?:через|от|у|для|сотрудник\p{L}*|работник\p{L}*|ген\.?\s*директор\p{L}*|генеральн\p{L}*\s+директор\p{L}*|главн\p{L}*\s+бухгалтер\p{L}*|директор\p{L}*|бухгалтер\p{L}*|каменщик\p{L}*|менеджер\p{L}*|инженер\p{L}*|кладовщик\p{L}*|кассир\p{L}*|водител\p{L}*|учредител\p{L}*|участник\p{L}*)\s+/iu,
+    ''
+  );
+
+  return normalizeRussianFioToNominative1C(strippedRole, options);
+}
+
+/**
  * Extracts person FIO in any Russian grammatical case when anchored by accounting context
  * (accountable person, employee, founder, shareholder, writ debtor, material custodian, etc.).
  */
@@ -468,27 +497,48 @@ export function extractPersonFioFromText1C(text: string): string {
   const clean = (text ?? '').replace(/\u00A0/g, ' ').trim();
   if (!clean) return '';
 
-  // 1. Instrumental / Genitive / Dative with initials: "Сидоровым П.П.", "Федорову Ф.Ф.", "Ивановой Е.А."
-  const anchoredInit = clean.match(
-    /(?:сотрудник\p{L}*|работник\p{L}*|подотч[её]тн\p{L}*\s+лиц\p{L}*|учредител\p{L}*|участник\p{L}*|акционер\p{L}*|директор\p{L}*|бухгалтер\p{L}*|кладовщик\p{L}*|кассир\p{L}*|выда(?:но|н[аы]?|ли)|перечислен\p{L}*|возвращ[её]н\p{L}*|внес[её]н\p{L}*|авансов\p{L}*\s+отч[её]т(?:\s*№\s*\S+)?|принят\p{L}*\s+на\s+работу|доля|вклад)\s+(?:в\s+кассу\s+|на\s+р\/с\s+)?([А-ЯЁ][а-яё-]{2,30}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)/u
-  );
-  if (anchoredInit) {
-    return normalizeRussianFioToNominative1C(anchoredInit[1], { obliqueContext: true });
+  const isCharterDeclaration =
+    /(?:сформирован|образован|зарегистрирован)\p{L}*\s+уставн\p{L}*\s+капитал/iu.test(clean);
+  if (isCharterDeclaration) {
+    // Multi-founder charter capital declaration should not Collapse to a single employeeName
+    return '';
   }
 
-  // 2. Any standalone Surname + I.O. in sentence (excluding ИП which is a counterparty)
+  // 1. Explicit "через <FIO>" (e.g. "через Федорова Ф.Ф." in accountable material purchase)
+  const throughMatch = clean.match(
+    /(?:^|[^\p{L}])через\s+(?:подотч[её]тн\p{L}*\s+лиц\p{L}*\s+|сотрудник\p{L}*\s+)?([А-ЯЁ][а-яё-]{2,30}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)/iu
+  );
+  if (throughMatch) {
+    return normalizeRussianFioToNominative1C(throughMatch[1], { obliqueContext: true });
+  }
+
+  // 2. Instrumental / Genitive / Dative with initials: "ген.директор Федоров Ф.Ф.", "каменщику Фадееву Ф.Ф.", "от Сидорова С.С."
+  const anchoredInit = clean.match(
+    /(?:сотрудник\p{L}*|работник\p{L}*|подотч[её]тн\p{L}*\s+лиц\p{L}*|учредител\p{L}*|участник\p{L}*|акционер\p{L}*|(?:ген\.?\s*|генеральн\p{L}*\s+)?директор\p{L}*|(?:главн\p{L}*\s+)?бухгалтер\p{L}*|каменщик\p{L}*|менеджер\p{L}*|инженер\p{L}*|мастер\p{L}*|слесар\p{L}*|сварщик\p{L}*|водител\p{L}*|кладовщик\p{L}*|кассир\p{L}*|выда(?:но|н[аы]?|ли)|перечислен\p{L}*|возвращ[её]н\p{L}*|внес[её]н\p{L}*|поступил\p{L}*|авансов\p{L}*\s+отч[её]т(?:\s*№\s*\S+)?|принят\p{L}*\s+на\s+работу|переведен\p{L}*|доля|вклад(?:\s+в\s+УК)?(?:\s+от)?|от)\s+(?:в\s+кассу\s+|на\s+р\/с\s+|третьего\s+лица\s*[-—–]?\s*(?:генерального\s+директора\s+|ген\.?\s*директора\s+)?)?([А-ЯЁ][а-яё-]{2,30}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)/iu
+  );
+  if (anchoredInit) {
+    const isHireNominative =
+      /принят\p{L}*\s+на\s+работу/iu.test(anchoredInit[0]) &&
+      !/(?:от|выда|перечисл|через|доля|вклад\s+от|лица)/iu.test(anchoredInit[0]);
+    return normalizeRussianFioToNominative1C(anchoredInit[1], {
+      obliqueContext: !isHireNominative,
+    });
+  }
+
+  // 3. Any standalone Surname + I.O. in sentence (excluding ИП which is a counterparty)
   const allInitials = Array.from(
     clean.matchAll(/(?:^|[^\p{L}])(?<!ИП\s)([А-ЯЁ][а-яё-]{2,30}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)/gu)
   );
   if (allInitials.length > 0) {
     const cand = allInitials[0][1].trim();
-    const isOblique = /(?:выда|перечисл|авансов|подотчет|под\s+отчет|возврат|возвращ|удерж|взыск|доля|вклад|дивиденд|учредител)/iu.test(
-      clean
-    );
+    const isOblique =
+      /(?:выда|перечисл|авансов|подотчет|под\s+отчет|возврат|возвращ|удерж|взыск|доля|вклад|дивиденд|учредител|через\s+|от\s+|пользу)/iu.test(
+        clean
+      ) && !/^([А-ЯЁ][а-яё-]{2,30}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)\s+(?:переведен|принят|свою\s+долю|принес|уволен)/u.test(clean);
     return normalizeRussianFioToNominative1C(cand, { obliqueContext: isOblique });
   }
 
-  // 3. Full 3-word Russian FIO with patronymic (-ович/-евич/-овна/-евна in any case)
+  // 4. Full 3-word Russian FIO with patronymic (-ович/-евич/-овна/-евна in any case)
   const full3Match = clean.match(
     /(?:^|[^\p{L}])(?<!ИП\s)([А-ЯЁ][а-яё-]{2,30}\s+[А-ЯЁ][а-яё]{2,25}\s+[А-ЯЁ][а-яё]{3,30}(?:ович[ауем]?|овичем|евич[ауем]?|евичем|ич[ауом]?|ичом|ичем|овн[аыеу]|овной|евн[аыеу]|евной|ичн[аыеу]|ичной))(?=$|[^\p{L}])/u
   );
@@ -496,8 +546,293 @@ export function extractPersonFioFromText1C(text: string): string {
     return normalizeRussianFioToNominative1C(full3Match[1], { obliqueContext: true });
   }
 
+  // 5. Role-based Chief Accountant employee ("Принят на работу Главный бухгалтер (ФИО студента)",
+  // "Главный бухгалтер принес уведомление...", "в подотчет Главному бухгалтеру" / "Гланому бухгалтеру")
+  if (/(?:^|[^\p{L}])(?:главн\p{L}*|глан\p{L}*)\s+бухгалтер\p{L}*(?=$|[^\p{L}])/iu.test(clean)) {
+    return 'Главный бухгалтер';
+  }
+
   return '';
 }
+
+/**
+ * Extracts Fixed Asset / Intangible Useful Life (СПИ) in months:
+ * - "СПИ 6 лет 11 мес." -> 83
+ * - "(СПИ 72 мес = 6 лет = 4 амортиз.группа)" -> 72
+ * - "(СПИ 6 лет)" -> 72
+ */
+export function extractUsefulLifeMonths1C(text: string): number | undefined {
+  const clean = (text ?? '').replace(/\u00A0/g, ' ').trim();
+  if (!clean) return undefined;
+
+  // 1. Combined "X лет Y мес" (without '=' between them)
+  const yearsAndMonths = clean.match(
+    /(?:спи|срок\p{L}*\s+полезн\p{L}*\s+использован\p{L}*)?[^.;=\n]{0,20}?(\d{1,2})\s*(?:лет|год[ао]?)\s*(?:и\s*)?(\d{1,2})\s*мес/iu
+  );
+  if (yearsAndMonths) {
+    const yrs = Number(yearsAndMonths[1]);
+    const mos = Number(yearsAndMonths[2]);
+    if (yrs > 0 && yrs <= 50 && mos >= 0 && mos < 12) {
+      return yrs * 12 + mos;
+    }
+  }
+
+  // 2. Explicit months right after СПИ / срок полезного использования: "СПИ 72 мес = 6 лет"
+  const monthsFirst = clean.match(
+    /(?:спи|срок\p{L}*\s+полезн\p{L}*\s+использован\p{L}*)\s*[:=-]?\s*(\d{1,3})\s*мес/iu
+  );
+  if (monthsFirst) {
+    const mos = Number(monthsFirst[1]);
+    if (mos > 0 && mos <= 600) return mos;
+  }
+
+  // 3. Explicit years after СПИ / срок полезного использования: "СПИ 6 лет"
+  const yearsOnly = clean.match(
+    /(?:спи|срок\p{L}*\s+полезн\p{L}*\s+использован\p{L}*)\s*[:=-]?\s*(\d{1,2})\s*(?:лет|год[ао]?)(?=$|[^\p{L}])/iu
+  );
+  if (yearsOnly) {
+    const yrs = Number(yearsOnly[1]);
+    if (yrs > 0 && yrs <= 50) return yrs * 12;
+  }
+
+  // 4. Fallback standalone "X мес" inside СПИ parentheses
+  const fallbackMos = clean.match(/\(\s*[^)]*?(\d{2,3})\s*мес[^)]*\)/iu);
+  if (fallbackMos && /спи|амортиз/iu.test(fallbackMos[0])) {
+    const mos = Number(fallbackMos[1]);
+    if (mos >= 12 && mos <= 600) return mos;
+  }
+
+  return undefined;
+}
+
+export interface ExtractedCharterCapitalInfo1C {
+  ownOrganization?: {
+    name: string;
+    inn: string;
+    kpp?: string;
+  };
+  founders: Array<{
+    founderName: string;
+    sharePercent?: number;
+    amount?: number;
+  }>;
+}
+
+/**
+ * Parses Charter Capital formation / increase descriptions:
+ * - "#1 Сформирован Уставный капитал ООО "Завод" (ИНН 7810119529, КПП 781001001) - Иванов И.И. 30%, Сидоров С.С. 70%"
+ * - "Q3 #60 Увеличен уставный капитал за счет вклада третьего лица - генерального директора Федорова Ф.Ф."
+ */
+export function extractCharterCapitalInfo1C(
+  text: string,
+  totalAmount?: number
+): ExtractedCharterCapitalInfo1C {
+  const clean = (text ?? '').replace(/\u00A0/g, ' ').trim();
+  const result: ExtractedCharterCapitalInfo1C = { founders: [] };
+  if (!clean) return result;
+
+  // Own organization in charter capital declaration
+  if (/(?:сформирован|образован|зарегистрирован|увеличен)\p{L}*\s+уставн\p{L}*\s+капитал/iu.test(clean)) {
+    const orgMatch = clean.match(
+      /уставн\p{L}*\s+капитал\s+((?:ООО|АО|ПАО|ЗАО|ОАО)\s*[«"'„“][^»"'”]{2,80}[»"'”])/iu
+    );
+    if (orgMatch) {
+      const orgName = normalizeLegalEntityName1C(orgMatch[1]);
+      const innMatch = clean.match(/ИНН\s*(\d{10}|\d{12})/iu);
+      const kppMatch = clean.match(/КПП\s*(\d{9})/iu);
+      result.ownOrganization = {
+        name: orgName,
+        inn: innMatch ? innMatch[1] : '',
+        kpp: kppMatch ? kppMatch[1] : undefined,
+      };
+    }
+  }
+
+  // Founder percentage shares: "Иванов И.И. 30%, Сидоров С.С. 70%" or "Иванов И.И. - 30%"
+  const pctRegex =
+    /([А-ЯЁ][а-яё-]{2,30}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)\s*[-—–:]?\s*(\d{1,3}(?:[.,]\d{1,4})?)\s*%/gu;
+  let m: RegExpExecArray | null;
+  while ((m = pctRegex.exec(clean)) !== null) {
+    const founderName = normalizeRussianFioToNominative1C(m[1], { obliqueContext: false });
+    const pct = Number(m[2].replace(',', '.'));
+    if (founderName && Number.isFinite(pct) && pct > 0) {
+      const amt =
+        totalAmount && totalAmount > 0
+          ? Math.round((totalAmount * (pct / 100) + Number.EPSILON) * 100) / 100
+          : undefined;
+      result.founders.push({
+        founderName,
+        sharePercent: pct,
+        amount: amt,
+      });
+    }
+  }
+
+  if (result.founders.length > 0) {
+    // Reconcile rounding penny on last founder if percentages sum to 100%
+    const pctSum = result.founders.reduce((s, f) => s + (f.sharePercent ?? 0), 0);
+    if (totalAmount && totalAmount > 0 && Math.abs(pctSum - 100) < 0.01 && result.founders.length >= 2) {
+      const allocatedExceptLast = result.founders
+        .slice(0, -1)
+        .reduce((s, f) => s + (f.amount ?? 0), 0);
+      result.founders[result.founders.length - 1].amount =
+        Math.round((totalAmount - allocatedExceptLast + Number.EPSILON) * 100) / 100;
+    }
+    return result;
+  }
+
+  // Single founder charter capital increase ("за счет вклада третьего лица - генерального директора Федорова Ф.Ф.")
+  if (/уставн\p{L}*\s+капитал/iu.test(clean)) {
+    const singleMatch = clean.match(
+      /(?:вклад\p{L}*|доли|участник\p{L}*|учредител\p{L}*|директор\p{L}*|лиц\p{L}*)[^.;\n]{0,45}?([А-ЯЁ][а-яё-]{2,30}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)/iu
+    );
+    if (singleMatch) {
+      const founderName = normalizeRussianFioToNominative1C(singleMatch[1], {
+        obliqueContext: true,
+      });
+      result.founders.push({
+        founderName,
+        sharePercent: 100,
+        amount: totalAmount && totalAmount > 0 ? totalAmount : undefined,
+      });
+    }
+  }
+
+  return result;
+}
+
+export interface ExtractedEmployeeTaxInfo1C {
+  childCount?: number;
+  isSingleParent?: boolean;
+  propertyTaxDeduction?: number;
+}
+
+/**
+ * Extracts standard child tax deductions (ст. 218 НК РФ) and property tax deduction notice (ст. 220 НК РФ):
+ * - "(3 детей до 18 лет)", "(трое детей до 18 лет)" -> childCount: 3
+ * - "(одинокий родитель с двумя детьми до 18 лет)" -> childCount: 2, isSingleParent: true
+ * - "уведомление ... на имущественный налоговый вычет в размере 2 000 000 руб." -> propertyTaxDeduction: 2_000_000
+ */
+export function extractEmployeeTaxDeductions1C(text: string): ExtractedEmployeeTaxInfo1C {
+  const clean = (text ?? '').replace(/\u00A0/g, ' ').trim();
+  const res: ExtractedEmployeeTaxInfo1C = {};
+  if (!clean) return res;
+
+  if (/одинок\p{L}*\s+родител|единственн\p{L}*\s+родител/iu.test(clean)) {
+    res.isSingleParent = true;
+  }
+
+  const digitChild = clean.match(/(\d)\s*(?:дет\p{L}*|реб[её]нк\p{L}*)/iu);
+  if (digitChild) {
+    res.childCount = Number(digitChild[1]);
+  } else if (/(?:трое|троих|трех|трёх)\s+дет/iu.test(clean)) {
+    res.childCount = 3;
+  } else if (/(?:двое|двоих|двух|двумя)\s+дет/iu.test(clean)) {
+    res.childCount = 2;
+  } else if (/(?:один|одного|одним)\s+реб[её]н/iu.test(clean)) {
+    res.childCount = 1;
+  } else if (/(?:четверо|четверых|четырех|четырёх)\s+дет/iu.test(clean)) {
+    res.childCount = 4;
+  }
+
+  if (/имущественн\p{L}*\s+(?:налогов\p{L}*\s+)?вычет/iu.test(clean)) {
+    const dedMatch = clean.match(
+      /вычет\p{L}*[^.;\n]{0,40}?(\d{1,3}(?:[\s]\d{3})+(?:[.,]\d{1,2})?|\d{5,9})/iu
+    );
+    if (dedMatch) {
+      const val = Number(dedMatch[1].replace(/\s+/g, '').replace(',', '.'));
+      if (Number.isFinite(val) && val > 0) {
+        res.propertyTaxDeduction = val;
+      }
+    }
+  }
+
+  return res;
+}
+
+/**
+ * Cleans nomenclature names extracted from operation descriptions so person names,
+ * quantities, prices, and prepositional tails never leak into `Справочник.Номенклатура`.
+ */
+export function cleanNomenclatureName1C(rawName: string, descriptionContext?: string): string {
+  let s = (rawName ?? '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+
+  // Reject pure person phrases ("Через Федорова Ф.Ф.", "Федоров Ф.Ф.") or clipped fragments ("...я третьих лиц")
+  if (/^через\s+/iu.test(s) || /^\.{2,}|третьих\s+лиц/iu.test(s)) {
+    s = '';
+  }
+
+  // Strip leading passive verbs ("и оплачен экскаватор-погрузчик", "приобретен принтер", "получили кирпич")
+  s = s
+    .replace(
+      /^(?:и\s+)?(?:оплачен|оплатил|приобретен|приобрел|получен|получил|поступил|введен|передан|купил|закуплен)\p{L}*\s+/iu,
+      ''
+    )
+    .trim();
+
+  // If rawName is empty or generic placeholder ("Материалы", "Основное средство"), try extracting specific item from descriptionContext
+  if (
+    descriptionContext &&
+    (!s || /^(?:материалы|товары|основн(?:ое|ые)\s+средств[оа]|оборудование|объект\s+ос|инвентарь)$/iu.test(s))
+  ) {
+    const ctx = descriptionContext.replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+    if (/плит[аыу]\s+пвх/iu.test(ctx) && !/панел/iu.test(ctx)) s = 'Плита ПВХ';
+    else if (/заготовк[ауи]\s+мдф/iu.test(ctx) && !/панел/iu.test(ctx)) s = 'Заготовка МДФ';
+    else if (/оконн(?:ый|ые|ого|ых)\s+блок/iu.test(ctx)) s = 'Оконный блок';
+    else if (/экскаватор[ау]?-погрузчик/iu.test(ctx)) s = 'Экскаватор-погрузчик';
+    else if (/вагон-бытовк|вагон\s+бытовк/iu.test(ctx)) s = 'Вагон-бытовка';
+    else if (/спецодежд/iu.test(ctx)) s = 'Спецодежда';
+    else if (/(?:^|[^\p{L}])кирпич[ау]?(?=$|[^\p{L}])/iu.test(ctx) && !/строительн\p{L}*\s+раствор/iu.test(ctx)) s = 'Кирпич';
+    else if (/(?:^|[^\p{L}])цемент[ау]?(?=$|[^\p{L}])/iu.test(ctx)) s = 'Цемент';
+    else if (/(?:^|[^\p{L}])принтер[ау]?(?=$|[^\p{L}])/iu.test(ctx)) s = 'Принтер';
+    else if (/(?:^|[^\p{L}])плоттер[ау]?(?=$|[^\p{L}])/iu.test(ctx)) s = 'Плоттер';
+    else if (/(?:^|[^\p{L}])минитрактор[ау]?(?=$|[^\p{L}])/iu.test(ctx)) s = 'Минитрактор';
+  }
+
+  if (!s) return '';
+
+  // Strip trailing prepositional/person/quantity/price/document clauses
+  s = s
+    .replace(/\s+через\s+[А-ЯЁа-яё.\s-]+$/iu, '')
+    .replace(/\s+(?:каменщик\p{L}*|сотрудник\p{L}*|работник\p{L}*)\s+[А-ЯЁ][а-яё-]+\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?.*$/iu, '')
+    .replace(/\s*\(\s*(?:материал\p{L}*|товар\p{L}*|ос|основн\p{L}*\s+средств\p{L}*|спи\s+[^)]+|\d+\s*(?:шт|ед|кг|т|м2|м3|п\.м|компл)[^)]*)\s*\)/giu, '')
+    .replace(/\s+на\s+основани\p{L}*\s+(?:счет|накладн|акт|упд|договор).*$/iu, '')
+    .replace(/\s+в\s+(?:количеств[еа]|кол-ве)\s+\d+.*$/iu, '')
+    .replace(/\s+\d+(?:[.,]\d+)?\s*(?:шт|штук|ед|кг|т|тонн|м2|м3|п\.?\s*м|компл)\b.*$/iu, '')
+    .replace(/\s+по\s+(?:цене\s+)?\d+.*$/iu, '')
+    .replace(/\s+(?:в|у|от|для)\s+(?:ООО|АО|ПАО|ЗАО|ОАО|ИП)(?=$|[^\p{L}]).*$/iu, '')
+    .replace(/\s+для\s+(?:производств|бухгалтери|офис|каменщик|сотрудник|работник|сдач)\p{L}*.*$/iu, '')
+    .replace(/\s+(?:с\s+ндс|в\s+т\.?\s*ч\.?\s*ндс|вкл\.?\s*ндс|без\s+ндс).*$/iu, '')
+    .replace(/^[«"'„“(]+|[»"'”.,;)]+$/g, '')
+    .trim();
+
+  if (!s) return '';
+
+  // Canonical singular/nominative forms for common inflected Russian nouns in coursework descriptions
+  const lower = s.toLowerCase();
+  if (/^заготовк[ауи]\s+мдф$/iu.test(s)) return 'Заготовка МДФ';
+  if (/^плит[аыу]\s+пвх$/iu.test(s)) return 'Плита ПВХ';
+  if (/^панел[ьи]\s+из\s+пвх\s+и\s+мдф$/iu.test(s)) return 'Панель из ПВХ и МДФ';
+  if (/^оконн(?:ый|ые|ого|ых)\s+блок[аи]?$/iu.test(s)) return 'Оконный блок';
+  if (/^(?:\d+\s+)?вагон-бытовк[аиу]|вагон-бытовок$/iu.test(s)) return 'Вагон-бытовка';
+  if (/^экскаватор[ау]?-погрузчик[ау]?$/iu.test(s)) return 'Экскаватор-погрузчик';
+  if (/^спецодежд[аыу]$/iu.test(s)) return 'Спецодежда';
+  if (/^кирпич[ау]?$/iu.test(s)) return 'Кирпич';
+  if (/^цемент[ау]?$/iu.test(s)) return 'Цемент';
+  if (/^принтер[ау]?$/iu.test(s)) return 'Принтер';
+  if (/^плоттер[ау]?$/iu.test(s)) return 'Плоттер';
+  if (/^минитрактор[ау]?$/iu.test(s)) return 'Минитрактор';
+  if (/^бумаг[аиу]$/iu.test(s)) return 'Бумага';
+  if (/^лес[ао]\s+строительн\p{L}*$/iu.test(s)) return 'Леса строительные';
+  if (/^доск[аиу]$/iu.test(s)) return 'Доски';
+  if (/^керамогранитн(?:ые|ая)\s+плит[аыу]$/iu.test(s)) return 'Керамогранитные плиты';
+  if (lower === 'материалы' || lower === 'товары' || lower === 'продукция') {
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 
 function parseOptionalCorrespondenceAmount(fragment: string): number | undefined {
   const m = fragment.match(

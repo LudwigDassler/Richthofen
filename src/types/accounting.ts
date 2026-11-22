@@ -554,6 +554,12 @@ export interface ParsedFinancialNoteItem1C {
   ratePercent: number;
 }
 
+export interface FounderShareItem1C {
+  founderName: string;
+  sharePercent?: number;
+  amount: number;
+}
+
 export interface QueuedOperation {
   id: string;
   rowKey?: string;
@@ -568,6 +574,8 @@ export interface QueuedOperation {
   docType1C: DocType1CBP30;
   documentSubKind1C?: string;
   amount: number;
+  rawExcelAmount?: number;
+  orderTotalAmount?: number;
   amountMode?: OperationAmountMode;
   readinessStatus?: OperationReadinessStatus;
   readinessNote?: string;
@@ -577,6 +585,15 @@ export interface QueuedOperation {
   stockSourceNote?: string;
   monthlySalary?: number;
   employeePosition?: string;
+  employeeChildCount?: number;
+  employeeIsSingleParent?: boolean;
+  employeePropertyDeduction?: number;
+  founderShares?: FounderShareItem1C[];
+  ownOrganization?: {
+    name: string;
+    inn: string;
+    kpp?: string;
+  };
   injuryInsuranceRate?: number;
   payrollStaffSummary?: Array<{
     name: string;
@@ -732,6 +749,11 @@ export interface VirtualEmployee1C {
   monthlySalary: number;
   subdivision: string;
   hireDate: string;
+  terminationDate?: string;
+  childCount?: number;
+  isSingleParent?: boolean;
+  propertyTaxDeduction?: number;
+  propertyTaxDeductionStartDate?: string;
   inn?: string;
   isStaffEmployee: boolean;
   source: VirtualEntityOriginSource1C;
@@ -828,10 +850,13 @@ export interface VirtualOpenOrder1C {
   docType1C: 'СчетПокупателю' | 'СчетОтПоставщика' | 'ОперацияБух';
   counterpartyName: string;
   counterpartyInn: string;
+  counterpartyKpp?: string;
   contractName: string;
   contractNumber?: string;
   totalAmount: number;
   remainingAmount: number;
+  quantity?: number;
+  unitPrice?: number;
   periodicAmount?: number;
   durationMonths?: number;
   vatRate: number;
@@ -844,7 +869,14 @@ export interface VirtualOpenOrder1C {
   originDate: string;
 }
 
+export interface VirtualOwnOrganization1C {
+  name: string;
+  inn: string;
+  kpp?: string;
+}
+
 export interface Virtual1CStateSnapshot {
+  ownOrganization?: VirtualOwnOrganization1C;
   counterparties: VirtualCounterparty1C[];
   contracts: VirtualContract1C[];
   nomenclature: VirtualNomenclature1C[];

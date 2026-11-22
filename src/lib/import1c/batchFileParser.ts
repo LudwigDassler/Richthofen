@@ -20,10 +20,15 @@ import {
   extractRecurringContractTerms1C,
 } from '@/lib/engine/virtual1CState';
 import {
+  cleanNomenclatureName1C,
   ExplicitCorrespondenceHint1C,
+  extractCharterCapitalInfo1C,
   extractCounterpartyFromText1C,
+  extractEmployeeTaxDeductions1C,
   extractExplicitCorrespondencesFromText1C,
   extractPersonFioFromText1C,
+  extractUsefulLifeMonths1C,
+  normalizeEmployeeOrFounderName1C,
 } from '@/lib/engine/entityNormalizer1C';
 import { resolveBankInfoByBik } from '@/lib/egrul/egrulLookup';
 import {
@@ -253,6 +258,15 @@ export interface ExtractedFreeTextRequisites {
   employeeHint?: string;
   employeePositionHint?: string;
   monthlySalaryHint?: number;
+  employeeChildCountHint?: number;
+  employeeIsSingleParentHint?: boolean;
+  employeePropertyDeductionHint?: number;
+  founderSharesHint?: Array<{
+    founderName: string;
+    sharePercent?: number;
+    amount: number;
+  }>;
+  orderTotalAmountHint?: number;
   usefulLifeMonthsHint?: number;
   productionObjectHint?: string;
   alimonyRecipientHint?: string;
@@ -337,7 +351,12 @@ export function extractSafeInlineMonetaryAmount(text: string): number {
 
 export function isPureHrOrPolicyOrWritNoAmountText(text: string): boolean {
   const clean = (text ?? '').toLowerCase().replace(/ё/g, 'е');
+  const isCommercialPenaltyOrClaim =
+    /неуй?стойк|штраф|пен[ия]|по\s+дог|в\s+адрес\s+(?:ооо|ао|пао|зао|ип)|по\s+иску\s+(?:ооо|ао|пао|зао|ип)/iu.test(
+      clean
+    );
   if (
+    !isCommercialPenaltyOrClaim &&
     /принят\p{L}*\s+на\s+работу|прием\s+на\s+работу|оформлен\p{L}*\s+в\s+штат|переведен\p{L}*\s+на\s+должност|кадров\p{L}*\s+перевод|уведомлени\p{L}*.*(?:имущественн\p{L}*|налогов\p{L}*)\s+вычет|поступил\p{L}*\s+исполнительн\p{L}*\s+лист|исполнительн\p{L}*\s+лист.*(?:в\s+пользу|удержан|алимент)/iu.test(
       clean
     ) &&
@@ -698,9 +717,12 @@ export function extractRequisitesFromFreeText(
   );
   const bikMatch = text.match(/БИК[\s.:№-]*(\d{9})\b/i);
 
-  let counterparty = extractCounterpartyFromText1C(text);
+  const charterInfo = extractCharterCapitalInfo1C(text, explicitColumnAmount);
+  const isCharterFormationWithOwnOrg = Boolean(charterInfo.ownOrganization);
+
+  let counterparty = isCharterFormationWithOwnOrg ? '' : extractCounterpartyFromText1C(text);
   // 1. Quoted legal entity with Russian or straight/curly quotes (fallback if not extracted)
-  if (!counterparty) {
+  if (!counterparty && !isCharterFormationWithOwnOrg) {
     const legalQuoted = text.match(
       /(?:^|[^\p{L}\p{N}])(ООО|АО|ПАО|ЗАО|НАО|ГУП|МУП|ФГУП|АНО|НКО)\s*[«"'„“]([^»"'”]{2,80})[»"'”]/iu
     );
@@ -710,7 +732,7 @@ export function extractRequisitesFromFreeText(
   }
 
   // 2. Tax / Treasury / Social Fund agency (e.g. "МИ ФНС №10 по СПб", "ИФНС № 15", "УФК по г. Санкт-Петербургу")
-  if (!counterparty) {
+  if (!counterparty && !isCharterFormationWithOwnOrg) {
     const govMatch = text.match(
       /(?:^|[^\p{L}\p{N}])((?:МИ\s*ФНС|Межрайонн\p{L}+\s+ИФНС|ИФНС|УФНС|УФК|ОСФР|СФР|ФНС)(?:\s+России)?(?:\s*№\s*\d+)?(?:\s+по\s+(?:г\.\s*)?[А-Яа-яЁё.-]+(?:\s+[А-Яа-яЁё.-]+)?)?)(?=\s*[,(;]|$|\s+ИНН|\s+КПП|\s+р\/с)/iu
     );
@@ -720,7 +742,7 @@ export function extractRequisitesFromFreeText(
   }
 
   // 3. Individual entrepreneur (ИП Фамилия И.О. / ИП Фамилия Имя Отчество)
-  if (!counterparty) {
+  if (!counterparty && !isCharterFormationWithOwnOrg) {
     const ipMatch = text.match(
       /(?:^|[^\p{L}\p{N}])(ИП\s+[А-ЯЁ][а-яё]+(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.?|[А-ЯЁ][а-яё.]+)){1,2})/u
     );
@@ -730,7 +752,7 @@ export function extractRequisitesFromFreeText(
   }
 
   // 4. Unquoted legal entity (e.g. "ПАО МегаФон", "ПАО Сбербанк", "АО Ростелеком", "ООО Комус")
-  if (!counterparty) {
+  if (!counterparty && !isCharterFormationWithOwnOrg) {
     const legalUnquoted = text.match(
       /(?:^|[^\p{L}\p{N}])(ООО|АО|ПАО|ЗАО|ГУП|МУП)\s+([А-ЯЁA-Z][А-Яа-яЁёA-Za-z0-9-]{2,40}(?:\s+[А-ЯЁA-Z][А-Яа-яЁёA-Za-z0-9-]{2,30})?)/u
     );
@@ -798,7 +820,7 @@ export function extractRequisitesFromFreeText(
   }
 
   const qtyPriceAdjacentMatch = text.match(
-    /(\d+(?:[.,]\d+)?)\s*(тыс\.?\s*шт\.?|шт\.?|ед\.?|компл\.?|уп(?:ак)?\.?|рул\.?|пач\p{L}*\.?|меш\p{L}*\.?|бан\p{L}*\.?|п\.?\s*м\.?|кв\.?\s*м\.?|м2|м3|м(?=$|[\s.,;/)])|кг|т(?=$|[\s.,;)])|тонн\p{L}*|л(?=$|[\s.,;/)]))\s*(?:по\s*(?:цене\s*)?(?:(?:без\s*(?:уч[её]та\s*)?ндс(?:\s*\d+\s*%)?|с\s*(?:уч[её]том\s*)?ндс(?:\s*\d+\s*%)?|в\s*т\.?\s*ч\.?\s*ндс(?:\s*\d+\s*%)?|вкл\.?\s*ндс)\s*)?|[*×xх]\s*)(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.?)/iu
+    /(\d+(?:[.,]\d+)?)\s*(тыс\.?\s*шт\.?|шт\.?|ед\.?|компл\.?|уп(?:ак)?\.?|рул\.?|пач\p{L}*\.?|меш\p{L}*\.?|бан\p{L}*\.?|п\.?\s*м\.?|кв\.?\s*м\.?|м2|м3|м(?=$|[\s.,;/)])|кг|т(?=$|[\s.,;)])|тонн\p{L}*|л(?=$|[\s.,;/)]))\s*(?:по\s*(?:цене\s*)?(?:(?:без\s*(?:уч[её]та\s*)?ндс(?:\s*\d+\s*%)?|с\s*(?:уч[её]том\s*)?ндс(?:\s*\d+\s*%)?|в\s*т\.?\s*ч\.?\s*ндс(?:\s*\d+\s*%)?|вкл\.?\s*ндс)\s*)?|[*×xх]\s*)(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.?)(?:\s*(?:\/|за\s+)(?:шт|ед|м2|м3|кг|т)\.?)?/iu
   );
   const qtyItemPriceMatch = !qtyPriceAdjacentMatch
     ? text.match(
@@ -870,9 +892,9 @@ export function extractRequisitesFromFreeText(
     }
   }
 
-  // B. Workwear / special tooling / inventory issued to employee: e.g. "Выдали спецодежду каменщику" / "Выдана каска мастеру Петрову И.И."
+  // B. Workwear / special tooling / inventory issued to employee: e.g. "Выдали спецодежду каменщику Фадееву Ф.Ф." / "Выдана каска мастеру Петрову И.И."
   const workwearMatch = text.match(
-    /(?:выда(?:ли|н[аоы]?)|передан[аоы]?)\s+(?:со\s+склада\s+)?((?:рабоч\p{L}*\s+|защитн\p{L}*\s+)?(?:спецодежд\p{L}*|спецоснастк\p{L}*|спецобув\p{L}*|сиз|инвентар\p{L}*|хозпринадлежност\p{L}*|инструмент\p{L}*|каск\p{L}*|форм\p{L}*|халат\p{L}*|комбинезон\p{L}*|перчатк\p{L}*|костюм\p{L}*|жилет\p{L}*))(?:\s+\d+(?:[.,]\d+)?\s*(?:шт|компл|ед|пар)\.?)?(?:\s+(?:в\s+эксплуатацию\s+)?([А-Яа-яЁё]+(?:\s+[А-ЯЁ][а-яё.]+(?:\s*[А-ЯЁ]\.?)?)?))?/iu
+    /(?:выда(?:ли|н[аоы]?)|передан[аоы]?)\s+(?:со\s+склада\s+)?((?:рабоч\p{L}*\s+|защитн\p{L}*\s+)?(?:спецодежд\p{L}*|спецоснастк\p{L}*|спецобув\p{L}*|сиз|инвентар\p{L}*|хозпринадлежност\p{L}*|инструмент\p{L}*|каск\p{L}*|форм\p{L}*|халат\p{L}*|комбинезон\p{L}*|перчатк\p{L}*|костюм\p{L}*|жилет\p{L}*))(?:\s+\d+(?:[.,]\d+)?\s*(?:шт|компл|ед|пар)\.?)?(?:\s+(?:в\s+эксплуатацию\s+)?([А-Яа-яЁё-]+(?:\s+[А-ЯЁ][а-яё-]+)?(?:\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)?))?/iu
   );
   if (workwearMatch) {
     const normWw = normalizeRussianItemPhraseToNominative(workwearMatch[1]);
@@ -881,10 +903,13 @@ export function extractRequisitesFromFreeText(
     }
     if (workwearMatch[2]) {
       const rawEmp = workwearMatch[2]
-        .replace(/^(?:в|на|со|по|для)\b.*$/iu, '')
+        .replace(/^(?:в|на|со|по|для)(?=$|[^\p{L}]).*$/iu, '')
         .trim();
       if (rawEmp.length >= 3) {
-        employeeHint = normalizeDativeEmployeeHint(rawEmp);
+        const extractedFullFio = extractPersonFioFromText1C(text);
+        employeeHint = extractedFullFio
+          ? normalizeEmployeeOrFounderName1C(extractedFullFio, { obliqueContext: true })
+          : normalizeDativeEmployeeHint(rawEmp);
       }
     }
   }
@@ -918,69 +943,102 @@ export function extractRequisitesFromFreeText(
     }
   }
 
-  // D. Extract nomenclature hint before quantity (purchases & sales: "за оконные блоки 133 шт", "Поставлена продукция Панель ПВХ 226 шт", "Отгружены товары ...")
+  // C2. Parenthesized nomenclature with quantity: "(Плита ПВХ в количестве 284 шт)" or in-kind charter capital "в виде 2 вагон-бытовок"
+  if (!nomenclatureHint) {
+    const parenItemMatch = text.match(
+      /\(\s*([А-ЯЁ][А-Яа-яЁёA-Za-z0-9\s«»"'-]{2,45}?)\s+в\s+(?:количеств[еа]|кол-ве)\s+\d+/u
+    );
+    if (parenItemMatch && parenItemMatch[1]) {
+      nomenclatureHint = cleanNomenclatureName1C(parenItemMatch[1]);
+    }
+  }
+  if (!nomenclatureHint) {
+    const inKindMatch = text.match(
+      /в\s+виде\s+(?:\d+\s+)?([А-Яа-яЁёA-Za-z0-9\s-]{3,40}?)(?=\s*[(.,;]|$)/iu
+    );
+    if (inKindMatch && inKindMatch[1]) {
+      nomenclatureHint = cleanNomenclatureName1C(inKindMatch[1]);
+    }
+  }
+
+  // D. Extract nomenclature hint before quantity (purchases & sales: "за оконные блоки 133 шт", "за заготовку МДФ в кол-ве 284 шт", "Поступила от ООО Конкурент заготовка МДФ (284 шт)")
   if (!nomenclatureHint) {
     const nomBeforeQty = text.match(
-      /(?:за\s+|поставлен[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|отгружен[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|реализован[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|продан[аыо]?(?:\s+товар\p{L}*|\s+продукци[яию])?\s+|поступил[аио]?(?:\s+от\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|приобретен[аыо]?(?:\s+у\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|оприходован[аыо]?\s+)([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{2,55}?)\s+\d+(?:[.,]\d+)?\s*(?:шт|ед|компл|упак|рул|м2|м3|кг|т|л)/iu
+      /(?:за\s+|поставлен[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|отгружен[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|реализован[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|продан[аыо]?(?:\s+товар\p{L}*|\s+продукци[яию])?\s+|поступил[аио]?(?:\s+от\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|приобретен[аыо]?(?:\s+за\s+наличн\p{L}*\s+расч[её]т)?(?:\s+материал\p{L}*|\s+товар\p{L}*|\s+оборудован\p{L}*)?(?:\s+у\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|оприходован[аыо]?\s+)([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{2,55}?)\s*(?:\(\s*|\s+в\s+кол(?:-ве|ичестве)\s+|\s+)\d+(?:[.,]\d+)?\s*(?:шт|ед|компл|упак|рул|м2|м3|кг|т|л)/iu
     );
     if (nomBeforeQty && nomBeforeQty[1]) {
       const cleanedNom = nomBeforeQty[1]
         .replace(/^(?:товары|материалы|сырье|оборудование|готовая\s+продукция|продукция)\s+/iu, '')
         .trim();
       if (cleanedNom.length >= 2) {
-        nomenclatureHint = normalizeRussianItemPhraseToNominative(cleanedNom);
+        nomenclatureHint = cleanNomenclatureName1C(
+          normalizeRussianItemPhraseToNominative(cleanedNom)
+        );
       }
     }
   }
 
-  // E. Purchase or sale of named item without explicit quantity right after item (including "Поступила смазка для автомобилей")
+  // E. Purchase or sale of named item without explicit quantity right after item (including "Поступила смазка для автомобилей", "Приобретен кирпич (материал)")
   if (!nomenclatureHint) {
     const nomPurchaseSimple = text.match(
-      /(?:поступил[аио]?|приобретен[аыо]?|купил[аи]?|закуплен[аыо]?|поставлен[аыо]?|отгружен[аыо]?|реализован[аыо]?)\s+(?:продукци[яию]\s+|товар[ыа]?\s+|материал[ыа]?\s+)?([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{2,50}?)(?=\s*(?:[,.;()]|$|\s+(?:от|у|покупател\p{L}*|заказчик\p{L}*|поставщик\p{L}*|на\s+склад|по\s+накладн|по\s+счет|по\s+упд|по\s+цене|на\s+сумму|в\s+сумме|за\s+\d|стоимост)))/iu
+      /(?:поступил[аио]?(?:\s+от\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?|приобретен[аыо]?|купил[аи]?|закуплен[аыо]?|поставлен[аыо]?|отгружен[аыо]?|реализован[аыо]?|получен[аыо]?)\s+(?:продукци[яию]\s+|товар[ыа]?\s+|материал[ыа]?\s+)?([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{2,50}?)(?=\s*(?:[,.;()]|$|\s+(?:от|у|покупател\p{L}*|заказчик\p{L}*|поставщик\p{L}*|на\s+склад|по\s+накладн|по\s+счет|по\s+упд|по\s+цене|на\s+сумму|в\s+сумме|за\s+\d|стоимост|в\s+кол)))/iu
     );
     if (
       nomPurchaseSimple &&
       nomPurchaseSimple[1] &&
-      !/^(?:на\s+р\/с|на\s+расч|оплата|аванс|выручка|денежные|доля|вклад|исполнительн\p{L}*\s+лист|(?:два|три|четыре|несколько)?\s*вексел|облигац)/iu.test(
+      !/^(?:на\s+р\/с|на\s+расч|за\s+наличн|оплата|доплата|платеж|аванс|выручка|денежные|доля|вклад|счет|исполнительн\p{L}*\s+лист|(?:два|три|четыре|несколько)?\s*вексел|облигац)/iu.test(
         nomPurchaseSimple[1].trim()
       )
     ) {
-      nomenclatureHint = normalizeRussianItemPhraseToNominative(nomPurchaseSimple[1]);
+      nomenclatureHint = cleanNomenclatureName1C(
+        normalizeRussianItemPhraseToNominative(nomPurchaseSimple[1])
+      );
     }
   }
 
-  // E2. Accountable person FIO (счёт 71.01): "Выдано Федорову Ф.Ф. подотчет", "Авансовый отчет Петрова И.И.", "Возвращен остаток подотчетных сумм Сидоровым С.С."
+  if (nomenclatureHint) {
+    nomenclatureHint = cleanNomenclatureName1C(nomenclatureHint) || undefined;
+  }
+
+  // E2. Accountable person / employee FIO (счёт 71.01, "через Федорова Ф.Ф.", "Главному бухгалтеру", etc.)
+  const throughPersonMatch = text.match(
+    /(?:^|[^\p{L}])через\s+(?:подотч[её]тн\p{L}*\s+лиц\p{L}*\s+|сотрудник\p{L}*\s+)?([А-ЯЁ][а-яё-]{2,30}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)/iu
+  );
+  if (throughPersonMatch && throughPersonMatch[1]) {
+    employeeHint = normalizeEmployeeOrFounderName1C(throughPersonMatch[1], {
+      obliqueContext: true,
+    });
+  }
   if (!employeeHint) {
     const accBeforeMatch = text.match(
       /(?:[Вв]ыда(?:но|н[аы]?|ли)|[Пп]еречислен[аоы]?|[Вв]ыплачен[аоы]?)\s+(?:из\s+кассы\s+|с\s+р\/с(?:ч)?\s+|с\s+расч[её]тн\p{L}*\s+сч[её]та\s+|на\s+карту\s+)?(?:сотруднику\s+|работнику\s+|подотч[её]тному\s+лицу\s+)?([А-ЯЁ][а-яё]+(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.?|[А-ЯЁ][а-яё.]+)){0,2})\s+(?:[Пп]од\s*отч[её]т|[Пп]одотч[её]т|на\s+хоз(?:яйственн\p{L}*)?\s*нужд|на\s+командиров)/u
     );
     const accAfterMatch = !accBeforeMatch
       ? text.match(
-          /(?:[Пп]од\s*отч[её]т|[Пп]одотч[её]т|[Аа]вансов\p{L}*\s+отч[её]т(?:\s*№\s*\S+)?|[Оо]статок\s+подотч[её]тн\p{L}*\s+сумм|[Оо]т\s+подотч[её]тн\p{L}*\s+лица|[Оо]тчитал(?:ся|ась))\s+(?:сотрудник[ауом]?\s+|работник[ауом]?\s+|подотч[её]тн\p{L}*\s+лиц[ауом]?\s+)?([А-ЯЁ][а-яё]+(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.?|[А-ЯЁ][а-яё.]+)){0,2})/u
+          /(?:[Пп]од\s*отч[её]т|[Пп]одотч[её]т|[Аа]вансов\p{L}*\s+отч[её]т(?:\s*№\s*\S+)?|[Оо]статок\s+подотч[её]тн\p{L}*\s+сумм|[Оо]т\s+подотч[её]тн\p{L}*\s+лица|[Оо]тчитал(?:ся|ась))\s+(?:сотрудник[ауом]?\s+|работник[ауом]?\s+|подотч[её]тн\p{L}*\s+лиц[ауом]?\s+)?((?:[Гг]лавн\p{L}*|[Гг]лан\p{L}*)\s+бухгалтер\p{L}*|[А-ЯЁ][а-яё]+(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.?|[А-ЯЁ][а-яё.]+)){0,2})/u
         )
       : null;
     const rawAccFio = (accBeforeMatch?.[1] || accAfterMatch?.[1] || '')
       .replace(/\s+(?:на\s+сумму|в\s+сумме|на\s+хоз|на\s+командиров|за\s+приобретен|по\s+рко|по\s+пко).*$/iu, '')
       .trim();
     if (rawAccFio.length >= 2) {
-      employeeHint = normalizeDativeEmployeeHint(rawAccFio);
+      employeeHint = normalizeEmployeeOrFounderName1C(rawAccFio, { obliqueContext: true });
     }
   }
   if (!employeeHint && !counterparty) {
     const fallbackPerson = extractPersonFioFromText1C(text);
     if (fallbackPerson) {
-      employeeHint = fallbackPerson;
+      employeeHint = normalizeEmployeeOrFounderName1C(fallbackPerson);
     }
   }
 
-  // F. HR hiring / transfer / employment order
+  // F. HR hiring / transfer / employment order / employee tax deduction notice
   let employeePositionHint: string | undefined;
   let monthlySalaryHint: number | undefined;
-  let usefulLifeMonthsHint: number | undefined;
   let hireStartDateHint: string | undefined;
 
   const hireMatch = text.match(
-    /(?:[Пп]ринят[аы]?\s+на\s+работу|[Пп]ри[её]м\s+на\s+работу|[Оо]формлен[аы]?\s+в\s+штат|[Зз]аключ[её]н\s+трудовой\s+договор\s+с)(?:\s+с\s+\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)?\s+(?:(?:сотрудник[аом]?|работник[аом]?)\s+)?(?:([а-яё-]{3,25}(?:\s+[а-яё-]{3,25})?)\s+)?([А-ЯЁ][а-яё]+(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.?|[А-ЯЁ][а-яё.]+)){0,2})/u
+    /(?:[Пп]ринят[аы]?\s+на\s+работу|[Пп]ри[её]м\s+на\s+работу|[Оо]формлен[аы]?\s+в\s+штат|[Зз]аключ[её]н\s+трудовой\s+договор\s+с)(?:\s+с\s+\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)?\s+(?:(?:сотрудник[аом]?|работник[аом]?)\s+)?(?:([А-Яа-яЁё.-]{2,25}(?:\s+[А-Яа-яЁё.-]{2,25})?)\s+)?([А-ЯЁ][а-яё-]+(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.?|[А-ЯЁ][а-яё.]+)){1,2})/u
   );
   if (hireMatch && hireMatch[2]) {
     const preRole = (hireMatch[1] ?? '').trim();
@@ -988,13 +1046,15 @@ export function extractRequisitesFromFreeText(
       preRole &&
       !/^(?:на\s+должность|в\s+должности|в\s+штат|по\s+совместительству)$/iu.test(preRole)
     ) {
-      employeePositionHint = preRole;
+      employeePositionHint = /^ген\.?\s*директор$/iu.test(preRole)
+        ? 'Генеральный директор'
+        : preRole;
     }
     const candEmp = hireMatch[2]
       .replace(/\s+(?:на\s+должност|в\s+должност|с\s+оклад|по\s+оклад|в\s+основн|в\s+отдел).*$/iu, '')
       .trim();
     if (candEmp.length >= 2) {
-      employeeHint = candEmp;
+      employeeHint = normalizeEmployeeOrFounderName1C(candEmp, { obliqueContext: false });
     }
   }
   if (
@@ -1002,22 +1062,26 @@ export function extractRequisitesFromFreeText(
     /(?:[Пп]ринят[аы]?\s+на\s+работу|[Пп]ри[её]м\s+на\s+работу|[Оо]формлен[аы]?\s+в\s+штат)/u.test(text)
   ) {
     const roleOnlyMatch = text.match(
-      /(?:[Пп]ринят[аы]?\s+на\s+работу|[Пп]ри[её]м\s+на\s+работу|[Оо]формлен[аы]?\s+в\s+штат)\s+(?:на\s+должность\s+)?(главн\p{L}*\s+бухгалтер|ген(?:еральн\p{L}*)?\.?\s*директор|[а-яё-]{4,25}(?:\s+[а-яё-]{4,25})?)(?=\s*(?:\(|с\s+оклад|по\s+оклад|[,.;]|$))/iu
+      /(?:[Пп]ринят[аы]?\s+на\s+работу|[Пп]ри[её]м\s+на\s+работу|[Оо]формлен[аы]?\s+в\s+штат)\s+(?:на\s+должность\s+)?((?:главн\p{L}*|глан\p{L}*)\s+бухгалтер|ген(?:еральн\p{L}*)?\.?\s*директор|[а-яё-]{4,25}(?:\s+[а-яё-]{4,25})?)(?=\s*(?:\(|с\s+оклад|по\s+оклад|[,.;]|$))/iu
     );
     if (roleOnlyMatch && roleOnlyMatch[1]) {
       const cleanRole = roleOnlyMatch[1].replace(/\s+/g, ' ').trim();
-      const capRole = cleanRole.charAt(0).toUpperCase() + cleanRole.slice(1);
+      const capRole = /^(?:главн|глан)\p{L}*\s+бухгалтер$/iu.test(cleanRole)
+        ? 'Главный бухгалтер'
+        : cleanRole.charAt(0).toUpperCase() + cleanRole.slice(1);
       if (!employeePositionHint) employeePositionHint = capRole;
       employeeHint = capRole;
     }
   }
   const transferMatch = !hireMatch
     ? text.match(
-        /(?:сотрудник|работник)?\s*([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)?)\s+переведен\p{L}*\s+на\s+должност/iu
+        /(?:сотрудник|работник)?\s*([А-ЯЁ][а-яё-]+(?:\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)?)\s+переведен\p{L}*\s+на\s+должност/iu
       )
     : null;
   if (transferMatch && transferMatch[1]) {
-    employeeHint = normalizeInflectedPersonPhrase(transferMatch[1].trim());
+    employeeHint = normalizeEmployeeOrFounderName1C(transferMatch[1].trim(), {
+      obliqueContext: false,
+    });
   }
 
   if (/принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу/iu.test(text)) {
@@ -1036,17 +1100,32 @@ export function extractRequisitesFromFreeText(
     /(?:на\s+должность|в\s+должности|должность)[\s:«"']*([А-Яа-яЁё0-9\s-]{3,40}?)(?=\s*(?:[,.;()«»"']|$|\s+с\s+окладом|\s+оклад|\s+по\s+трудов|\s+в\s+подразделен|\s+в\s+цех|\s+в\s+отдел))/iu
   );
   if (posMatch && posMatch[1]) {
-    employeePositionHint = posMatch[1].trim();
+    const rawPos = posMatch[1].trim();
+    const nomPos = DATIVE_ROLE_TO_NOMINATIVE.find((r) => r.re.test(rawPos))?.label || rawPos;
+    employeePositionHint =
+      /^каменщика$/iu.test(nomPos)
+        ? 'Каменщик'
+        : /^менеджера$/iu.test(nomPos)
+          ? 'Менеджер'
+          : /^инженера$/iu.test(nomPos)
+            ? 'Инженер'
+            : nomPos.charAt(0).toUpperCase() + nomPos.slice(1);
   }
 
+  const taxDeductionInfo = extractEmployeeTaxDeductions1C(text);
   const isTaxDeductionNotice = /уведомлени\p{L}*.*(?:имущественн\p{L}*|налогов\p{L}*)\s+вычет/iu.test(
     text
   );
-  const salaryMatch = !isTaxDeductionNotice
-    ? scrubNonMonetaryNumbersForInlineSum(text).match(
-        /(?:с\s+окладом|должностн\p{L}*\s+оклад\p{L}*|оклад(?:\s+составляет)?|тарифн\p{L}*\s+ставк\p{L}*|фот(?:\s+за\s+месяц|\s+составляет)?)[\s:=—-]*(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\b\d{4,8}(?:[.,]\d{1,2})?\b)/iu
-      )
-    : null;
+  if (isTaxDeductionNotice && !employeeHint) {
+    employeeHint = extractPersonFioFromText1C(text) || undefined;
+  }
+
+  const salaryMatch =
+    !isTaxDeductionNotice && !/оклад\s+не\s+изменил/iu.test(text)
+      ? scrubNonMonetaryNumbersForInlineSum(text).match(
+          /(?:с\s+окладом|должностн\p{L}*\s+оклад\p{L}*|оклад(?:\s+составляет)?|тарифн\p{L}*\s+ставк\p{L}*|фот(?:\s+за\s+месяц|\s+составляет)?)[\s:=—-]*(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\b\d{4,8}(?:[.,]\d{1,2})?\b)/iu
+        )
+      : null;
   if (salaryMatch && salaryMatch[1]) {
     const sal = parseRussianNumber(salaryMatch[1]);
     if (sal > 0) {
@@ -1065,17 +1144,8 @@ export function extractRequisitesFromFreeText(
     monthlySalaryHint = explicitColumnAmount;
   }
 
-  // G. Useful life (СПИ) for Fixed Assets commissioning / depreciation: e.g. "СПИ 60 мес", "срок полезного использования 5 лет"
-  const spiMatch = text.match(
-    /(?:(?:^|[^\p{L}])спи(?=$|[^\p{L}])|срок\p{L}*\s+полезн\p{L}*\s+использован\p{L}*|срок\p{L}*\s+служб\p{L}*)[\s:=—()-]*(\d{1,3})\s*(мес\p{L}*|лет|год\p{L}*)/iu
-  );
-  if (spiMatch && spiMatch[1]) {
-    const rawVal = Number(spiMatch[1]);
-    const unit = spiMatch[2].toLowerCase();
-    if (rawVal > 0) {
-      usefulLifeMonthsHint = /^(?:лет|год)/.test(unit) ? rawVal * 12 : rawVal;
-    }
-  }
+  // G. Useful life (СПИ) for Fixed Assets commissioning / depreciation: supports "72 мес = 6 лет", "6 лет 11 мес.", "6 лет"
+  const usefulLifeMonthsHint = extractUsefulLifeMonths1C(text);
 
   // H. Writ of Execution (Исполнительный лист) & Alimony Remittance (76.41)
   let alimonyRecipientHint: string | undefined;
@@ -1084,20 +1154,30 @@ export function extractRequisitesFromFreeText(
   let alimonyFixedAmountHint: number | undefined;
   let writStartDateHint: string | undefined;
 
+  const isCommercialCourtWrit =
+    /неуй?стойк|штраф|пен[ия]|по\s+дог|в\s+адрес\s+(?:ооо|ао|пао|зао|ип)|по\s+иску\s+(?:ооо|ао|пао|зао|ип)/iu.test(
+      text
+    );
   const isWritText =
     /исполнительн\p{L}*\s+лист/iu.test(text) &&
+    !isCommercialCourtWrit &&
     !/перечислен|выплачен|уплачен|списан|погашен/iu.test(text);
   const isAlimonyPayoutText =
+    !isCommercialCourtWrit &&
     /(?:перечислен|выплачен|уплачен|списан|погашен)\p{L}*.*(?:алимент|по\s+исполнительн\p{L}*\s+лист\p{L}*\s+(?:алимент|супруг|в\s+пользу))/iu.test(
       text
     );
 
   if (isWritText) {
-    const debtorMatch = text.match(
-      /(?:взыскан\p{L}*|удержан\p{L}*)\s+(?:алимент\p{L}*\s+)?с\s+(?:сотрудника\s+|работника\s+)?([А-ЯЁ][а-яё]{2,}(?:\s+[А-ЯЁ]\.?\s*[А-ЯЁ]\.?)?)/u
-    );
+    const debtorMatch =
+      text.match(
+        /(?:взыскан\p{L}*|удержан\p{L}*)\s+(?:алимент\p{L}*\s+)?с\s+(?:сотрудника\s+|работника\s+)?([А-ЯЁ][а-яё-]{2,}(?:\s+[А-ЯЁ]\.?\s*[А-ЯЁ]\.?)?)/u
+      ) ||
+      text.match(
+        /исполнительн\p{L}*\s+лист\s+(?:№\s*\S+\s+)?(?:от\s+\S+\s+)?на\s+(?:сотрудника\s+|работника\s+)?([А-ЯЁ][а-яё-]{2,}\s+[А-ЯЁ]\.?\s*[А-ЯЁ]\.?)/iu
+      );
     if (debtorMatch && debtorMatch[1]) {
-      employeeHint = normalizeInflectedPersonPhrase(debtorMatch[1]);
+      employeeHint = normalizeEmployeeOrFounderName1C(debtorMatch[1], { obliqueContext: true });
     }
     const benefitMatch = text.match(
       /в\s+пользу\s+([А-Яа-яЁё][А-Яа-яЁё.\s-]{2,45}?)(?=\s*(?:[,;()]|\.{2,}|$|\s+в\s+размер|\s+в\s+тверд|\s+ежемесячн|\s+на\s+содержан|\s+по\s+|\s+от\s+|\s+инн|\s+\d))/iu
@@ -1110,7 +1190,7 @@ export function extractRequisitesFromFreeText(
     }
 
     const writStartM = text.match(
-      /(?:в\s+период\s+с|начиная\s+с|удерживать\s+с)\s*(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)/iu
+      /(?:в\s+период\s+с|начиная\s+с|удерживать\s+с|\bс)\s*(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)/iu
     );
     if (writStartM && writStartM[1]) {
       writStartDateHint = normalizeOperationDateToReportingYear(
@@ -1119,12 +1199,15 @@ export function extractRequisitesFromFreeText(
       );
     }
 
-    const fixedAlimonyM =
-      text.match(
-        /(?:в\s+размере|в\s+тверд\p{L}*\s+(?:денежн\p{L}*\s+)?сумм\p{L}*|ежемесячн\p{L}*)[^0-9%]{0,25}?(\d{1,3}(?:[\s\u00A0]\d{3})+|\d{4,})\s*(?:₽|руб\.?|р\.?)/iu
-      );
+    const fixedAlimonyM = text.match(
+      /(?:в\s+размере|в\s+тверд\p{L}*\s+(?:денежн\p{L}*\s+)?сумм\p{L}*|ежемесячн\p{L}*)[^0-9%]{0,25}?(\d{1,3}(?:[\s\u00A0]\d{3})+|\d{4,})\s*(?:₽|руб\.?|р\.?)/iu
+    );
     const pctExplicit = text.match(/(\d{1,2}(?:[.,]\d{1,2})?)\s*%/);
-    if ((fixedAlimonyM || (explicitColumnAmount && explicitColumnAmount > 0 && explicitColumnAmount < 50_000_000)) && !pctExplicit) {
+    if (
+      (fixedAlimonyM ||
+        (explicitColumnAmount && explicitColumnAmount > 0 && explicitColumnAmount < 50_000_000)) &&
+      !pctExplicit
+    ) {
       const fixedVal = fixedAlimonyM
         ? parseRussianNumber(fixedAlimonyM[1])
         : (explicitColumnAmount ?? 0);
@@ -1167,22 +1250,40 @@ export function extractRequisitesFromFreeText(
       : 'Векселя третьих лиц';
   }
 
-  // J. Recurring contract fee & loan/security interest rate
+  // J. Recurring contract fee & loan/security interest rate & order total from qty * unitPrice
   const isContractSignOrInvoice = isNonPostingManagementOrPolicyText(text);
   const recurringTerms = isContractSignOrInvoice
     ? extractRecurringContractTerms1C(text, explicitColumnAmount)
     : null;
-  const ratePctMatch = text.match(/(?:под|по\s+ставк\p{L}*|ставк\p{L}*)\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*%/iu);
+  const ratePctMatch = text.match(
+    /(?:под|по\s+ставк\p{L}*|ставк\p{L}*)\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*%/iu
+  );
   const interestRatePercentHint = ratePctMatch
     ? Number(ratePctMatch[1].replace(',', '.'))
     : undefined;
+
+  const orderTotalAmountHint =
+    quantity && quantity > 0 && unitPrice && unitPrice > 0
+      ? Math.round((quantity * unitPrice + Number.EPSILON) * 100) / 100
+      : undefined;
+
+  const founderSharesHint =
+    charterInfo.founders.length > 0
+      ? charterInfo.founders
+          .filter((f) => f.founderName && (f.amount ?? 0) > 0)
+          .map((f) => ({
+            founderName: f.founderName,
+            sharePercent: f.sharePercent,
+            amount: f.amount ?? 0,
+          }))
+      : undefined;
 
   const cleanBik = bikMatch ? bikMatch[1] : '';
   const bankInfo = cleanBik ? resolveBankInfoByBik(cleanBik) : undefined;
 
   return {
-    inn: innMatch ? innMatch[1] : '',
-    kpp: kppMatch ? kppMatch[1] : '',
+    inn: isCharterFormationWithOwnOrg ? '' : innMatch ? innMatch[1] : '',
+    kpp: isCharterFormationWithOwnOrg ? '' : kppMatch ? kppMatch[1] : '',
     bankAccount: rsMatch ? rsMatch[1] : '',
     corrAccount: ksMatch ? ksMatch[1] : bankInfo?.corrAccount || '',
     bik: cleanBik,
@@ -1197,6 +1298,15 @@ export function extractRequisitesFromFreeText(
     employeeHint,
     employeePositionHint,
     monthlySalaryHint,
+    employeeChildCountHint: taxDeductionInfo.childCount,
+    employeeIsSingleParentHint: taxDeductionInfo.isSingleParent,
+    employeePropertyDeductionHint:
+      taxDeductionInfo.propertyTaxDeduction ||
+      (isTaxDeductionNotice && explicitColumnAmount && explicitColumnAmount >= 10_000
+        ? explicitColumnAmount
+        : undefined),
+    founderSharesHint,
+    orderTotalAmountHint,
     usefulLifeMonthsHint,
     productionObjectHint,
     alimonyRecipientHint,
@@ -1641,15 +1751,19 @@ function mapTabularRowToDraft(params: {
   const qtyParsed = parseRussianNumber(qtyCell) || extracted.quantity || 0;
   let unitPriceParsed = parseRussianNumber(priceCell) || extracted.unitPrice || 0;
 
+  const rawExcelAmount =
+    Math.abs(amount) >= 0.01
+      ? Math.round((Math.abs(amount) + Number.EPSILON) * 100) / 100
+      : undefined;
   let effectiveAmount = Math.abs(amount);
   let amountCalculationNote: string | undefined;
 
-  // Detect unit-price placed into Amount column when description ends with "... <qty> шт ... по цене (вкл. НДС)"
+  // Detect unit-price placed into Amount column when description contains "... <qty> шт/кв.м/куб.м ... по цене (вкл. НДС / без НДС)" without an inline price number
   if (
     effectiveAmount >= 0.01 &&
     qtyParsed > 1 &&
     unitPriceParsed === 0 &&
-    /по\s+цене(?:\s*\(?(?:вкл\.?\s*ндс|с\s*(?:уч[её]том\s*)?ндс(?:\s*\d+\s*%)?|без\s*(?:уч[её]та\s*)?ндс(?:\s*\d+\s*%)?|за\s+[а-яё.]+)\)?)?\s*[.,;)]*$/iu.test(
+    /по\s+цене(?:\s*\(?(?:вкл\.?\s*ндс|с\s*(?:уч[её]том\s*)?ндс(?:\s*\d+\s*%)?|без\s*(?:уч[её]та\s*)?ндс(?:\s*\d+\s*%)?|за\s+[а-яё.]+)\)?)?(?!\s*[-=:—]?\s*\d)/iu.test(
       description.trim()
     )
   ) {
@@ -1673,7 +1787,7 @@ function mapTabularRowToDraft(params: {
     }
   }
 
-  // Zero out amount for pure HR/policy/writ rows (e.g. property tax deduction 2 000 000 or salary in ПриемНаРаботу)
+  // Zero out posting amount for pure HR/policy/writ rows while preserving rawExcelAmount & monthlySalary!
   if (description && isPureHrOrPolicyOrWritNoAmountText(description)) {
     effectiveAmount = 0;
   }
@@ -1685,6 +1799,7 @@ function mapTabularRowToDraft(params: {
     extracted.hireStartDateHint && date && extracted.hireStartDateHint > date
       ? extracted.hireStartDateHint
       : date;
+  const cleanedNomFinal = cleanNomenclatureName1C(nomCell || extracted.nomenclatureHint || '');
 
   return {
     draft: {
@@ -1694,6 +1809,12 @@ function mapTabularRowToDraft(params: {
       docNumber: docNumber || extracted.docNumber,
       description: description || nomCell || counterpartyCell || 'Хозяйственная операция',
       amount: effectiveAmount,
+      rawExcelAmount,
+      orderTotalAmount:
+        extracted.orderTotalAmountHint ||
+        (qtyParsed > 0 && unitPriceParsed > 0
+          ? Math.round((qtyParsed * unitPriceParsed + Number.EPSILON) * 100) / 100
+          : undefined),
       needsAmount: !isNonPostingRow && effectiveAmount < 0.01 ? true : undefined,
       amountCalculationNote,
       vatRate,
@@ -1716,14 +1837,20 @@ function mapTabularRowToDraft(params: {
       contractName: contractCell,
       contractNumber: extracted.contractNumber || undefined,
       contractDate: extracted.contractDate || undefined,
-      nomenclatureName: nomCell || extracted.nomenclatureHint || '',
+      nomenclatureName: cleanedNomFinal,
       nomenclatureGroupHint: nomGroupCell || extracted.productionObjectHint || undefined,
       warehouseName: whCell,
       expenseItemName: expCell,
       cashFlowItemName: ddsCell,
-      employeeName: empCell || extracted.employeeHint || undefined,
+      employeeName: empCell
+        ? normalizeEmployeeOrFounderName1C(empCell)
+        : extracted.employeeHint || undefined,
       employeePosition: extracted.employeePositionHint,
       monthlySalary: extracted.monthlySalaryHint,
+      employeeChildCount: extracted.employeeChildCountHint,
+      employeeIsSingleParent: extracted.employeeIsSingleParentHint,
+      employeePropertyDeduction: extracted.employeePropertyDeductionHint,
+      founderShares: extracted.founderSharesHint,
       usefulLifeMonths: extracted.usefulLifeMonthsHint,
       alimonyRecipientName: extracted.alimonyRecipientHint,
       alimonyRecipientInn: extracted.alimonyRecipientHint ? finalInn || undefined : undefined,

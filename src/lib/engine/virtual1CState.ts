@@ -18,6 +18,11 @@ import {
   VirtualWritOfExecution1C,
 } from '@/types/accounting';
 import {
+  cleanNomenclatureName1C,
+  extractCharterCapitalInfo1C,
+  extractEmployeeTaxDeductions1C,
+  extractUsefulLifeMonths1C,
+  normalizeEmployeeOrFounderName1C,
   normalizeLegalEntityName1C,
   normalizeRussianFioToNominative1C,
 } from './entityNormalizer1C';
@@ -65,13 +70,18 @@ export function normalizeSimpleEntityKey1C(raw: string): string {
  */
 export function normalizePersonIdentityKey1C(raw: string): string {
   const preClean = (raw ?? '')
+    .replace(/\(\s*фио\s+студента\s*\)/giu, '')
     .replace(/\b(сотрудник|работник|физлицо|физическое лицо|получатель|должник|мо[л])\b/giu, ' ')
     .replace(/[«»"'()]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   if (!preClean) return '';
 
-  const nom = normalizeRussianFioToNominative1C(preClean);
+  if (/(?:^|\s)(?:главн\p{L}*|глан\p{L}*)\s+бухгалтер\p{L}*$/iu.test(preClean)) {
+    return 'главный бухгалтер';
+  }
+
+  const nom = normalizeEmployeeOrFounderName1C(preClean);
   const cleaned = nom.toLowerCase().replace(/ё/g, 'е').trim();
   if (!cleaned) return '';
 
@@ -563,6 +573,7 @@ export function inferNomenclatureCatalogMeta1C(
 
 export function cloneVirtual1CState(state: Virtual1CStateSnapshot): Virtual1CStateSnapshot {
   return {
+    ownOrganization: state.ownOrganization ? { ...state.ownOrganization } : undefined,
     counterparties: state.counterparties.map((c) => ({ ...c, usages: [...c.usages] })),
     contracts: state.contracts.map((c) => ({
       ...c,
@@ -589,6 +600,14 @@ export function createInitialVirtual1CState(
   db1C: Database1CSnapshot | null
 ): Virtual1CStateSnapshot {
   const state: Virtual1CStateSnapshot = {
+    ownOrganization:
+      db1C?.organization?.name || db1C?.organization?.inn
+        ? {
+            name: db1C.organization.name || '',
+            inn: (db1C.organization.inn || '').replace(/\D/g, ''),
+            kpp: (db1C.organization.kpp || '').replace(/\D/g, '') || undefined,
+          }
+        : undefined,
     counterparties: [],
     contracts: [],
     nomenclature: [],
@@ -1134,11 +1153,31 @@ export function advanceVirtual1CStateWithOperation(
     date: op.date,
   };
 
+  // 0. Register ownOrganization on charter_capital formation (never register own organization as a counterparty!)
+  if (op.category === 'charter_capital') {
+    const charterInfo = extractCharterCapitalInfo1C(
+      op.description,
+      op.amount || op.rawExcelAmount
+    );
+    if (charterInfo.ownOrganization) {
+      state.ownOrganization = {
+        name: charterInfo.ownOrganization.name,
+        inn: charterInfo.ownOrganization.inn,
+        kpp: charterInfo.ownOrganization.kpp,
+      };
+    }
+  }
+
   // 1. Register / update Alimony Recipient or Commercial Counterparty
   const isAlimonyOp =
     op.category === 'writ_of_execution' ||
     op.category === 'alimony_payout' ||
     op.docType1C === 'ИсполнительныйЛист';
+
+  const ownOrgKey = state.ownOrganization?.name
+    ? normalizeCounterpartyKey1C(state.ownOrganization.name)
+    : '';
+  const ownOrgInn = state.ownOrganization?.inn || '';
 
   if (isAlimonyOp) {
     const recName = (op.alimonyRecipientName || op.counterpartyName || '').trim();
@@ -1173,11 +1212,19 @@ export function advanceVirtual1CStateWithOperation(
         });
       }
     }
-  } else if (op.counterpartyName && op.counterpartyName.trim()) {
+  } else if (
+    op.counterpartyName &&
+    op.counterpartyName.trim() &&
+    op.category !== 'charter_capital'
+  ) {
     const cpParts = op.counterpartyName
       .split(';')
       .map((s) => s.trim())
-      .filter(Boolean);
+      .filter(Boolean)
+      .filter((s) => {
+        const k = normalizeCounterpartyKey1C(s);
+        return !(ownOrgKey && k === ownOrgKey);
+      });
     const isMultiCp = cpParts.length > 1;
     const roleHint =
       op.category.startsWith('purchase_') ||
@@ -1189,7 +1236,6 @@ export function advanceVirtual1CStateWithOperation(
             op.category === 'customer_invoice'
         ? 'Покупатель / заказчик'
         : op.category === 'founder_contribution' ||
-            op.category === 'charter_capital' ||
             op.category === 'dividends_accrual' ||
             op.category === 'dividends_payout'
           ? 'Учредитель / участник (счёт 75)'
@@ -1198,9 +1244,10 @@ export function advanceVirtual1CStateWithOperation(
     for (const rawCpPart of cpParts) {
       const cpName =
         op.counterpartyKind === 'ФизическоеЛицо'
-          ? normalizeRussianFioToNominative1C(rawCpPart)
+          ? normalizeEmployeeOrFounderName1C(rawCpPart, { obliqueContext: true })
           : normalizeLegalEntityName1C(rawCpPart);
-      const cpInn = isMultiCp ? '' : (op.counterpartyInn || '').replace(/\D/g, '');
+      const rawCpInn = isMultiCp ? '' : (op.counterpartyInn || '').replace(/\D/g, '');
+      const cpInn = ownOrgInn && rawCpInn === ownOrgInn ? '' : rawCpInn;
       const cpNorm = normalizeCounterpartyKey1C(cpName);
       const existingCp = state.counterparties.find(
         (c) =>
@@ -1209,7 +1256,12 @@ export function advanceVirtual1CStateWithOperation(
       );
 
       if (existingCp) {
-        if (cpInn && !existingCp.inn) existingCp.inn = cpInn;
+        if (cpInn && (!existingCp.inn || existingCp.isFormalAutoFilled)) {
+          existingCp.inn = cpInn;
+          if (op.counterpartySource !== 'educational_generated') {
+            existingCp.isFormalAutoFilled = false;
+          }
+        }
         if (!isMultiCp && op.counterpartyKpp && !existingCp.kpp) {
           existingCp.kpp = op.counterpartyKpp;
         }
@@ -1383,32 +1435,75 @@ export function advanceVirtual1CStateWithOperation(
     }
   }
 
-  // 4. Register / update Employees
-  if (op.employeeName && op.employeeName.trim()) {
-    const empName = normalizeRussianFioToNominative1C(op.employeeName.trim());
+  // 4. Register / update Employees (including monthlySalary from rawExcelAmount, child & property tax deductions, and HR transfers)
+  const rawEmpCandidate = (op.employeeName || '').trim();
+  if (rawEmpCandidate) {
+    const empName = normalizeEmployeeOrFounderName1C(rawEmpCandidate);
     const empKey = `emp:${normalizePersonIdentityKey1C(empName)}`;
+    const taxDed = extractEmployeeTaxDeductions1C(op.description);
+    const isTaxDedNotice = /уведомлени\p{L}*.*(?:имущественн\p{L}*|налогов\p{L}*)\s+вычет/iu.test(
+      op.description
+    );
+    const isSalaryUnchanged = /оклад\s+не\s+изменил/iu.test(op.description);
+    const effectiveSalary =
+      !isTaxDedNotice && !isSalaryUnchanged
+        ? op.monthlySalary && op.monthlySalary > 0
+          ? round2(op.monthlySalary)
+          : op.category === 'hr_hire' && op.rawExcelAmount && op.rawExcelAmount > 0 && op.rawExcelAmount < 50_000_000
+            ? round2(op.rawExcelAmount)
+            : 0
+        : 0;
+    const childCount = op.employeeChildCount ?? taxDed.childCount;
+    const isSingleParent = op.employeeIsSingleParent ?? taxDed.isSingleParent;
+    const propDeduction =
+      op.employeePropertyDeduction ??
+      taxDed.propertyTaxDeduction ??
+      (isTaxDedNotice && op.rawExcelAmount && op.rawExcelAmount >= 10_000
+        ? round2(op.rawExcelAmount)
+        : undefined);
+
     const existingEmp = state.employees.find((e) => e.key === empKey);
     if (existingEmp) {
-      if (op.monthlySalary && op.monthlySalary > 0) {
-        existingEmp.monthlySalary = op.monthlySalary;
+      if (effectiveSalary > 0) {
+        existingEmp.monthlySalary = effectiveSalary;
       }
-      if (op.employeePosition && (!existingEmp.position || existingEmp.position === 'Сотрудник штата')) {
+      if (op.employeePosition) {
         existingEmp.position = op.employeePosition;
       }
-      if (op.category === 'hr_hire') {
+      if (childCount !== undefined && childCount > 0) {
+        existingEmp.childCount = childCount;
+      }
+      if (isSingleParent) {
+        existingEmp.isSingleParent = true;
+      }
+      if (propDeduction && propDeduction > 0) {
+        existingEmp.propertyTaxDeduction = propDeduction;
+        existingEmp.propertyTaxDeductionStartDate = op.date
+          ? `${op.date.slice(0, 7)}-01`
+          : existingEmp.hireDate;
+      }
+      if (op.category === 'hr_hire' && /принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу/iu.test(op.description)) {
         existingEmp.isStaffEmployee = true;
         existingEmp.hireDate = op.date;
       }
       existingEmp.usages = addUsageRef(existingEmp.usages, usageRef);
     } else if (empKey) {
+      const isHireRow =
+        op.category === 'hr_hire' ||
+        /принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу/iu.test(op.description);
       state.employees.push({
         key: empKey,
         fullName: empName,
-        position: op.employeePosition || 'Сотрудник штата',
-        monthlySalary: op.monthlySalary && op.monthlySalary > 0 ? round2(op.monthlySalary) : 0,
+        position: op.employeePosition || (empName === 'Главный бухгалтер' ? 'Главный бухгалтер' : 'Сотрудник штата'),
+        monthlySalary: effectiveSalary,
         subdivision: 'Основное подразделение',
         hireDate: op.date,
-        isStaffEmployee: true,
+        childCount: childCount && childCount > 0 ? childCount : undefined,
+        isSingleParent: isSingleParent || undefined,
+        propertyTaxDeduction: propDeduction && propDeduction > 0 ? propDeduction : undefined,
+        propertyTaxDeductionStartDate:
+          propDeduction && propDeduction > 0 && op.date ? `${op.date.slice(0, 7)}-01` : undefined,
+        isStaffEmployee: isHireRow || effectiveSalary > 0,
         source: 'created_in_operation',
         firstSeenOpId: op.id,
         firstSeenOpNumber: opNumber,
@@ -1494,7 +1589,11 @@ export function advanceVirtual1CStateWithOperation(
         ? state.fixedAssets.find((a) => a.status === 'На счёте 08.04.1 (к вводу)')
         : undefined);
 
-    const spi = op.usefulLifeMonths && op.usefulLifeMonths > 0 ? op.usefulLifeMonths : 37;
+    const parsedSpi =
+      op.usefulLifeMonths && op.usefulLifeMonths > 0
+        ? op.usefulLifeMonths
+        : extractUsefulLifeMonths1C(op.description) || existingOs?.usefulLifeMonths || 37;
+    const spi = parsedSpi > 0 ? parsedSpi : 37;
     const entry0101 = round2(
       op.entries.filter((e) => e.debit === '01.01').reduce((s, e) => s + e.amount, 0)
     );
@@ -1511,7 +1610,7 @@ export function advanceVirtual1CStateWithOperation(
     } else if (cost > 0) {
       state.fixedAssets.push({
         key: osKey,
-        name: osName,
+        name: cleanNomenclatureName1C(osName) || osName,
         initialCost: cost,
         accumulatedDepreciation: 0,
         status: 'Введено в эксплуатацию (счёт 01.01)',
@@ -1745,58 +1844,111 @@ export function advanceVirtual1CStateWithOperation(
     }
   }
 
-  // 7b. Register / update Open Orders (СчетПокупателю / СчетОтПоставщика / composite invoice + advance)
+  // 7b. Register / update Open Orders (СчетПокупателю / СчетОтПоставщика / composite invoice + advance / power of attorney)
   const mentionsInvoiceIssued =
     /(?:выписан|выписал|выставлен)\p{L}*\s+счет(?!-фактур)/iu.test(op.description);
   const mentionsInvoiceReceived =
-    /(?:получен|поступил)\p{L}*\s+счет(?!-фактур)/iu.test(op.description);
+    /(?:получен|поступил)\p{L}*\s+счет(?!-фактур)|по\s+счету/iu.test(op.description);
+  const isSupplierPowerOfAttorney =
+    /выдана\s+доверенность/iu.test(op.description) && Boolean(op.counterpartyName);
+
+  const qtyPriceProduct =
+    op.orderTotalAmount && op.orderTotalAmount >= 0.01
+      ? round2(
+          op.vatRule === 'on_top' && op.vatRate > 0
+            ? op.orderTotalAmount * (1 + op.vatRate / 100)
+            : op.orderTotalAmount
+        )
+      : op.quantity && op.quantity > 0 && op.unitPrice && op.unitPrice > 0
+        ? round2(
+            op.quantity *
+              op.unitPrice *
+              (op.vatRule === 'on_top' && op.vatRate > 0 ? 1 + op.vatRate / 100 : 1)
+          )
+        : 0;
+
+  const pctAdvMatch = op.description.match(
+    /(?:аванс|предоплат\p{L}*)\s*(\d{1,2}(?:[.,]\d+)?)\s*%/iu
+  );
+  const pctAdvVal = pctAdvMatch ? Number(pctAdvMatch[1].replace(',', '.')) : 0;
+
+  const baseCandidateAmount = round2(op.amount || op.rawExcelAmount || 0);
+  const hasPartialAdvanceOrder =
+    (op.category === 'bank_in' || op.category === 'bank_out') &&
+    ((qtyPriceProduct > baseCandidateAmount + 0.05 && baseCandidateAmount >= 0.01) ||
+      (pctAdvVal > 0 && pctAdvVal < 100 && baseCandidateAmount >= 0.01) ||
+      (mentionsInvoiceIssued && baseCandidateAmount >= 0.01) ||
+      (mentionsInvoiceReceived && qtyPriceProduct >= 0.01));
 
   if (
-    (op.category === 'customer_invoice' ||
-      op.category === 'supplier_invoice' ||
-      (op.category === 'bank_in' && mentionsInvoiceIssued) ||
-      (op.category === 'bank_out' && mentionsInvoiceReceived)) &&
-    op.amount >= 0.01
+    op.category === 'customer_invoice' ||
+    op.category === 'supplier_invoice' ||
+    hasPartialAdvanceOrder ||
+    (isSupplierPowerOfAttorney && (qtyPriceProduct >= 0.01 || baseCandidateAmount >= 0.01))
   ) {
-    const orderSide: VirtualOpenOrder1C['side'] =
-      op.category === 'supplier_invoice' || op.category === 'bank_out' ? 'supplier' : 'customer';
-    let orderTotal = round2(op.amount);
-    if (op.category === 'bank_in' || op.category === 'bank_out') {
-      const pctAdvMatch = op.description.match(
-        /(?:аванс|предоплат\p{L}*)\s*(\d{1,2}(?:[.,]\d+)?)\s*%/iu
-      );
-      const pctVal = pctAdvMatch ? Number(pctAdvMatch[1].replace(',', '.')) : 0;
-      if (pctVal > 0 && pctVal < 100) {
-        orderTotal = round2((op.amount * 100) / pctVal);
-      }
+    const direction: VirtualOpenOrder1C['direction'] =
+      op.category === 'supplier_invoice' ||
+      op.category === 'bank_out' ||
+      isSupplierPowerOfAttorney
+        ? 'supplier'
+        : 'buyer';
+
+    let orderTotal = baseCandidateAmount;
+    if (qtyPriceProduct >= 0.01 && (qtyPriceProduct > baseCandidateAmount + 0.05 || orderTotal < 0.01)) {
+      orderTotal = qtyPriceProduct;
+    } else if (
+      (op.category === 'bank_in' || op.category === 'bank_out') &&
+      pctAdvVal > 0 &&
+      pctAdvVal < 100 &&
+      baseCandidateAmount >= 0.01
+    ) {
+      orderTotal = round2((baseCandidateAmount * 100) / pctAdvVal);
     }
-    const docNumMatch =
-      op.docNumber ||
-      op.description.match(/счет\p{L}*\s*№?\s*([А-Яа-яA-Za-z0-9/-]{1,12})/iu)?.[1] ||
-      op.contractNumber ||
-      '';
-    const subjectText = `${op.nomenclatureName || ''} ${op.description || ''}`.trim();
-    const existingSameOrder = state.openOrders.find((o) => o.originOpId === op.id);
-    if (!existingSameOrder) {
-      state.openOrders.push({
-        id: `ord-${orderSide}-${op.id}`,
-        side: orderSide,
-        counterpartyName: op.counterpartyName || '',
-        counterpartyInn: op.counterpartyInn || '',
-        counterpartyKpp: op.counterpartyKpp || '',
-        contractName: op.contractName || 'Основной договор',
-        docNumber: docNumMatch || undefined,
-        totalAmount: orderTotal,
-        remainingAmount: orderTotal,
-        vatRate: op.vatRate,
-        vatRule: op.vatRule,
-        subjectSummary: op.nomenclatureName || op.description,
-        keywordStems: extractKeywordStems1C(subjectText),
-        status: 'open',
-        originOpId: op.id,
-        originOpNumber: opNumber,
-        originDate: op.date,
-      });
+
+    if (orderTotal >= 0.01) {
+      const multiMonthsMatch = op.description.match(/\b(?:на|за)\s+(\d{1,2})\s*мес/iu);
+      const durationMonths =
+        multiMonthsMatch && Number(multiMonthsMatch[1]) >= 2
+          ? Number(multiMonthsMatch[1])
+          : undefined;
+      const periodicAmount =
+        op.periodicPaymentAmount ||
+        (durationMonths ? round2(orderTotal / durationMonths) : undefined);
+
+      const subjectText = `${op.nomenclatureName || ''} ${op.description || ''}`.trim();
+      const existingSameOrder = state.openOrders.find((o) => o.originOpId === op.id);
+      if (!existingSameOrder) {
+        state.openOrders.push({
+          key: `ord-${direction}-${op.id}`,
+          direction,
+          docType1C:
+            direction === 'supplier'
+              ? op.category === 'supplier_invoice'
+                ? 'СчетОтПоставщика'
+                : 'ОперацияБух'
+              : op.category === 'customer_invoice'
+                ? 'СчетПокупателю'
+                : 'ОперацияБух',
+          counterpartyName: op.counterpartyName || '',
+          counterpartyInn: op.counterpartyInn || '',
+          contractName: op.contractName || 'Основной договор',
+          contractNumber: op.contractNumber || undefined,
+          totalAmount: orderTotal,
+          remainingAmount: orderTotal,
+          quantity: op.quantity,
+          unitPrice: op.unitPrice,
+          periodicAmount,
+          durationMonths,
+          vatRate: op.vatRate,
+          vatRule: op.vatRule,
+          subjectSummary: op.nomenclatureName || op.description,
+          keywordStems: extractKeywordStems1C(subjectText),
+          status: 'open',
+          originOpId: op.id,
+          originOpNumber: opNumber,
+          originDate: op.date,
+        });
+      }
     }
   }
 
@@ -1805,11 +1957,11 @@ export function advanceVirtual1CStateWithOperation(
     (op.category === 'bank_out' || op.category === 'bank_in') &&
     /возврат\p{L}*.*(?:аванс|предоплат)|возвращ\p{L}*.*(?:аванс|предоплат)/iu.test(op.description)
   ) {
-    const cancelSide: VirtualOpenOrder1C['side'] =
-      op.category === 'bank_out' ? 'customer' : 'supplier';
+    const cancelDirection: VirtualOpenOrder1C['direction'] =
+      op.category === 'bank_out' ? 'buyer' : 'supplier';
     const cpNormCancel = normalizeCounterpartyKey1C(op.counterpartyName || '');
     for (const ord of state.openOrders) {
-      if (ord.side !== cancelSide || ord.status !== 'open') continue;
+      if (ord.direction !== cancelDirection || ord.status !== 'open') continue;
       if (cpNormCancel && normalizeCounterpartyKey1C(ord.counterpartyName) !== cpNormCancel) {
         continue;
       }
@@ -1818,20 +1970,22 @@ export function advanceVirtual1CStateWithOperation(
     }
   }
 
-  // Fulfill / reduce openOrders upon sale_goods / sale_services / purchase_*
+  // Fulfill / reduce openOrders upon sale_goods / sale_services / purchase_* / expense_report
   if (
     (op.category === 'sale_goods' ||
       op.category === 'sale_services' ||
-      op.category.startsWith('purchase_')) &&
+      op.category.startsWith('purchase_') ||
+      op.category === 'expense_report') &&
     op.amount >= 0.01
   ) {
-    const targetSide: VirtualOpenOrder1C['side'] = op.category.startsWith('purchase_')
-      ? 'supplier'
-      : 'customer';
+    const targetDirection: VirtualOpenOrder1C['direction'] =
+      op.category.startsWith('purchase_') || op.category === 'expense_report'
+        ? 'supplier'
+        : 'buyer';
     const cpNormFulfill = normalizeCounterpartyKey1C(op.counterpartyName || '');
     const opStems = extractKeywordStems1C(`${op.nomenclatureName || ''} ${op.description || ''}`);
     const candidates = state.openOrders
-      .filter((o) => o.side === targetSide && o.status === 'open' && o.remainingAmount >= 0.01)
+      .filter((o) => o.direction === targetDirection && o.status === 'open' && o.remainingAmount >= 0.01)
       .filter(
         (o) =>
           !cpNormFulfill ||
@@ -2505,3 +2659,117 @@ export function buildVirtual1CStateTimeline(
     displayNumberByOpId,
   };
 }
+
+export interface CanonicalCounterpartyRecord1C {
+  canonicalName: string;
+  inn: string;
+  kpp: string;
+  bik?: string;
+  bankName?: string;
+  bankAccount?: string;
+  source: 'db_1c' | 'excel_explicit';
+}
+
+/**
+ * Builds a session-wide canonical counterparty registry ("1 company = 1 canonical INN")
+ * from `db1C` + all operations/drafts that explicitly carry a valid 10/12-digit INN in the task files.
+ * Prevents `KNOWN_MAJOR_RUSSIAN_COUNTERPARTIES`, EGRUL, or synthetic generators from assigning
+ * a second conflicting INN to the same company on rows without an inline INN.
+ */
+export function buildCanonicalCounterpartyRegistry1C(
+  db1C: Database1CSnapshot | null,
+  items: Array<{
+    description?: string;
+    counterpartyName?: string;
+    counterpartyInn?: string;
+    counterpartyKpp?: string;
+    counterpartyBik?: string;
+    counterpartyBankName?: string;
+    counterpartyBankAccount?: string;
+    counterpartySource?: string;
+    category?: string;
+  }>
+): Map<string, CanonicalCounterpartyRecord1C> {
+  const registry = new Map<string, CanonicalCounterpartyRecord1C>();
+
+  // Detect own organization INN/name so it never pollutes commercial counterparties
+  let ownOrgInn = (db1C?.organization?.inn || '').replace(/\D/g, '');
+  let ownOrgKey = db1C?.organization?.name
+    ? normalizeCounterpartyKey1C(db1C.organization.name)
+    : '';
+  for (const it of items) {
+    if (it.description) {
+      const ch = extractCharterCapitalInfo1C(it.description);
+      if (ch.ownOrganization) {
+        if (ch.ownOrganization.inn && !ownOrgInn) ownOrgInn = ch.ownOrganization.inn;
+        if (ch.ownOrganization.name && !ownOrgKey) {
+          ownOrgKey = normalizeCounterpartyKey1C(ch.ownOrganization.name);
+        }
+      }
+    }
+  }
+
+  for (const cp of db1C?.counterparties ?? []) {
+    const name = normalizeLegalEntityName1C(cp.name || cp.fullName || '');
+    const key = normalizeCounterpartyKey1C(name);
+    const inn = (cp.inn || '').replace(/\D/g, '');
+    if (!key || (ownOrgKey && key === ownOrgKey) || (ownOrgInn && inn === ownOrgInn)) continue;
+    if (inn.length === 10 || inn.length === 12) {
+      registry.set(key, {
+        canonicalName: name,
+        inn,
+        kpp: (cp.kpp || '').replace(/\D/g, ''),
+        bik: cp.bik || undefined,
+        bankName: cp.bankName || undefined,
+        bankAccount: cp.bankAccount || undefined,
+        source: 'db_1c',
+      });
+    }
+  }
+
+  for (const it of items) {
+    if (it.category === 'charter_capital') continue;
+    const rawName = (it.counterpartyName || '').trim();
+    if (!rawName || rawName.includes(';')) continue;
+    const name = normalizeLegalEntityName1C(rawName);
+    const key = normalizeCounterpartyKey1C(name);
+    if (!key || (ownOrgKey && key === ownOrgKey)) continue;
+
+    // Prefer explicit INN extracted directly from the row's own description/cell over educational_generated INNs
+    const descInnMatch = (it.description || '').match(/ИНН[\s.:№-]*(\d{10}|\d{12})\b/i);
+    const descKppMatch = (it.description || '').match(/КПП[\s.:№-]*(\d{9})\b/i);
+    const isExplicitSource =
+      Boolean(descInnMatch) ||
+      it.counterpartySource === 'excel_explicit' ||
+      it.counterpartySource === 'db_1c';
+    const inn = (descInnMatch?.[1] || (isExplicitSource ? it.counterpartyInn : '') || '').replace(
+      /\D/g,
+      ''
+    );
+    if ((inn.length !== 10 && inn.length !== 12) || (ownOrgInn && inn === ownOrgInn)) continue;
+
+    const kpp = (descKppMatch?.[1] || it.counterpartyKpp || '').replace(/\D/g, '');
+    const existing = registry.get(key);
+    if (!existing) {
+      registry.set(key, {
+        canonicalName: name,
+        inn,
+        kpp: kpp || (inn.length === 10 ? `${inn.slice(0, 4)}01001` : ''),
+        bik: it.counterpartyBik || undefined,
+        bankName: it.counterpartyBankName || undefined,
+        bankAccount: it.counterpartyBankAccount || undefined,
+        source: 'excel_explicit',
+      });
+    } else {
+      if (!existing.kpp && kpp) existing.kpp = kpp;
+      if (!existing.bik && it.counterpartyBik) existing.bik = it.counterpartyBik;
+      if (!existing.bankName && it.counterpartyBankName) existing.bankName = it.counterpartyBankName;
+      if (!existing.bankAccount && it.counterpartyBankAccount) {
+        existing.bankAccount = it.counterpartyBankAccount;
+      }
+    }
+  }
+
+  return registry;
+}
+

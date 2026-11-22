@@ -9,6 +9,7 @@ import {
   DocType1CBP30,
   EgrulCandidate,
   EntityBindingStatus,
+  FounderShareItem1C,
   OperationAmountMode,
   OperationCategory,
   OperationReadinessStatus,
@@ -25,8 +26,15 @@ import {
   getDocumentSpecByCategory,
 } from '@/lib/engine/documentSpecs1C';
 import {
+  cleanNomenclatureName1C,
   ExplicitCorrespondenceHint1C,
+  extractCharterCapitalInfo1C,
+  extractEmployeeTaxDeductions1C,
   extractExplicitCorrespondencesFromText1C,
+  extractPersonFioFromText1C,
+  extractUsefulLifeMonths1C,
+  normalizeEmployeeOrFounderName1C,
+  normalizeLegalEntityName1C,
 } from '@/lib/engine/entityNormalizer1C';
 import {
   buildOperationMentorGuide1C,
@@ -35,12 +43,15 @@ import {
 import { calculateOsvReport, normalizeSubcontoLabel } from '@/lib/engine/osvCalculator';
 import {
   advanceVirtual1CStateWithOperation,
+  buildCanonicalCounterpartyRegistry1C,
   buildStep00DirectoryPrepSteps,
   buildVirtual1CStateTimeline,
+  CanonicalCounterpartyRecord1C,
   createInitialVirtual1CState,
   extractFinancialNotesFromText1C,
   extractRecurringContractTerms1C,
   matchTargetActiveFinancialNote1C,
+  normalizeCounterpartyKey1C,
   normalizePersonIdentityKey1C,
   resolveActiveWritsOfExecution1C,
   resolveAlimonyPayable7641,
@@ -49,7 +60,10 @@ import {
   extractKeywordStems1C,
   UnpaidSupplierResolution1C,
 } from '@/lib/engine/virtual1CState';
-import { resolveOperationAmountAndLinks } from '@/lib/engine/amountAndLinkResolver';
+import {
+  resolveOperationAmountAndLinks,
+  synchronizeStep01ResolverTraceWithFinalOp,
+} from '@/lib/engine/amountAndLinkResolver';
 import {
   inferOrganizationRegionCode,
   selectBestEgrulCandidate,
@@ -134,6 +148,12 @@ function normalizeInflectedSurnameWithInitials(raw: string): string {
 
 export function extractFounderFioFromDescription(text: string): string {
   const cleaned = text.replace(/[«»"'„“”()]/g, ' ').replace(/\s+/g, ' ').trim();
+  const leadingShare = cleaned.match(
+    /^([А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)\s+свою\s+долю\s+в\s+(?:ук|уставн)/iu
+  );
+  if (leadingShare?.[1]) {
+    return normalizeEmployeeOrFounderName1C(leadingShare[1]);
+  }
   const re =
     /(?:доли(?:\s+в\s+уставн\p{L}+\s+капитал\p{L}*)?(?:\s+учредителя|\s+участника|\s+от)?|(?:взнос\p{L}*|вклад\p{L}*)\s+(?:в\s+уставн\p{L}+\s+капитал\p{L}*\s+)?(?:от\s+)?(?:учредителя\s+|участника\s+)|(?:взнос\p{L}*|вклад\p{L}*)\s+в\s+уставн\p{L}+\s+капитал\p{L}*\s+(?:от\s+)?|(?:от\s+)?(?:учредителя|участника)\s+)([А-ЯЁ][а-яё]+(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.?|[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?))?)/u;
   const m = cleaned.match(re);
@@ -142,23 +162,32 @@ export function extractFounderFioFromDescription(text: string): string {
       .replace(/\s+(?:Сумма|НДС|Без|По|Договор|Счет|Счёт|В|На|в|на).*$/u, '')
       .trim();
     if (candidate.length >= 2) {
-      return normalizeInflectedSurnameWithInitials(candidate);
+      return normalizeEmployeeOrFounderName1C(candidate, { obliqueContext: true });
     }
+  }
+  const fallbackFio = extractPersonFioFromText1C(text);
+  if (fallbackFio) {
+    return normalizeEmployeeOrFounderName1C(fallbackFio, { obliqueContext: true });
   }
   return '';
 }
 
 export function extractAccountableFioFromDescription(text: string): string {
+  const viaPerson = extractPersonFioFromText1C(text);
+  if (viaPerson) {
+    return normalizeEmployeeOrFounderName1C(viaPerson);
+  }
   const cleaned = text.replace(/[«»"'„“”()]/g, ' ').replace(/\s+/g, ' ').trim();
   const patterns = [
-    /(?:выдан\p{L}*|перечислен\p{L}*|возвращ\p{L}*|внесен\p{L}*|авансов\p{L}*\s+отч[её]т|отчитал(?:ся|ась))\s+(?:из\s+касс\p{L}*\s+|с\s+р\/с\s+|на\s+карт\p{L}*\s+|подотч[её]т\s+|под\s+отч[её]т\s+|остат\p{L}*\s+подотч[её]тн\p{L}*\s+сумм\s+|сотрудник\p{L}*\s+|работник\p{L}*\s+)*([А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)/u,
+    /через\s+([А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)/u,
+    /(?:выдан\p{L}*|перечислен\p{L}*|возвращ\p{L}*|внесен\p{L}*|авансов\p{L}*\s+отч[её]т|отчитал(?:ся|ась))\s+(?:из\s+касс\p{L}*\s+|с\s+р\/с\s+|на\s+карт\p{L}*\s+|подотч[её]т\s+|под\s+отч[её]т\s+|остат\p{L}*\s+подотч[её]тн\p{L}*\s+сумм\s+|сотрудник\p{L}*\s+|работник\p{L}*\s+|каменщик\p{L}*\s+)*([А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)/u,
     /([А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)\s+(?:подотч[её]т|под\s+отч[её]т|на\s+хоз|на\s+командиров)/u,
     /(?:подотч[её]т|под\s+отч[её]т)\s+(?:сотрудник\p{L}*\s+|работник\p{L}*\s+)?([А-ЯЁ][а-яё]{2,}(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.?|[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)))/u,
   ];
   for (const re of patterns) {
     const m = cleaned.match(re);
     if (m && m[1]) {
-      return normalizeInflectedSurnameWithInitials(m[1]);
+      return normalizeEmployeeOrFounderName1C(m[1]);
     }
   }
   return '';
@@ -521,6 +550,8 @@ export interface RawDraftOperationInput {
   incomingDocDate?: string;
   description: string;
   amount: number;
+  rawExcelAmount?: number;
+  orderTotalAmount?: number;
   needsAmount?: boolean;
   amountCalculationNote?: string;
   vatRate?: number;
@@ -554,6 +585,15 @@ export interface RawDraftOperationInput {
   employeeName?: string;
   employeePosition?: string;
   monthlySalary?: number;
+  employeeChildCount?: number;
+  employeeIsSingleParent?: boolean;
+  employeePropertyDeduction?: number;
+  founderShares?: FounderShareItem1C[];
+  ownOrganization?: {
+    name: string;
+    inn: string;
+    kpp?: string;
+  };
   injuryInsuranceRate?: number;
   usefulLifeMonths?: number;
   depreciationBaseAmount?: number;
@@ -584,6 +624,7 @@ export interface BatchSequentialContext {
   futureOperations?: QueuedOperation[];
   currentOpNumber?: number;
   virtualStateBefore?: Virtual1CStateSnapshot;
+  canonicalCounterpartyMap?: Map<string, CanonicalCounterpartyRecord1C>;
   reportingYear?: number;
   defaultBik?: string;
   defaultBankName?: string;
@@ -769,6 +810,7 @@ export function detectOperationClassification(
     | 'description'
     | 'nomenclatureName'
     | 'counterpartyName'
+    | 'actionSequenceHint'
     | 'directionHint'
     | 'explicitDebit'
     | 'explicitCredit'
@@ -1161,8 +1203,14 @@ export function detectOperationClassification(
     };
   }
 
-  // 3. Advance offset
-  if (/зачет\s+аванс|корректировка\s+долга/iu.test(itemAndDescText)) {
+  // 3. Advance offset (unless penalty/court claim debt adjustment onto 91.02)
+  const hintLowerForClass = ((draft as RawDraftOperationInput).actionSequenceHint ?? '')
+    .toLowerCase()
+    .replace(/ё/g, 'е');
+  if (
+    /зачет\s+аванс|корректировка\s+долга/iu.test(itemAndDescText) &&
+    !/неуй?стойк|штраф|пен[ия]|судебн|иск\p{L}*|91\.02/iu.test(`${itemAndDescText} ${hintLowerForClass}`)
+  ) {
     return {
       category: 'advance_offset',
       docType1C: 'КорректировкаДолга',
@@ -1172,7 +1220,7 @@ export function detectOperationClassification(
 
   // 4. Workwear / special tooling / inventory issued to an employee (10.10 / 10.09 -> 20/26 + МЦ.02/МЦ.04)
   const hasSupplierReceiptVerb =
-    /(?:^|[^\p{L}])(?:поступил\p{L}*|приобретен\p{L}*|закуплен\p{L}*|купил\p{L}*|получен\p{L}*\s+от|оплачен\p{L}*|перечислен\p{L}*)(?=$|[^\p{L}])/iu.test(
+    /(?:^|[^\p{L}])(?:поступил\p{L}*|приобретен\p{L}*|закуплен\p{L}*|купил\p{L}*|оприходован\p{L}*|получен\p{L}*\s+(?!оплат|доплат|аванс|предоплат|денежн|выручк|счет(?!-фактур)|задолженност|кредит|за[её]м|наличн)|оплачен\p{L}*|перечислен\p{L}*)(?=$|[^\p{L}])/iu.test(
       itemAndDescText
     );
   const hasExternalCounterpartyMarker =
@@ -1516,7 +1564,9 @@ export function detectOperationClassification(
   // 13b. Employee Writ of Execution Registration (Исполнительный лист — удержание алиментов 76.41)
   if (
     draft.explicitCredit === '76.41' ||
-    (!/неуй?стойк|штраф|пен[ия]|по\s+дог/iu.test(itemAndDescText) &&
+    (!/неуй?стойк|штраф|пен[ия]|по\s+дог|иск\p{L}*|судебн|арбитраж|ооо(?=$|[^\p{L}])|ао(?=$|[^\p{L}])|пао(?=$|[^\p{L}])|зао(?=$|[^\p{L}])/iu.test(
+      fullText
+    ) &&
       /поступил\p{L}*\s+исполнительн\p{L}*\s+лист|исполнительн\p{L}*\s+лист.*(?:алимент|удержан|заработк|доход|в\s+пользу\s+[а-яё]|взыскан\p{L}*\s+с\s+[а-яё])|взыскан\p{L}*\s+алимент/iu.test(
         itemAndDescText
       ))
@@ -1548,12 +1598,24 @@ export function detectOperationClassification(
       itemAndDescText
     )
   ) {
+    const isBankPenaltyOut =
+      draft.directionHint === 'out' ||
+      /оплат|оплачен|списан\p{L}*.*(?:р\/с|расчетн)|перечислен/iu.test(itemAndDescText);
+    const isDebtAdjustmentPenalty =
+      !isBankPenaltyOut &&
+      (/корректировк\p{L}*\s+долг/iu.test(`${itemAndDescText} ${hintLowerForClass}`) ||
+        (/судебн\p{L}*\s+решени\p{L}*.*по\s+иску|по\s+дог\.?\s*№?\s*\d+/iu.test(itemAndDescText) &&
+          !draft.explicitCredit?.startsWith('76')));
     return {
       category: 'penalty_claim',
-      docType1C:
-        draft.directionHint === 'out' || /оплат|оплачен|списан|перечислен/i.test(itemAndDescText)
-          ? 'СписаниеСРасчетногоСчета'
+      docType1C: isBankPenaltyOut
+        ? 'СписаниеСРасчетногоСчета'
+        : isDebtAdjustmentPenalty
+          ? 'КорректировкаДолга'
           : 'ОперацияБух',
+      documentSubKind1C: isDebtAdjustmentPenalty
+        ? 'Прочие корректировки (начисление штрафных санкций на счёт 60.01 / 91.02)'
+        : undefined,
     };
   }
 
@@ -1567,14 +1629,19 @@ export function detectOperationClassification(
       /в\s+виде\s+|бытовк|станок|станк|леса|бетоносмесител|оборудован|основн\p{L}*\s+средств|имуществ|ос(?=$|[^\p{L}])/iu.test(
         itemAndDescText
       ) && !/денежн|наличн|на\s+р\/с|на\s+расчетн/iu.test(itemAndDescText);
+    const isCommissionedInKind =
+      isInKindAsset &&
+      /введен\p{L}*.*в\s+эксплуатац|принят\p{L}*\s+к\s+уч[её]т/iu.test(itemAndDescText);
     const isCash = /(?:^|[^\p{L}])пко(?=$|[^\p{L}])|в кассу|наличн/iu.test(itemAndDescText);
     return {
       category: 'founder_contribution',
-      docType1C: isInKindAsset
-        ? 'ОперацияБух'
-        : isCash
-          ? 'ПоступлениеНаличных'
-          : 'ПоступлениеНаРасчетныйСчет',
+      docType1C: isCommissionedInKind
+        ? 'ПринятиеКУчетуОС'
+        : isInKindAsset
+          ? 'ОперацияБух'
+          : isCash
+            ? 'ПоступлениеНаличных'
+            : 'ПоступлениеНаРасчетныйСчет',
       documentSubKind1C: isInKindAsset
         ? 'Вклад учредителя в УК основным средством / имуществом (Дт 08.04.1 Кт 75.01 → Дт 01.01 Кт 08.04.1)'
         : 'Прочее поступление (вклад в УК — счёт 75.01)',
@@ -1624,12 +1691,16 @@ export function detectOperationClassification(
   }
 
   // 19. Sales / Shipment / Delivery of Finished Goods, Goods, Works, Services (Реализация товаров, продукции, услуг)
+  // Guard strictly against supplier material/equipment receipts that contain "Передача материалов в производство работ"!
   if (
-    !/от\s+поставщик|поставлен\p{L}*\s+поставщик/iu.test(itemAndDescText) &&
+    !hasSupplierReceiptVerb &&
+    !/от\s+поставщик|поставлен\p{L}*\s+поставщик|переда(?:н|ч)\p{L}*.*(?:в|на)\s+производств\p{L}*\s+работ/iu.test(
+      itemAndDescText
+    ) &&
     (/(?:^|[^\p{L}])(?:поставлен[аоы]?|отгружен\p{L}*|реализован\p{L}*|прода[нж]\p{L}*)\s+(?:готов\p{L}*\s+|собственн\p{L}*\s+)?(?:продукц|товар|издели|оконн\p{L}*\s+блок|дверн\p{L}*\s+блок|конструкц|парти|покупател|заказчик|клиент|в\s+адрес|ооо|ао|пао|зао|ип|\d)/iu.test(
       itemAndDescText
     ) ||
-      /(?:^|[^\p{L}])(?:реализован\p{L}*|отгружен\p{L}*)(?=$|[^\p{L}])|(?:выполнен|сдан|сдал|передан)\p{L}*\s+(?:\p{L}+\s+){0,4}работ|выставлен\p{L}*\s+акт|(?:оказан\p{L}*|реализаци\p{L}*)\s+(?:\p{L}+\s+){0,4}услуг\p{L}*\s+(?:заказчик|покупател|клиент|ооо|ао|пао|зао|ип)|акт\s+(?:оказанных\s+услуг|выполненных\s+работ|приемки)|реализация\s+(?:товаров|продукции|услуг|работ)|выручка\s+от\s+реализац/iu.test(
+      /(?:^|[^\p{L}])(?:реализован\p{L}*|отгружен\p{L}*)(?=$|[^\p{L}])|(?:выполнен|сдан|сдал|передан)\p{L}*\s+(?!материал|спецодежд|сырь|инвентар|в\s+производств|на\s+производств)(?:\p{L}+\s+){0,4}работ|выставлен\p{L}*\s+акт|(?:оказан\p{L}*|реализаци\p{L}*)\s+(?:\p{L}+\s+){0,4}услуг\p{L}*\s+(?:заказчик|покупател|клиент|ооо|ао|пао|зао|ип)|акт\s+(?:оказанных\s+услуг|выполненных\s+работ|приемки)|реализация\s+(?:товаров|продукции|услуг|работ)|выручка\s+от\s+реализац/iu.test(
         itemAndDescText
       ))
   ) {
@@ -1645,7 +1716,7 @@ export function detectOperationClassification(
     }
     if (
       matchedNomKind === 'Услуга' ||
-      /оказан\p{L}*\s+(?:\p{L}+\s+){0,4}услуг|реализация\s+(?:\p{L}+\s+){0,2}услуг|(?:выполнен|сдан|сдал|передан)\p{L}*\s+(?:\p{L}+\s+){0,4}работ|выставлен\p{L}*\s+акт|акт\s+(?:выполненных\s+работ|приемки)|аренд/iu.test(
+      /оказан\p{L}*\s+(?:\p{L}+\s+){0,4}услуг|реализация\s+(?:\p{L}+\s+){0,2}услуг|(?:выполнен|сдан|сдал|передан)\p{L}*\s+(?!материал|спецодежд|в\s+производств|на\s+производств)(?:\p{L}+\s+){0,4}работ|выставлен\p{L}*\s+акт|акт\s+(?:выполненных\s+работ|приемки)|аренд/iu.test(
         itemAndDescText
       )
     ) {
@@ -2140,12 +2211,20 @@ export function bindAndGenerateOperation(
   let contractName = (draft.contractName ?? '').trim();
   let contractNumber = (draft.contractNumber ?? '').trim();
   let contractDate = (draft.contractDate ?? '').trim();
-  let nomName = (draft.nomenclatureName ?? '').trim();
+  let nomName = cleanNomenclatureName1C((draft.nomenclatureName ?? '').trim(), draft.description);
   let warehouseName = (draft.warehouseName ?? '').trim();
   const warehouseToName = (draft.warehouseToHint ?? '').trim();
   let expenseItemName = (draft.expenseItemName ?? '').trim();
   let cashFlowItemName = (draft.cashFlowItemName ?? '').trim();
-  let employeeName = (draft.employeeName ?? '').trim();
+  let employeeName = normalizeEmployeeOrFounderName1C((draft.employeeName ?? '').trim());
+
+  const parsedDeductionHints = extractEmployeeTaxDeductions1C(draft.description);
+  const resolvedEmployeeChildCount =
+    draft.employeeChildCount ?? parsedDeductionHints.childCount;
+  const resolvedEmployeeIsSingleParent =
+    draft.employeeIsSingleParent ?? parsedDeductionHints.isSingleParent;
+  const resolvedEmployeePropertyDeduction =
+    draft.employeePropertyDeduction ?? parsedDeductionHints.propertyTaxDeduction;
 
   let resolvedAlimonyRecipientName = (draft.alimonyRecipientName ?? '').trim();
   let resolvedAlimonyRecipientInn = (draft.alimonyRecipientInn ?? '').replace(/\D/g, '');
@@ -2155,6 +2234,56 @@ export function bindAndGenerateOperation(
 
   const descNormForLookup = normalizeEntityKey(draft.description);
   const preClassification = detectCategoryAndDocType(draft);
+
+  const charterExtracted =
+    preClassification.category === 'charter_capital'
+      ? extractCharterCapitalInfo1C(
+          draft.description,
+          draft.rawExcelAmount ?? Math.abs(draft.amount)
+        )
+      : null;
+  const resolvedFounderShares: FounderShareItem1C[] | undefined =
+    draft.founderShares && draft.founderShares.length > 0
+      ? draft.founderShares
+      : charterExtracted && charterExtracted.founders.length > 0
+        ? charterExtracted.founders.map((f) => ({
+            founderName: f.founderName,
+            sharePercent: f.sharePercent,
+            amount: f.amount ?? 0,
+          }))
+        : undefined;
+  const resolvedOwnOrganization =
+    draft.ownOrganization ?? charterExtracted?.ownOrganization;
+
+  // On charter_capital, never store own organization ("ООО «Завод»") as external counterparty!
+  if (preClassification.category === 'charter_capital') {
+    const ownOrgInn =
+      resolvedOwnOrganization?.inn ||
+      db1C?.organization.inn ||
+      batchContext?.virtualStateBefore?.ownOrganization?.inn ||
+      '';
+    const ownOrgName =
+      resolvedOwnOrganization?.name ||
+      db1C?.organization.name ||
+      batchContext?.virtualStateBefore?.ownOrganization?.name ||
+      '';
+    if (
+      (cpInn && ownOrgInn && cpInn === ownOrgInn.replace(/\D/g, '')) ||
+      (cpName &&
+        ownOrgName &&
+        normalizeCounterpartyKey1C(cpName) === normalizeCounterpartyKey1C(ownOrgName)) ||
+      /^\s*(?:ооо|ао|пао|зао)(?=$|[^\p{L}])/iu.test(cpName)
+    ) {
+      cpName = '';
+      cpInn = '';
+      cpKpp = '';
+      cpOgrn = '';
+      cpSource = 'unresolved';
+    }
+    if (!cpName && resolvedFounderShares && resolvedFounderShares.length === 1) {
+      cpName = resolvedFounderShares[0].founderName;
+    }
+  }
 
   // Preserve recipient INN / hint before clearing commercial counterparty on employee alimony ops
   if (
@@ -2194,6 +2323,7 @@ export function bindAndGenerateOperation(
         'os_commissioning',
         'payroll_accrual',
         'hr_hire',
+        'policy_event',
         'writ_of_execution',
         'accountable_issue',
         'expense_report',
@@ -2201,7 +2331,7 @@ export function bindAndGenerateOperation(
         'employee_settlement_73',
       ].includes(preClassification.category)
     ) {
-      employeeName = cpName;
+      employeeName = normalizeEmployeeOrFounderName1C(cpName);
     }
     cpName = '';
     cpInn = '';
@@ -2212,15 +2342,29 @@ export function bindAndGenerateOperation(
     contractDate = '';
   }
 
+  const involvesAccountableViaPurchase =
+    (preClassification.category === 'purchase_materials' ||
+      preClassification.category === 'purchase_equipment' ||
+      preClassification.category === 'purchase_services') &&
+    (/через\s+[А-ЯЁа-яё]/iu.test(draft.description) ||
+      /авансов\p{L}*\s+отчет/iu.test(draft.actionSequenceHint ?? ''));
+
   if (
     !employeeName &&
-    ['accountable_issue', 'expense_report', 'accountable_return', 'employee_settlement_73'].includes(
-      preClassification.category
-    )
+    ([
+      'accountable_issue',
+      'expense_report',
+      'accountable_return',
+      'employee_settlement_73',
+      'workwear_issue',
+      'hr_hire',
+      'policy_event',
+    ].includes(preClassification.category) ||
+      involvesAccountableViaPurchase)
   ) {
     const extractedAccFio = extractAccountableFioFromDescription(draft.description);
     if (extractedAccFio) {
-      employeeName = extractedAccFio;
+      employeeName = normalizeEmployeeOrFounderName1C(extractedAccFio);
     }
   }
 
@@ -2265,8 +2409,22 @@ export function bindAndGenerateOperation(
     draft.explicitCredit === '75' ||
     isFounderContributionText(draft.description);
 
-  // Extract founder FIO for charter capital share contributions / dividends
-  if (!isStrictlyInternalNoCpOp && !cpName && founderShareOp) {
+  if (preClassification.category === 'founder_contribution' && cpName) {
+    const isLeadingNominativeShare = /^\s*[А-ЯЁ][а-яё-]+\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?\s+свою\s+долю/iu.test(
+      draft.description
+    );
+    cpName = normalizeEmployeeOrFounderName1C(cpName, {
+      obliqueContext: !isLeadingNominativeShare,
+    });
+  }
+
+  // Extract founder FIO for charter capital share contributions / dividends (excluding multi-founder charter_capital)
+  if (
+    !isStrictlyInternalNoCpOp &&
+    !cpName &&
+    founderShareOp &&
+    !(preClassification.category === 'charter_capital' && (resolvedFounderShares?.length ?? 0) > 1)
+  ) {
     const extractedFounderFio = extractFounderFioFromDescription(draft.description);
     if (extractedFounderFio) {
       const matchedFounder1C = matchPersonOrCounterpartyIn1C(extractedFounderFio, cpInn, db1C);
@@ -2276,10 +2434,10 @@ export function bindAndGenerateOperation(
         cpKpp = matchedFounder1C.kpp || cpKpp;
         cpSource = 'db_1c';
       } else {
-        cpName = normalizeGenitiveFioToNominative(extractedFounderFio);
+        cpName = normalizeEmployeeOrFounderName1C(extractedFounderFio, { obliqueContext: true });
       }
     } else if (employeeName) {
-      cpName = normalizeGenitiveFioToNominative(employeeName);
+      cpName = normalizeEmployeeOrFounderName1C(employeeName);
     } else if (db1C) {
       const mentionedPerson = findPersonMentionedInDescription1C(draft.description, db1C);
       if (mentionedPerson) {
@@ -2288,6 +2446,34 @@ export function bindAndGenerateOperation(
         cpSource = 'db_1c';
       }
     }
+  }
+
+  // Match founder name against prior 75.01 charter capital declarations (so "Сидорова С.С." -> "Сидоров С.С." with 100% subconto unity)
+  if (
+    preClassification.category === 'founder_contribution' &&
+    cpName &&
+    batchContext?.priorOperations
+  ) {
+    const targetFounderKey = normalizePersonIdentityKey1C(cpName);
+    for (const prevCharter of batchContext.priorOperations) {
+      if (prevCharter.category !== 'charter_capital') continue;
+      const candidateNames = [
+        ...(prevCharter.founderShares?.map((fs) => fs.founderName) ?? []),
+        ...prevCharter.entries.filter((e) => e.debit === '75.01').map((e) => e.debitSubconto),
+      ].filter(Boolean);
+      const matchedName = candidateNames.find(
+        (n) => normalizePersonIdentityKey1C(n) === targetFounderKey
+      );
+      if (matchedName) {
+        cpName = matchedName;
+        break;
+      }
+    }
+  }
+
+  // Normalize legal entity quotes & typography
+  if (cpName && !founderShareOp && inferCounterpartyKind(cpName, cpInn) !== 'ФизическоеЛицо') {
+    cpName = normalizeLegalEntityName1C(cpName) || cpName;
   }
 
   // If counterparty was not extracted by legal-entity regex, check if any known 1C counterparty or individual appears in description
@@ -2322,10 +2508,22 @@ export function bindAndGenerateOperation(
     }
   }
 
-  // --- 1. Bind Counterparty / Individual strictly with Priority (1: Excel explicit -> 2: 1C DB -> 3: EGRUL -> 4: New/Educational) ---
+  // --- 1. Bind Counterparty / Individual strictly with Priority (1: Excel explicit / Canonical Registry -> 2: 1C DB -> 3: EGRUL -> 4: New/Educational) ---
   let cpBinding: EntityBindingStatus = { status: 'not_required' };
   let matchedCpIdName = '';
   let matchedCpKind: DirectoryAutocompleteOption1C['kind'] | undefined;
+
+  if (cpName && batchContext?.canonicalCounterpartyMap) {
+    const canonRec = batchContext.canonicalCounterpartyMap.get(normalizeCounterpartyKey1C(cpName));
+    if (canonRec) {
+      cpName = canonRec.canonicalName || cpName;
+      if (canonRec.inn) {
+        cpInn = canonRec.inn;
+        cpKpp = canonRec.kpp || cpKpp;
+        cpSource = canonRec.source;
+      }
+    }
+  }
 
   if (cpName || cpInn) {
     const hadExplicitInnFromExcel = cpInn.length === 10 || cpInn.length === 12;
@@ -2364,20 +2562,25 @@ export function bindAndGenerateOperation(
         cpSource = 'excel_explicit';
       }
       if (draft.egrulCandidates && draft.egrulCandidates.length > 0 && !hadExplicitInnFromExcel) {
-        const homeRegion = inferOrganizationRegionCode(db1C, orgDefaultBik);
+        const homeRegion = inferOrganizationRegionCode({
+          organizationInn: db1C?.organization.inn,
+          organizationBik: orgDefaultBik,
+        });
         const best =
-          selectBestEgrulCandidate(draft.egrulCandidates, cpName, homeRegion) ??
-          draft.egrulCandidates[0];
+          selectBestEgrulCandidate(draft.egrulCandidates, {
+            targetName: cpName,
+            homeRegionCode: homeRegion,
+          }) ?? draft.egrulCandidates[0];
         cpInn = best.inn;
         cpKpp = cpKpp || best.kpp;
         cpOgrn = cpOgrn || best.ogrn;
         cpSource = 'egrul_verified';
       } else if (!cpInn && cpName && batchContext?.priorOperations?.length) {
-        const normTargetCp = normalizeEntityKey(cpName);
+        const normTargetCp = normalizeCounterpartyKey1C(cpName);
         for (let i = batchContext.priorOperations.length - 1; i >= 0; i--) {
           const prior = batchContext.priorOperations[i];
           if (
-            normalizeEntityKey(prior.counterpartyName) === normTargetCp &&
+            normalizeCounterpartyKey1C(prior.counterpartyName) === normTargetCp &&
             (prior.counterpartyInn.length === 10 || prior.counterpartyInn.length === 12)
           ) {
             cpInn = prior.counterpartyInn;
@@ -2700,6 +2903,16 @@ export function bindAndGenerateOperation(
     } else if (contractName || contractNumber) {
       if (!contractName && contractNumber) {
         contractName = `Договор № ${contractNumber}${contractDate ? ` от ${contractDate}` : ''}`;
+      } else if (
+        expectedKind === 'СПоставщиком' &&
+        /^основной\s+договор\s+с\s+покупателем$/iu.test(contractName)
+      ) {
+        contractName = 'Основной договор';
+      } else if (
+        expectedKind === 'СПокупателем' &&
+        /^основной\s+договор\s+с\s+поставщиком$/iu.test(contractName)
+      ) {
+        contractName = 'Основной договор';
       }
       contractBinding = {
         status: 'new_for_1c',
@@ -2928,6 +3141,13 @@ export function bindAndGenerateOperation(
       });
       return st;
     })();
+  const resolvedRawExcelAmount =
+    draft.rawExcelAmount !== undefined && draft.rawExcelAmount >= 0.01 && draft.rawExcelAmount < 500_000_000
+      ? round2(draft.rawExcelAmount)
+      : Math.abs(draft.amount) >= 0.01 && Math.abs(draft.amount) < 500_000_000
+        ? round2(Math.abs(draft.amount))
+        : undefined;
+
   const isNonPostingEventCategory =
     category === 'hr_hire' ||
     category === 'writ_of_execution' ||
@@ -2936,16 +3156,34 @@ export function bindAndGenerateOperation(
 
   const hadExplicitInputAmount = isNonPostingEventCategory
     ? false
-    : Math.abs(draft.amount) >= 0.01;
+    : Math.abs(draft.amount) >= 0.01 ||
+      ((category === 'customer_invoice' || category === 'supplier_invoice') &&
+        Boolean(resolvedRawExcelAmount));
   let effectiveDraftAmount = isNonPostingEventCategory
     ? 0
-    : round2(Math.abs(draft.amount));
+    : category === 'customer_invoice' || category === 'supplier_invoice'
+      ? round2(Math.abs(draft.amount || resolvedRawExcelAmount || 0))
+      : round2(Math.abs(draft.amount));
   let resolvedMonthlySalary =
     category === 'hr_hire'
-      ? round2(Math.abs(draft.monthlySalary ?? draft.amount ?? 0))
+      ? round2(Math.abs(draft.monthlySalary || resolvedRawExcelAmount || draft.amount || 0))
       : draft.monthlySalary && draft.monthlySalary > 0
         ? round2(draft.monthlySalary)
         : undefined;
+  if (
+    category === 'hr_hire' &&
+    (!resolvedMonthlySalary || resolvedMonthlySalary < 0.01) &&
+    employeeName &&
+    priorVirtualState.employees
+  ) {
+    const empKey = normalizePersonIdentityKey1C(employeeName);
+    const existingEmp = priorVirtualState.employees.find(
+      (e) => normalizePersonIdentityKey1C(e.fullName) === empKey && e.monthlySalary > 0
+    );
+    if (existingEmp) {
+      resolvedMonthlySalary = round2(existingEmp.monthlySalary);
+    }
+  }
   let resolvedPeriodicPaymentAmount =
     draft.periodicPaymentAmount && draft.periodicPaymentAmount > 0
       ? round2(draft.periodicPaymentAmount)
@@ -2954,10 +3192,11 @@ export function bindAndGenerateOperation(
     draft.interestRatePercent !== undefined && draft.interestRatePercent >= 0
       ? draft.interestRatePercent
       : undefined;
+  const cleanedDraftNotes = draft.financialNotesList?.filter(
+    (n) => n.principal > 0 && n.principal <= 100_000_000
+  );
   let resolvedFinancialNotesList: ParsedFinancialNoteItem1C[] | undefined =
-    draft.financialNotesList && draft.financialNotesList.length > 0
-      ? draft.financialNotesList
-      : undefined;
+    cleanedDraftNotes && cleanedDraftNotes.length > 0 ? cleanedDraftNotes : undefined;
   let resolvedDisposedNoteId: string | undefined = draft.disposedFinancialNoteId;
   let resolverStep01Trace: Step01CalculationBreakdown1C | undefined;
 
@@ -2983,24 +3222,14 @@ export function bindAndGenerateOperation(
   if (
     !inlineSpiMonths &&
     (category === 'os_commissioning' ||
+      category === 'purchase_equipment' ||
       category === 'founder_contribution' ||
       category === 'depreciation_accrual' ||
       category === 'intangible_commissioning' ||
       category === 'intangible_amortization' ||
       category === 'deferred_expense_97')
   ) {
-    const spiM =
-      draft.description.match(
-        /(?:спи|срок\p{L}*\s+(?:полезн\p{L}*\s+)?использ\p{L}*|на\s+срок|\()\s*[:=—-]?\s*(\d{1,3})\s*(?:мес\.?|месяц\p{L}*)/iu
-      ) || draft.description.match(/(\d{1,3})\s*(?:мес\.?|месяц\p{L}*)/iu);
-    const spiYears = !spiM
-      ? draft.description.match(/(?:спи|срок\p{L}*)\s*[:=—-]?\s*(\d{1,2})\s*(?:год\p{L}*|лет)/iu)
-      : null;
-    if (spiM && Number(spiM[1]) > 0) {
-      inlineSpiMonths = Number(spiM[1]);
-    } else if (spiYears && Number(spiYears[1]) > 0) {
-      inlineSpiMonths = Number(spiYears[1]) * 12;
-    }
+    inlineSpiMonths = extractUsefulLifeMonths1C(draft.description);
   }
   if (category === 'os_commissioning' || category === 'os_disposal') {
     const targetPool = Object.values(priorVirtualState.fixedAssets).filter((fa) =>
@@ -3101,6 +3330,10 @@ export function bindAndGenerateOperation(
     }
   }
 
+  if (nomName) {
+    nomName = cleanNomenclatureName1C(nomName, draft.description) || nomName;
+  }
+
   let resolvedUsefulLifeMonths =
     inlineSpiMonths && inlineSpiMonths > 0
       ? Math.round(inlineSpiMonths)
@@ -3117,6 +3350,52 @@ export function bindAndGenerateOperation(
   let stockSourceNote: string | undefined;
   let effectiveQty = draft.quantity;
   let effectiveUnitPrice = draft.unitPrice;
+  if (!effectiveQty) {
+    const inlineQtyMatch = draft.description.match(
+      /(\d+(?:[.,]\d+)?)\s*(?:шт\.?|штук|ед\.?|компл\.?|упак\.?|п\.?\s*м\.?|м2|м3|кв\.?\s*м|тонн|кг)(?=$|[^\p{L}])/iu
+    );
+    if (inlineQtyMatch?.[1]) {
+      const qVal = Number(inlineQtyMatch[1].replace(',', '.'));
+      if (Number.isFinite(qVal) && qVal > 0) effectiveQty = qVal;
+    }
+  }
+  if (!effectiveUnitPrice) {
+    const inlinePriceMatch = draft.description.match(
+      /(?:по\s+цен[еы]|цен[аы](?:\s+за\s+(?:единиц\p{L}*|1\s*шт\.?|шт\.?|ед\.?))?(?:\s+(?:с|без)\s+ндс)?)\s*[:=—-]?\s*(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\d{2,9}(?:[.,]\d{1,2})?)\s*(?:₽|руб|р\.?)/iu
+    );
+    if (inlinePriceMatch?.[1]) {
+      const pVal = Number(inlinePriceMatch[1].replace(/[\s\u00A0]/g, '').replace(',', '.'));
+      if (Number.isFinite(pVal) && pVal > 0 && pVal < 500_000_000) effectiveUnitPrice = pVal;
+    }
+  }
+  // Guard: if effectiveDraftAmount equals unitPrice while quantity > 1 (e.g. #19: 284 × 34 400 = 9 769 600), multiply!
+  if (
+    !isNonPostingEventCategory &&
+    category !== 'bank_out' &&
+    category !== 'bank_in' &&
+    effectiveQty &&
+    effectiveQty > 1 &&
+    effectiveUnitPrice &&
+    effectiveUnitPrice > 0 &&
+    Math.abs(effectiveDraftAmount - effectiveUnitPrice) < 0.01
+  ) {
+    effectiveDraftAmount = round2(effectiveQty * effectiveUnitPrice);
+    amountMode = 'explicit';
+    calculationProvenance = `${effectiveQty} × ${effectiveUnitPrice.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽ = ${effectiveDraftAmount.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽`;
+    amountCalculationNote = calculationProvenance;
+  }
+  const resolvedOrderTotalAmount =
+    draft.orderTotalAmount ??
+    ((category === 'bank_out' || category === 'bank_in') &&
+    /аванс|предоплат/iu.test(draft.description) &&
+    effectiveQty &&
+    effectiveQty > 1 &&
+    effectiveUnitPrice &&
+    effectiveUnitPrice > 0 &&
+    round2(effectiveQty * effectiveUnitPrice) > effectiveDraftAmount + 0.01
+      ? round2(effectiveQty * effectiveUnitPrice)
+      : undefined);
+
   let inheritedVatRule = draft.vatRule;
   let inheritedVatRate = draft.vatRate;
   let taxBreakdownFromBalances: Array<{ account: string; amount: number; name: string }> = [];
@@ -3376,9 +3655,11 @@ export function bindAndGenerateOperation(
         amountCalculationNote = calculationProvenance;
       }
     }
-    if (!nomName) {
-      nomName = resolvedFinancialNotesSummary || 'Долговые ценные бумаги (векселя)';
-    }
+    // Always use clean security nomenclature on 58.02 (never clipped text like '...я третьих лиц')
+    nomName =
+      resolvedFinancialNotesList && resolvedFinancialNotesList.length > 1
+        ? 'Долговые ценные бумаги (векселя)'
+        : 'Вексель';
   }
 
   // 6a-0e. Supplier Payment ('bank_out'): resolve missing counterparty & sum unpaid 60.01 invoices by subject stems (excluding buyer advance refunds)
@@ -3456,7 +3737,7 @@ export function bindAndGenerateOperation(
         '';
       const parsedSal = Number(String(rawSal).replace(/[^\d.,-]/g, '').replace(',', '.'));
       if (Number.isFinite(parsedSal) && parsedSal > 0) {
-        const key = normalizeEntityKey(emp.name) || emp.id;
+        const key = normalizePersonIdentityKey1C(emp.name) || emp.id;
         rosterMap.set(key, {
           name: emp.name,
           position: emp.extra?.position || emp.extra?.должность || emp.kind,
@@ -3466,15 +3747,29 @@ export function bindAndGenerateOperation(
       }
     }
 
-    // 2. Check chronological prior ПриемНаРаботу operations up to draft.date
+    // 2. Check chronological Virtual1CState employees + prior ПриемНаРаботу operations up to draft.date
+    for (const vEmp of priorVirtualState.employees) {
+      if (vEmp.terminationDate && draft.date && vEmp.terminationDate < draft.date) continue;
+      if (vEmp.hireDate && draft.date && vEmp.hireDate > draft.date) continue;
+      const sal = round2(vEmp.monthlySalary ?? 0);
+      if (sal > 0) {
+        const key = normalizePersonIdentityKey1C(vEmp.fullName) || vEmp.key;
+        rosterMap.set(key, {
+          name: vEmp.fullName,
+          position: vEmp.position,
+          salary: sal,
+          source: vEmp.hireDate ? `Приём на работу от ${vEmp.hireDate}` : 'Штатное расписание 1С',
+        });
+      }
+    }
     for (const pOp of priorOps) {
       if (!pOp.includeInProcessing || pOp.isDuplicateIn1C) continue;
       if (draft.date && pOp.date && pOp.date > draft.date) continue;
       if (pOp.category === 'hr_hire') {
-        const sal = round2(pOp.monthlySalary ?? pOp.amount ?? 0);
+        const sal = round2(pOp.monthlySalary || pOp.rawExcelAmount || pOp.amount || 0);
         if (sal > 0) {
           const empLabel = pOp.employeeName || `Сотрудник (${pOp.date})`;
-          const key = normalizeEntityKey(empLabel) || pOp.id;
+          const key = normalizePersonIdentityKey1C(empLabel) || pOp.id;
           rosterMap.set(key, {
             name: empLabel,
             position: pOp.employeePosition,
@@ -3710,8 +4005,34 @@ export function bindAndGenerateOperation(
         category === 'bank_out' &&
         ['purchase_goods', 'purchase_materials', 'purchase_services', 'purchase_equipment'].includes(prev.category)
       ) {
-        effectiveDraftAmount = prev.amount;
-        amountCalculationNote = `Сумма оплаты определена по связанному поступлению от «${cpName}» (${prev.date}): ${effectiveDraftAmount.toFixed(2)} ₽`;
+        const open6001ForCp = round2(
+          priorVirtualState.openSettlements
+            .filter((s) => {
+              if (s.account !== '60.01' || s.remainingAmount <= 0.01) return false;
+              const sCpNorm = normalizeEntityKey(s.counterpartyName);
+              return (
+                (cpInn && s.counterpartyInn && cpInn === s.counterpartyInn) ||
+                (normCp && sCpNorm && (normCp === sCpNorm || normCp.includes(sCpNorm) || sCpNorm.includes(normCp)))
+              );
+            })
+            .reduce((acc, s) => acc + s.remainingAmount, 0)
+        );
+        const offset6002InPrev = round2(
+          prev.entries
+            .filter((e) => e.debit === '60.01' && e.credit === '60.02')
+            .reduce((acc, e) => acc + e.amount, 0)
+        );
+        const netAfterPrevOffset = round2(Math.max(0, prev.amount - offset6002InPrev));
+        effectiveDraftAmount =
+          open6001ForCp >= 0.01
+            ? open6001ForCp
+            : netAfterPrevOffset >= 0.01
+              ? netAfterPrevOffset
+              : prev.amount;
+        amountCalculationNote =
+          offset6002InPrev >= 0.01
+            ? `Сумма доплаты поставщику «${cpName}» за вычетом ранее зачтённого аванса (${prev.amount.toFixed(2)} − ${offset6002InPrev.toFixed(2)} = ${effectiveDraftAmount.toFixed(2)} ₽)`
+            : `Сумма оплаты определена по остатку задолженности поставщику «${cpName}» (счёт 60.01): ${effectiveDraftAmount.toFixed(2)} ₽`;
         calculationProvenance = amountCalculationNote;
         break;
       }
@@ -3720,8 +4041,34 @@ export function bindAndGenerateOperation(
         category === 'bank_in' &&
         ['sale_goods', 'sale_services'].includes(prev.category)
       ) {
-        effectiveDraftAmount = prev.amount;
-        amountCalculationNote = `Сумма поступления определена по связанной реализации «${cpName}» (${prev.date}): ${effectiveDraftAmount.toFixed(2)} ₽`;
+        const open6201ForCp = round2(
+          priorVirtualState.openSettlements
+            .filter((s) => {
+              if (s.account !== '62.01' || s.remainingAmount <= 0.01) return false;
+              const sCpNorm = normalizeEntityKey(s.counterpartyName);
+              return (
+                (cpInn && s.counterpartyInn && cpInn === s.counterpartyInn) ||
+                (normCp && sCpNorm && (normCp === sCpNorm || normCp.includes(sCpNorm) || sCpNorm.includes(normCp)))
+              );
+            })
+            .reduce((acc, s) => acc + s.remainingAmount, 0)
+        );
+        const offset6202InPrev = round2(
+          prev.entries
+            .filter((e) => e.debit === '62.02' && e.credit === '62.01')
+            .reduce((acc, e) => acc + e.amount, 0)
+        );
+        const netAfterPrevOffset = round2(Math.max(0, prev.amount - offset6202InPrev));
+        effectiveDraftAmount =
+          open6201ForCp >= 0.01
+            ? open6201ForCp
+            : netAfterPrevOffset >= 0.01
+              ? netAfterPrevOffset
+              : prev.amount;
+        amountCalculationNote =
+          offset6202InPrev >= 0.01
+            ? `Сумма доплаты от покупателя «${cpName}» за вычетом ранее зачтённого аванса (${prev.amount.toFixed(2)} − ${offset6202InPrev.toFixed(2)} = ${effectiveDraftAmount.toFixed(2)} ₽)`
+            : `Сумма поступления определена по остатку дебиторской задолженности «${cpName}» (счёт 62.01): ${effectiveDraftAmount.toFixed(2)} ₽`;
         calculationProvenance = amountCalculationNote;
         break;
       }
@@ -4571,6 +4918,27 @@ export function bindAndGenerateOperation(
             cpSubconto,
             bankSubconto,
             draft.description || 'Перечисление по претензии / исполнительному листу'
+          );
+        } else if (
+          docType1C === 'КорректировкаДолга' ||
+          /корректировк\p{L}*\s+долг|по\s+иску\s+(?:ООО|АО|ПАО|ЗАО|ИП)|по\s+дог\.?\s*№?\s*\d+/iu.test(
+            `${draft.description} ${draft.actionSequenceHint ?? ''}`
+          ) ||
+          priorVirtualState.openSettlements.some(
+            (s) =>
+              s.account === '60.01' &&
+              s.remainingAmount > 0.01 &&
+              cpName &&
+              normalizeEntityKey(s.counterpartyName) === normalizeEntityKey(cpName)
+          )
+        ) {
+          pushEntry(
+            '91.02',
+            '60.01',
+            totalWithVat,
+            'Штрафы, пени и неустойки к уплате',
+            cpSubconto || cpName || 'Поставщик',
+            draft.description || 'Начислена неустойка / судебные издержки (Корректировка долга на счёт 60.01)'
           );
         } else {
           pushEntry(
@@ -6039,16 +6407,104 @@ export function bindAndGenerateOperation(
             amountRuleNote: 'По штатному ФОТ за месяц (кнопка «Заполнить» в 1С)',
           }
         );
+        // Compute exact 2026 employee-by-employee НДФЛ 13% with standard child deductions (1400/2800/6000 up to 450k YTD, doubled for single parent) and property tax deduction (2 000 000 ₽)
+        const computeMonthlyChildDeduction2026 = (children: number, singleParent: boolean): number => {
+          if (!children || children <= 0) return 0;
+          let base = 0;
+          if (children >= 1) base += 1400;
+          if (children >= 2) base += 2800;
+          if (children >= 3) base += (children - 2) * 6000;
+          return singleParent ? base * 2 : base;
+        };
+
+        const priorPayrollCountForEmp = (personKey: string, hireDate?: string): number => {
+          let months = 0;
+          for (const pOp of priorOps) {
+            if (!pOp.includeInProcessing || pOp.isDuplicateIn1C) continue;
+            if (pOp.category !== 'payroll_accrual') continue;
+            if (draft.date && pOp.date && pOp.date >= draft.date) continue;
+            if (hireDate && pOp.date && pOp.date < hireDate) continue;
+            const inSummary = pOp.payrollStaffSummary?.some(
+              (s) => normalizePersonIdentityKey1C(s.name) === personKey
+            );
+            if (inSummary || !pOp.payrollStaffSummary?.length) {
+              months += 1;
+            }
+          }
+          return months;
+        };
+
+        const ndflByPersonKey = new Map<string, number>();
+        let computedTotalNdfl = 0;
+        const activeRosterForTax =
+          payrollStaffSummary && payrollStaffSummary.some((s) => s.salary > 0)
+            ? payrollStaffSummary.filter((s) => s.salary > 0)
+            : [];
+        const rosterSumCheck = round2(activeRosterForTax.reduce((acc, s) => acc + s.salary, 0));
+
+        if (activeRosterForTax.length > 0 && Math.abs(rosterSumCheck - totalWithVat) < 1) {
+          for (const staffRow of activeRosterForTax) {
+            const pKey = normalizePersonIdentityKey1C(staffRow.name);
+            const vEmp = priorVirtualState.employees.find(
+              (e) => normalizePersonIdentityKey1C(e.fullName) === pKey || e.key === `emp:${pKey}`
+            );
+            const priorMonths = priorPayrollCountForEmp(pKey, vEmp?.hireDate);
+            const ytdGrossIncludingCurrent = round2((priorMonths + 1) * staffRow.salary);
+
+            let childDed = 0;
+            if ((vEmp?.childCount ?? 0) > 0 && ytdGrossIncludingCurrent <= 450_000) {
+              childDed = computeMonthlyChildDeduction2026(
+                vEmp!.childCount!,
+                Boolean(vEmp?.isSingleParent)
+              );
+            }
+
+            let taxableAfterChild = Math.max(0, round2(staffRow.salary - childDed));
+            if (
+              vEmp?.propertyTaxDeduction &&
+              vEmp.propertyTaxDeduction > 0 &&
+              (!vEmp.propertyTaxDeductionStartDate ||
+                !draft.date ||
+                vEmp.propertyTaxDeductionStartDate <= draft.date)
+            ) {
+              // Count prior months where property deduction was already active
+              let usedPropDeduction = 0;
+              for (const pOp of priorOps) {
+                if (!pOp.includeInProcessing || pOp.isDuplicateIn1C) continue;
+                if (pOp.category !== 'payroll_accrual') continue;
+                if (draft.date && pOp.date && pOp.date >= draft.date) continue;
+                if (
+                  vEmp.propertyTaxDeductionStartDate &&
+                  pOp.date &&
+                  pOp.date < vEmp.propertyTaxDeductionStartDate
+                ) {
+                  continue;
+                }
+                usedPropDeduction = round2(usedPropDeduction + staffRow.salary);
+              }
+              const remProp = Math.max(0, round2(vEmp.propertyTaxDeduction - usedPropDeduction));
+              const appliedProp = Math.min(taxableAfterChild, remProp);
+              taxableAfterChild = Math.max(0, round2(taxableAfterChild - appliedProp));
+            }
+
+            const empNdfl = Math.round(taxableAfterChild * 0.13);
+            ndflByPersonKey.set(pKey, empNdfl);
+            computedTotalNdfl = round2(computedTotalNdfl + empNdfl);
+          }
+        } else {
+          computedTotalNdfl = Math.round(totalWithVat * 0.13);
+        }
+
         pushEntry(
           '70',
           '68.01',
-          round2(totalWithVat * 0.13),
+          computedTotalNdfl,
           empLabel,
           'НДФЛ исчисленный',
-          'Удержан НДФЛ 13%',
+          'Удержан НДФЛ 13% (с учётом стандартных и имущественных вычетов НК РФ)',
           {
             allowZeroCalculated: isCalculatedBy1C,
-            amountRuleNote: '13% от начисленного ФОТ',
+            amountRuleNote: '13% от налоговой базы каждого сотрудника (ст. 218, 220, 225 НК РФ)',
           }
         );
 
@@ -6085,7 +6541,9 @@ export function bindAndGenerateOperation(
                     ? totalWithVat
                     : 0;
 
-            const debtorNetAfterNdfl = round2(debtorGross - round2(debtorGross * 0.13));
+            const debtorNdfl =
+              ndflByPersonKey.get(writPersonKey) ?? Math.round(debtorGross * 0.13);
+            const debtorNetAfterNdfl = round2(debtorGross - debtorNdfl);
             const alimonyAmt =
               writ.fixedAmount && writ.fixedAmount > 0
                 ? writ.fixedAmount
@@ -6098,10 +6556,13 @@ export function bindAndGenerateOperation(
                 alimonyAmt,
                 writ.debtorEmployeeName,
                 writ.recipientName,
-                `Удержаны алименты по исполнительному листу (${writ.shareLabel || `${writ.ratePercent}%`} от дохода за вычетом НДФЛ 13%)`,
+                `Удержаны алименты по исполнительному листу (${writ.shareLabel || `${writ.ratePercent}%`})`,
                 {
                   allowZeroCalculated: isCalculatedBy1C,
-                  amountRuleNote: `${writ.shareLabel || `${writ.ratePercent}%`} от (Оклад − НДФЛ 13%)`,
+                  amountRuleNote:
+                    writ.fixedAmount && writ.fixedAmount > 0
+                      ? `Фиксированная сумма ${writ.fixedAmount.toLocaleString('ru-RU')} ₽/мес.`
+                      : `${writ.shareLabel || `${writ.ratePercent}%`} от (Оклад − НДФЛ 13%)`,
                 }
               );
             }
@@ -6537,17 +6998,43 @@ export function bindAndGenerateOperation(
       }
 
       case 'charter_capital': {
-        const founderSub = cpName || employeeName || 'Учредители организации';
-        pushEntry(
-          '75.01',
-          '80.09',
-          totalWithVat,
-          founderSub,
-          founderSub,
-          'Отражена задолженность учредителей по вкладам в уставный капитал'
-        );
+        if (resolvedFounderShares && resolvedFounderShares.length > 0 && totalWithVat >= 0.01) {
+          let allocatedSum = 0;
+          resolvedFounderShares.forEach((fs, idx) => {
+            const shareAmt =
+              idx === resolvedFounderShares.length - 1 &&
+              fs.sharePercent !== undefined &&
+              resolvedFounderShares.every((s) => s.sharePercent !== undefined)
+                ? round2(totalWithVat - allocatedSum)
+                : fs.amount && fs.amount >= 0.01
+                  ? round2(fs.amount)
+                  : fs.sharePercent
+                    ? round2((totalWithVat * fs.sharePercent) / 100)
+                    : round2(totalWithVat / resolvedFounderShares.length);
+            allocatedSum = round2(allocatedSum + shareAmt);
+            pushEntry(
+              '75.01',
+              '80.09',
+              shareAmt,
+              fs.founderName,
+              fs.founderName,
+              `Отражена задолженность учредителя «${fs.founderName}» по вкладу в уставный капитал${fs.sharePercent ? ` (${fs.sharePercent}%)` : ''}`
+            );
+          });
+        } else {
+          const founderSub = cpName || employeeName || 'Учредители организации';
+          pushEntry(
+            '75.01',
+            '80.09',
+            totalWithVat,
+            founderSub,
+            founderSub,
+            'Отражена задолженность учредителей по вкладам в уставный капитал'
+          );
+        }
         // Composite single-row check: e.g. "Сформирован уставный капитал и внесен на расчетный счет / в кассу"
         if (/и\s+(?:внесен|оплачен|поступил|зачислен)/iu.test(descLower)) {
+          const founderSub = cpName || employeeName || 'Учредители организации';
           const cashOrBankDt = /в\s+касс/iu.test(descLower) ? '50.01' : '51';
           pushEntry(
             cashOrBankDt,
@@ -7427,6 +7914,8 @@ export function bindAndGenerateOperation(
     docType1C,
     documentSubKind1C,
     amount: finalOpAmount,
+    rawExcelAmount: resolvedRawExcelAmount,
+    orderTotalAmount: resolvedOrderTotalAmount,
     amountMode: category === 'closing' && finalOpAmount >= 0.01 ? 'from_account_balance' : amountMode,
     readinessStatus: category === 'closing' && finalOpAmount >= 0.01 ? 'ready' : readinessStatus,
     readinessNote:
@@ -7439,6 +7928,11 @@ export function bindAndGenerateOperation(
     amountCalculationNote,
     monthlySalary: resolvedMonthlySalary,
     employeePosition: resolvedEmployeePosition,
+    employeeChildCount: resolvedEmployeeChildCount,
+    employeeIsSingleParent: resolvedEmployeeIsSingleParent,
+    employeePropertyDeduction: resolvedEmployeePropertyDeduction,
+    founderShares: resolvedFounderShares,
+    ownOrganization: resolvedOwnOrganization,
     injuryInsuranceRate:
       category === 'payroll_accrual' || category === 'insurance_accrual'
         ? resolvedInjuryRate
@@ -7536,19 +8030,25 @@ export function bindAndGenerateOperation(
     entries,
   };
 
+  const syncedTrace = synchronizeStep01ResolverTraceWithFinalOp(
+    builtOp,
+    doesSpecAllowZeroPostings(category)
+  );
+  builtOp.resolverTrace = syncedTrace;
+
   const baseGuide = buildOperationMentorGuide1C(builtOp, db1C);
   builtOp.mentorGuide1C = {
     ...baseGuide,
     step00Prep: buildStep00DirectoryPrepSteps(priorVirtualState, builtOp),
-    step01CalculationBreakdown: resolverStep01Trace ?? baseGuide.step01CalculationBreakdown,
+    step01CalculationBreakdown: syncedTrace,
   };
   return builtOp;
 }
 
 /**
- * Attaches chronological Step 00 directory preparation instructions (`step00Prep`)
- * and syncs `#1..#N` source operation numbers on `step01CalculationBreakdown`
- * for every operation in the workbench.
+ * Attaches chronological Step 00 directory preparation instructions (`step00Prep`),
+ * synchronizes `resolverTrace` with final operation fields (zero VAT on VAT-free ops,
+ * zero Level 8 on resolved ops), and syncs `#1..#N` source operation numbers.
  */
 export function attachVirtualStateStep00ToOperations(
   operations: QueuedOperation[],
@@ -7559,26 +8059,27 @@ export function attachVirtualStateStep00ToOperations(
   return operations.map((op) => {
     const stateBefore = stateBeforeByOpId[op.id] ?? createInitialVirtual1CState(db1C);
     const guide = op.mentorGuide1C ?? buildOperationMentorGuide1C(op, db1C);
-    const rawStep01 = op.resolverTrace ?? guide.step01CalculationBreakdown;
-    const syncedStep01 = rawStep01
-      ? {
-          ...rawStep01,
-          sourceLinks: rawStep01.sourceLinks.map((lnk) => ({
-            ...lnk,
-            opNumber:
-              lnk.opId && displayNumberByOpId[lnk.opId]
-                ? displayNumberByOpId[lnk.opId]
-                : lnk.opNumber,
-          })),
-        }
-      : undefined;
+    const baseSynced = synchronizeStep01ResolverTraceWithFinalOp(
+      { ...op, resolverTrace: op.resolverTrace ?? guide.step01CalculationBreakdown },
+      doesSpecAllowZeroPostings(op.category)
+    );
+    const syncedStep01: Step01CalculationBreakdown1C = {
+      ...baseSynced,
+      sourceLinks: baseSynced.sourceLinks.map((lnk) => ({
+        ...lnk,
+        opNumber:
+          lnk.opId && displayNumberByOpId[lnk.opId]
+            ? displayNumberByOpId[lnk.opId]
+            : lnk.opNumber,
+      })),
+    };
     return {
       ...op,
-      resolverTrace: syncedStep01 ?? op.resolverTrace,
+      resolverTrace: syncedStep01,
       mentorGuide1C: {
         ...guide,
         step00Prep: buildStep00DirectoryPrepSteps(stateBefore, op),
-        step01CalculationBreakdown: syncedStep01 ?? guide.step01CalculationBreakdown,
+        step01CalculationBreakdown: syncedStep01,
       },
     };
   });
@@ -7594,7 +8095,9 @@ export function recalculateOperationsChronologically(
   db1C: Database1CSnapshot | null,
   options?: { reportingYear?: number; defaultBik?: string }
 ): QueuedOperation[] {
-  const manualAndImported = operations.filter((o) => !o.autoGeneratedKind);
+  const manualAndImported = operations.filter(
+    (o) => !o.autoGeneratedKind && !o.id.startsWith('op-cash-cover')
+  );
   const autoGenerated = operations.filter((o) => Boolean(o.autoGeneratedKind));
 
   const indexed = manualAndImported.map((op, idx) => ({ op, idx }));
@@ -7605,6 +8108,11 @@ export function recalculateOperationsChronologically(
     return a.idx - b.idx;
   });
 
+  const canonicalCounterpartyMap = buildCanonicalCounterpartyRegistry1C(
+    db1C,
+    indexed.map((x) => x.op)
+  );
+
   const runSinglePass = (
     inputOps: QueuedOperation[],
     lookaheadOps?: QueuedOperation[]
@@ -7613,64 +8121,15 @@ export function recalculateOperationsChronologically(
     const out: QueuedOperation[] = [];
     for (let pos = 0; pos < inputOps.length; pos++) {
       const op = inputOps[pos];
-      const needsCpMissing =
-        doesOperationRequireCounterparty(op.category) && !op.counterpartyName.trim();
-      const isDynamicDependent =
-        op.amountMode !== 'explicit' ||
-        Boolean(op.needsAmount) ||
-        needsCpMissing ||
-        op.category === 'closing' ||
-        op.category === 'contract_event' ||
-        op.category === 'customer_invoice' ||
-        op.category === 'supplier_invoice' ||
-        op.category === 'policy_event' ||
-        op.category === 'writ_of_execution' ||
-        op.category === 'alimony_payout' ||
-        op.category === 'financial_investment' ||
-        op.category === 'financial_interest_accrual' ||
-        op.category === 'financial_disposal' ||
-        op.category === 'loan_issued' ||
-        op.category === 'loan_interest_accrual' ||
-        op.category === 'os_disposal' ||
-        op.category === 'vat_deduction' ||
-        op.category === 'purchase_services' ||
-        op.category === 'purchase_equipment' ||
-        op.category === 'intangible_acquisition' ||
-        op.category === 'intangible_commissioning' ||
-        op.category === 'intangible_amortization' ||
-        op.category === 'dividends_payout' ||
-        op.category === 'bank_out' ||
-        op.category === 'bank_in' ||
-        op.category === 'payroll_accrual' ||
-        op.category === 'insurance_accrual' ||
-        op.category === 'payroll_payout' ||
-        op.category === 'accountable_return' ||
-        op.category === 'tax_payment' ||
-        op.category === 'depreciation_accrual' ||
-        op.category === 'os_commissioning' ||
-        op.category === 'materials_writeoff' ||
-        op.category === 'workwear_issue' ||
-        op.category === 'purchase_materials' ||
-        op.category === 'purchase_goods' ||
-        op.category === 'expense_report' ||
-        op.category === 'penalty_claim' ||
-        op.category === 'founder_contribution' ||
-        op.category === 'employee_settlement_73' ||
-        op.category === 'sale_goods' ||
-        op.category === 'sale_services';
-
-      if (!isDynamicDependent && op.entries.length > 0 && !op.needsAmount) {
-        out.push(op);
-        runningState = advanceVirtual1CStateWithOperation(runningState, op, pos + 1);
-        continue;
-      }
-
+      const shouldResetClass = isMisclassifiedLegacyOperation(op);
       const keepExplicitAmount =
         op.amountMode === 'explicit'
-          ? op.vatRule === 'on_top' && op.vatAmount > 0
+          ? op.vatRule === 'on_top' && op.vatAmount > 0 && !shouldResetClass
             ? round2(op.amount - op.vatAmount)
             : op.amount
-          : 0;
+          : op.category === 'customer_invoice' || op.category === 'supplier_invoice'
+            ? op.rawExcelAmount ?? op.amount
+            : 0;
       const rebuilt = bindAndGenerateOperation(
         {
           rowKey: op.rowKey,
@@ -7681,13 +8140,20 @@ export function recalculateOperationsChronologically(
           incomingDocDate: op.incomingDocDate,
           description: op.description,
           amount: keepExplicitAmount,
+          rawExcelAmount: op.rawExcelAmount,
+          orderTotalAmount: op.orderTotalAmount,
           monthlySalary:
             op.category === 'hr_hire'
-              ? op.monthlySalary
+              ? op.monthlySalary || op.rawExcelAmount || undefined
               : op.amountMode === 'explicit'
                 ? op.monthlySalary
                 : undefined,
           employeePosition: op.employeePosition,
+          employeeChildCount: op.employeeChildCount,
+          employeeIsSingleParent: op.employeeIsSingleParent,
+          employeePropertyDeduction: op.employeePropertyDeduction,
+          founderShares: op.founderShares,
+          ownOrganization: op.ownOrganization,
           injuryInsuranceRate: op.injuryInsuranceRate,
           usefulLifeMonths: op.usefulLifeMonths,
           depreciationBaseAmount:
@@ -7705,12 +8171,13 @@ export function recalculateOperationsChronologically(
           interestRatePercent: op.interestRatePercent,
           actionSequenceHint: op.actionSequenceHint,
           explicitCorrespondences: op.explicitCorrespondences,
-          vatRate: op.vatRate,
-          vatRule: op.vatRule,
-          vatAmount: op.amountMode === 'explicit' ? op.vatAmount : undefined,
+          vatRate: shouldResetClass ? undefined : op.vatRate,
+          vatRule: shouldResetClass ? undefined : op.vatRule,
+          vatAmount:
+            !shouldResetClass && op.amountMode === 'explicit' ? op.vatAmount : undefined,
           quantity: op.quantity,
           unitPrice: op.unitPrice,
-          hasInvoiceSF: op.hasInvoiceSF,
+          hasInvoiceSF: shouldResetClass ? undefined : op.hasInvoiceSF,
           counterpartyName:
             op.category === 'bank_out' && op.counterpartyName.includes(';')
               ? ''
@@ -7733,20 +8200,20 @@ export function recalculateOperationsChronologically(
           organizationBik: op.organizationBik,
           organizationBankName: op.organizationBankName,
           organizationBankAccount: op.organizationBankAccount,
-          contractName: op.contractName,
-          contractNumber: op.contractNumber,
-          contractDate: op.contractDate,
+          contractName: shouldResetClass ? '' : op.contractName,
+          contractNumber: shouldResetClass ? '' : op.contractNumber,
+          contractDate: shouldResetClass ? '' : op.contractDate,
           nomenclatureName: op.nomenclatureName,
           nomenclatureGroupHint: op.nomenclatureGroupName,
           warehouseName: op.warehouseName,
           warehouseToHint: op.warehouseToName,
           expenseItemName: op.expenseItemName,
-          cashFlowItemName: op.cashFlowItemName,
+          cashFlowItemName: shouldResetClass ? '' : op.cashFlowItemName,
           employeeName: op.employeeName,
           costAccountHint: op.costAccount,
-          materialAccountHint: op.materialAccount,
-          docTypeHint: op.docType1C,
-          categoryHint: op.category,
+          materialAccountHint: shouldResetClass ? undefined : op.materialAccount,
+          docTypeHint: shouldResetClass ? undefined : op.docType1C,
+          categoryHint: shouldResetClass ? undefined : op.category,
         },
         db1C,
         op.id,
@@ -7755,6 +8222,7 @@ export function recalculateOperationsChronologically(
           futureOperations: lookaheadOps ? lookaheadOps.slice(pos + 1) : undefined,
           currentOpNumber: pos + 1,
           virtualStateBefore: runningState,
+          canonicalCounterpartyMap,
           reportingYear: options?.reportingYear,
           defaultBik: options?.defaultBik ?? DEFAULT_SBERBANK_BIK,
           defaultBankName: DEFAULT_SBERBANK_NAME,
@@ -7798,6 +8266,7 @@ export function isMisclassifiedLegacyOperation(op: QueuedOperation): boolean {
     description: op.description,
     nomenclatureName: op.nomenclatureName,
     counterpartyName: op.counterpartyName,
+    actionSequenceHint: op.actionSequenceHint,
     explicitCorrespondences: op.explicitCorrespondences,
   });
   if (op.category !== natural.category || op.docType1C !== natural.docType1C) {
@@ -7842,6 +8311,9 @@ export function isMisclassifiedLegacyOperation(op: QueuedOperation): boolean {
         'tax_payment',
         'bank_fee',
         'purchase_equipment',
+        'purchase_materials',
+        'purchase_goods',
+        'purchase_services',
         'founder_contribution',
         'charter_capital',
         'dividends_accrual',
@@ -7868,10 +8340,12 @@ export function rebindOperationsAgainst1CDb(
   operations: QueuedOperation[],
   db1C: Database1CSnapshot | null
 ): QueuedOperation[] {
+  const filteredOps = operations.filter((o) => !o.id.startsWith('op-cash-cover'));
+  const canonicalCounterpartyMap = buildCanonicalCounterpartyRegistry1C(db1C, filteredOps);
   let runningState = createInitialVirtual1CState(db1C);
   const result: QueuedOperation[] = [];
-  for (let idx = 0; idx < operations.length; idx++) {
-    const op = operations[idx];
+  for (let idx = 0; idx < filteredOps.length; idx++) {
+    const op = filteredOps[idx];
     if (op.autoGeneratedKind) {
       const autoOp: QueuedOperation = {
         ...op,
@@ -7897,8 +8371,14 @@ export function rebindOperationsAgainst1CDb(
         incomingDocDate: op.incomingDocDate,
         description: op.description,
         amount: op.amount,
+        rawExcelAmount: op.rawExcelAmount,
+        orderTotalAmount: op.orderTotalAmount,
         monthlySalary: op.monthlySalary,
         employeePosition: op.employeePosition,
+        employeeChildCount: op.employeeChildCount,
+        employeeIsSingleParent: op.employeeIsSingleParent,
+        employeePropertyDeduction: op.employeePropertyDeduction,
+        founderShares: op.founderShares,
         injuryInsuranceRate: op.injuryInsuranceRate,
         usefulLifeMonths: op.usefulLifeMonths,
         depreciationBaseAmount: op.depreciationBaseAmount,
@@ -7913,6 +8393,7 @@ export function rebindOperationsAgainst1CDb(
         disposedFinancialNoteId: op.disposedFinancialNoteId,
         periodicPaymentAmount: op.periodicPaymentAmount,
         interestRatePercent: op.interestRatePercent,
+        actionSequenceHint: op.actionSequenceHint,
         explicitCorrespondences: op.explicitCorrespondences,
         vatRate: shouldReclassify ? undefined : op.vatRate,
         vatRule: shouldReclassify ? undefined : op.vatRule,
@@ -7943,9 +8424,10 @@ export function rebindOperationsAgainst1CDb(
       op.id,
       {
         priorOperations: result,
-        futureOperations: operations.slice(idx + 1),
+        futureOperations: filteredOps.slice(idx + 1),
         currentOpNumber: idx + 1,
         virtualStateBefore: runningState,
+        canonicalCounterpartyMap,
         assumeInvoiceOnVatPurchase: true,
       }
     );
@@ -7953,21 +8435,7 @@ export function rebindOperationsAgainst1CDb(
     const merged: QueuedOperation = {
       ...rebound,
       includeInProcessing: op.includeInProcessing,
-      entries:
-        !shouldReclassify &&
-        op.entries.length > 0 &&
-        rebound.amountMode !== 'from_stock_balance' &&
-        rebound.amountMode !== 'from_related_doc' &&
-        rebound.amountMode !== 'from_account_balance' &&
-        rebound.category !== 'payroll_accrual' &&
-        rebound.category !== 'financial_interest_accrual' &&
-        rebound.category !== 'financial_disposal' &&
-        rebound.category !== 'os_disposal' &&
-        rebound.category !== 'closing'
-          ? op.entries
-          : rebound.entries,
     };
-    merged.mentorGuide1C = buildOperationMentorGuide1C(merged, db1C);
     result.push(merged);
     runningState = advanceVirtual1CStateWithOperation(runningState, merged, idx + 1);
   }
@@ -7975,149 +8443,45 @@ export function rebindOperationsAgainst1CDb(
 }
 
 /**
- * Cleans up corrupted single-character (`length < 2`) counterparties or legacy misclassified
- * internal operations upon hydrating state from `localStorage`, and ensures mentorGuide1C + step00Prep are populated.
+ * Cleans up legacy hydrated snapshots (strips fake `op-cash-cover`, zombie `26/60.01` on `vat_deduction`,
+ * INN-as-principal on promissory notes, desynced INNs, and stale `resolverTrace`), then runs full
+ * chronological recalculation so any loaded snapshot self-heals immediately.
  */
 export function sanitizeHydratedOperations(
   operations: QueuedOperation[],
   db1C: Database1CSnapshot | null
 ): QueuedOperation[] {
-  let runningState = createInitialVirtual1CState(db1C);
-  const sanitized: QueuedOperation[] = [];
-  for (let idx = 0; idx < operations.length; idx++) {
-    const op = operations[idx];
-    if (op.autoGeneratedKind) {
-      const autoOp: QueuedOperation = {
-        ...op,
-        readinessStatus: op.readinessStatus ?? 'ready',
-        mentorGuide1C: op.mentorGuide1C ?? buildOperationMentorGuide1C(op, db1C),
-      };
-      sanitized.push(autoOp);
-      runningState = advanceVirtual1CStateWithOperation(runningState, autoOp, idx + 1);
-      continue;
-    }
-
+  const withoutCashCovers = operations.filter((op) => !op.id.startsWith('op-cash-cover'));
+  const preCleaned = withoutCashCovers.map((op) => {
+    if (op.autoGeneratedKind) return op;
     const rawTrimmed = (op.counterpartyName ?? '').trim();
     const hadCorruptedShortName = rawTrimmed.length > 0 && rawTrimmed.length < 2;
-    const isFounderOp = isFounderContributionText(op.description);
-    const legacyBrokenPayroll =
-      op.docType1C === 'НачислениеЗарплаты' &&
-      (op.readinessStatus === 'critical_error' || op.entries.length === 0);
     const hasBillionInnAmountBug =
       op.amount >= 500_000_000 &&
       /\b\d{9,}\b/.test(op.description) &&
       !/(?:млрд|миллиард)/iu.test(op.description);
-    const shouldRebuild =
-      hadCorruptedShortName ||
-      hasBillionInnAmountBug ||
-      isMisclassifiedLegacyOperation(op) ||
-      legacyBrokenPayroll ||
-      !op.readinessStatus ||
-      !op.mentorGuide1C ||
-      !op.mentorGuide1C.step00Prep ||
-      !op.mentorGuide1C.step01CalculationBreakdown ||
-      (isFounderOp && (op.category !== 'founder_contribution' || !rawTrimmed));
+    const cleanedNotes = op.financialNotesList?.filter(
+      (n) => n.principal > 0 && n.principal <= 100_000_000
+    );
+    const cleanedEntries =
+      op.category === 'vat_deduction'
+        ? op.entries.filter((e) => e.debit === '68.02' && e.credit.startsWith('19'))
+        : op.entries;
 
-    if (shouldRebuild) {
-      const resetClass = isMisclassifiedLegacyOperation(op) || isFounderOp || hasBillionInnAmountBug;
-      const rebuilt = bindAndGenerateOperation(
-        {
-          rowKey: op.rowKey,
-          sourceFileName: op.sourceFileName,
-          date: op.date,
-          docNumber: op.docNumber,
-          incomingDocNumber: op.incomingDocNumber,
-          incomingDocDate: op.incomingDocDate,
-          description: op.description,
-          amount: hasBillionInnAmountBug ? 0 : op.amount,
-          monthlySalary: op.monthlySalary,
-          employeePosition: op.employeePosition,
-          injuryInsuranceRate: op.injuryInsuranceRate,
-          usefulLifeMonths: op.usefulLifeMonths,
-          depreciationBaseAmount: op.depreciationBaseAmount,
-          alimonyRecipientName: op.alimonyRecipientName,
-          alimonyRecipientInn: op.alimonyRecipientInn,
-          alimonyRatePercent: op.alimonyRatePercent,
-          alimonyFixedAmount: op.alimonyFixedAmount,
-          alimonyShareLabel: op.alimonyShareLabel,
-          writStartDate: op.writStartDate,
-          financialNotesSummary: op.financialNotesSummary,
-          financialNotesList: op.financialNotesList,
-          disposedFinancialNoteId: op.disposedFinancialNoteId,
-          periodicPaymentAmount: op.periodicPaymentAmount,
-          interestRatePercent: op.interestRatePercent,
-          vatRate: resetClass ? undefined : op.vatRate,
-          vatRule: resetClass ? undefined : op.vatRule,
-          vatAmount: resetClass ? undefined : op.vatAmount,
-          quantity: op.quantity,
-          unitPrice: op.unitPrice,
-          hasInvoiceSF: resetClass ? undefined : op.hasInvoiceSF,
-          counterpartyName: hadCorruptedShortName ? '' : rawTrimmed,
-          counterpartyInn: hadCorruptedShortName ? '' : op.counterpartyInn,
-          counterpartyKpp: hadCorruptedShortName ? '' : op.counterpartyKpp,
-          counterpartySource: hadCorruptedShortName ? undefined : op.counterpartySource,
-          contractName: resetClass ? '' : op.contractName,
-          contractNumber: resetClass ? '' : op.contractNumber,
-          contractDate: resetClass ? '' : op.contractDate,
-          nomenclatureName: op.nomenclatureName,
-          nomenclatureGroupHint: op.nomenclatureGroupName,
-          warehouseName: op.warehouseName,
-          warehouseToHint: op.warehouseToName,
-          expenseItemName: op.expenseItemName,
-          cashFlowItemName: resetClass ? '' : op.cashFlowItemName,
-          employeeName: op.employeeName,
-          costAccountHint: op.costAccount,
-          materialAccountHint: resetClass ? undefined : op.materialAccount,
-          docTypeHint: resetClass ? undefined : op.docType1C,
-          categoryHint: resetClass ? undefined : op.category,
-        },
-        db1C,
-        op.id,
-        {
-          priorOperations: sanitized,
-          virtualStateBefore: runningState,
-          assumeInvoiceOnVatPurchase: true,
-        }
-      );
-      const nextItem: QueuedOperation = {
-        ...rebuilt,
-        includeInProcessing: op.includeInProcessing,
-      };
-      sanitized.push(nextItem);
-      runningState = advanceVirtual1CStateWithOperation(runningState, nextItem, idx + 1);
-      continue;
-    }
+    return {
+      ...op,
+      amount: hasBillionInnAmountBug ? 0 : op.amount,
+      amountMode: hasBillionInnAmountBug ? ('required_missing' as const) : op.amountMode,
+      counterpartyName: hadCorruptedShortName ? '' : rawTrimmed,
+      counterpartyInn: hadCorruptedShortName ? '' : op.counterpartyInn,
+      counterpartyKpp: hadCorruptedShortName ? '' : op.counterpartyKpp,
+      counterpartySource: hadCorruptedShortName ? undefined : op.counterpartySource,
+      financialNotesList: cleanedNotes && cleanedNotes.length > 0 ? cleanedNotes : undefined,
+      entries: cleanedEntries,
+    };
+  });
 
-    if (rawTrimmed.length >= 2 && db1C && op.bindings.counterparty.status !== 'matched_1c') {
-      const matched = matchPersonOrCounterpartyIn1C(rawTrimmed, op.counterpartyInn, db1C);
-      if (matched) {
-        const updated: QueuedOperation = {
-          ...op,
-          counterpartyName: matched.name,
-          counterpartyInn: matched.inn || op.counterpartyInn,
-          counterpartyKpp: matched.kpp || op.counterpartyKpp,
-          counterpartyKind: matched.kind,
-          bindings: {
-            ...op.bindings,
-            counterparty: {
-              status: 'matched_1c',
-              matchedName: matched.name,
-              matchedCode1C: matched.code1C,
-              matchedInn: matched.inn,
-            },
-          },
-        };
-        updated.mentorGuide1C = buildOperationMentorGuide1C(updated, db1C);
-        sanitized.push(updated);
-        runningState = advanceVirtual1CStateWithOperation(runningState, updated, idx + 1);
-        continue;
-      }
-    }
-
-    sanitized.push(op);
-    runningState = advanceVirtual1CStateWithOperation(runningState, op, idx + 1);
-  }
-  return attachVirtualStateStep00ToOperations(sanitized, db1C);
+  return recalculateOperationsChronologically(preCleaned, db1C);
 }
 
 /**

@@ -24,6 +24,10 @@ import {
 } from './virtual1CState';
 import { calculateOsvReport } from './osvCalculator';
 import { sanitizeBreakdown1C } from './textHygiene1C';
+import {
+  extractPersonFioFromText1C,
+  normalizeEmployeeOrFounderName1C,
+} from './entityNormalizer1C';
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -211,19 +215,22 @@ function resolveOperationAmountAndLinksCore(
     const qStems = extractKeywordStems1C(`${input.nomenclatureName || ''} ${input.description}`);
     // 1) Check recurring buyer contracts first (e.g., monthly scaffolding rental act)
     if (qStems.length > 0 && input.category === 'sale_services') {
-      const buyerContracts = Object.values(stateBefore.contracts).filter(
+      const buyerContracts = stateBefore.contracts.filter(
         (c) =>
-          c.kind === 'СПокупателем' &&
+          c.contractKind === 'СПокупателем' &&
           c.counterpartyName &&
-          c.subjectKeywords.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))
+          (c.keywordStems ?? []).some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))
       );
       if (buyerContracts.length > 0) {
         const ctr = buyerContracts[0];
-        const cpRec = stateBefore.counterparties[ctr.counterpartyKey];
+        const cpRec = stateBefore.counterparties.find(
+          (cp) =>
+            normalizeCounterpartyKey1C(cp.name) === normalizeCounterpartyKey1C(ctr.counterpartyName)
+        );
         linkedCpName = ctr.counterpartyName;
         linkedCpInn = cpRec?.inn || linkedCpInn;
         linkedCpKpp = cpRec?.kpp || linkedCpKpp;
-        linkedContract = ctr.contractName || linkedContract;
+        linkedContract = ctr.name || linkedContract;
         extraLinks.push({
           opId: ctr.firstSeenOpId,
           opNumber: ctr.firstSeenOpNumber,
@@ -238,7 +245,7 @@ function resolveOperationAmountAndLinksCore(
     // 2) Check open customer orders (СчетПокупателю / договор)
     if (!linkedCpName) {
       const openCustOrders = (stateBefore.openOrders ?? []).filter(
-        (o) => o.orderKind === 'customer' && o.status === 'open' && o.counterpartyName
+        (o) => o.direction === 'buyer' && o.status !== 'fulfilled' && o.counterpartyName
       );
       const orderStemMatched = openCustOrders.filter((o) =>
         o.keywordStems.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))
@@ -463,12 +470,20 @@ function resolveOperationAmountAndLinksCore(
     };
   }
 
+  const isMoneyPaymentOp =
+    input.category === 'bank_in' ||
+    input.category === 'bank_out' ||
+    input.category === 'cash_in' ||
+    input.category === 'cash_out';
   if (
     input.quantity &&
     input.quantity > 0 &&
     input.unitPrice &&
     input.unitPrice > 0 &&
-    (input.explicitColumnAmount < 0.01 || input.vatRule === 'on_top')
+    !isMoneyPaymentOp &&
+    (input.explicitColumnAmount < 0.01 ||
+      input.vatRule === 'on_top' ||
+      (input.quantity > 1 && Math.abs(input.explicitColumnAmount - input.unitPrice) < 0.01))
   ) {
     const net = round2(input.quantity * input.unitPrice);
     const vat =
@@ -832,9 +847,15 @@ function resolveOperationAmountAndLinksCore(
   }
 
   if (input.category === 'founder_contribution') {
-    const founderKey = normalizePersonIdentityKey1C(
-      linkedCpName || input.employeeName || input.description
-    );
+    const extractedFounderFio =
+      (linkedCpName && !/ооо|ао|пао|зао/iu.test(linkedCpName)
+        ? normalizeEmployeeOrFounderName1C(linkedCpName, { obliqueContext: true })
+        : '') ||
+      extractPersonFioFromText1C(input.description) ||
+      (input.employeeName
+        ? normalizeEmployeeOrFounderName1C(input.employeeName, { obliqueContext: true })
+        : '');
+    const founderKey = normalizePersonIdentityKey1C(extractedFounderFio);
     const founderSurname = founderKey.split(/\s+/)[0] || '';
     let open7501 = 0;
     const links7501: ResolverSourceLink1C[] = [];
@@ -894,15 +915,15 @@ function resolveOperationAmountAndLinksCore(
       return {
         resolvedAmount: open7501,
         amountMode: 'from_account_balance',
-        counterpartyName: linkedCpName || input.employeeName || undefined,
+        counterpartyName: extractedFounderFio || linkedCpName || input.employeeName || undefined,
         vatRate: 0,
         vatRule: 'none',
         step01Breakdown: {
           resolverLevel: 5,
           resolverLevelName: LEVEL_NAMES[5],
-          summaryFormula: `Задолженность учредителя по вкладу в уставный капитал (Дт 75.01) = ${fmtMoney(open7501)}`,
+          summaryFormula: `Задолженность учредителя${extractedFounderFio ? ` «${extractedFounderFio}»` : ''} по вкладу в уставный капитал (Дт 75.01) = ${fmtMoney(open7501)}`,
           steps: [
-            `Сумма вклада учредителя определена по открытому дебетовому сальдо счёта 75.01 «Расчёты по вкладам в уставный (складочный) капитал» (${fmtMoney(open7501)}).`,
+            `Сумма вклада учредителя${extractedFounderFio ? ` «${extractedFounderFio}»` : ''} определена по открытому дебетовому сальдо счёта 75.01 «Расчёты по вкладам в уставный (складочный) капитал» (${fmtMoney(open7501)}).`,
           ],
           sourceLinks: links7501,
         },
@@ -1040,10 +1061,10 @@ function resolveOperationAmountAndLinksCore(
       const qStems = extractKeywordStems1C(`${input.nomenclatureName || ''} ${input.description}`);
       const openSupOrders = (stateBefore.openOrders ?? []).filter(
         (o) =>
-          o.orderKind === 'supplier' &&
-          o.status === 'open' &&
-          o.remainingAmount >= 0.01 &&
-          ((cpNorm && o.counterpartyKey === cpNorm) ||
+          o.direction === 'supplier' &&
+          o.status !== 'fulfilled' &&
+          (o.totalAmount >= 0.01 || o.remainingAmount >= 0.01) &&
+          ((cpNorm && normalizeCounterpartyKey1C(o.counterpartyName) === cpNorm) ||
             (!cpNorm && o.keywordStems.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))))
       );
       if (openSupOrders.length > 0) {
@@ -1051,8 +1072,16 @@ function resolveOperationAmountAndLinksCore(
           o.keywordStems.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))
         );
         const ord = stemPref[0] || openSupOrders[0];
+        // For purchase_* receipt after a partial advance (#13 -> #14), use full order totalAmount!
+        const targetAmt = input.category.startsWith('purchase_')
+          ? ord.totalAmount >= 0.01
+            ? ord.totalAmount
+            : ord.remainingAmount
+          : ord.remainingAmount >= 0.01
+            ? ord.remainingAmount
+            : ord.totalAmount;
         return {
-          resolvedAmount: ord.remainingAmount,
+          resolvedAmount: targetAmt,
           amountMode: 'from_related_doc',
           counterpartyName: linkedCpName || ord.counterpartyName,
           counterpartyInn: linkedCpInn || ord.counterpartyInn,
@@ -1063,16 +1092,19 @@ function resolveOperationAmountAndLinksCore(
           step01Breakdown: {
             resolverLevel: 3,
             resolverLevelName: LEVEL_NAMES[3],
-            summaryFormula: `Подтянуто из счёта/договора #${ord.originOpNumber} от ${formatRuDateShort(ord.originDate)} = ${fmtMoney(ord.remainingAmount)}`,
+            summaryFormula:
+              ord.quantity && ord.unitPrice
+                ? `Подтянуто из счёта/аванса #${ord.originOpNumber} от ${formatRuDateShort(ord.originDate)}: ${ord.quantity} × ${fmtMoney(ord.unitPrice)} = ${fmtMoney(targetAmt)}`
+                : `Подтянуто из счёта/договора #${ord.originOpNumber} от ${formatRuDateShort(ord.originDate)} = ${fmtMoney(targetAmt)}`,
             steps: [
-              `Найдена предшествующая регистрация счёта/договора поставщика «${ord.counterpartyName}» (#${ord.originOpNumber} от ${formatRuDateShort(ord.originDate)}) на сумму ${fmtMoney(ord.remainingAmount)}.`,
+              `Найдена предшествующая регистрация счёта/заказа поставщика «${ord.counterpartyName}» (#${ord.originOpNumber} от ${formatRuDateShort(ord.originDate)}) на полную сумму поставки ${fmtMoney(targetAmt)}.`,
             ],
             sourceLinks: [
               {
                 opId: ord.originOpId,
                 opNumber: ord.originOpNumber,
                 date: ord.originDate,
-                label: `Счёт/договор #${ord.originOpNumber} от ${formatRuDateShort(ord.originDate)} (${ord.counterpartyName})`,
+                label: `Счёт/заказ #${ord.originOpNumber} от ${formatRuDateShort(ord.originDate)} (${ord.counterpartyName})`,
               },
             ],
           },
@@ -1204,24 +1236,28 @@ function resolveOperationAmountAndLinksCore(
         input.description
       )
     ) {
-      const periodicBuyerCtr = Object.values(stateBefore.contracts).find(
+      const periodicBuyerCtr = stateBefore.contracts.find(
         (c) =>
-          c.kind === 'СПокупателем' &&
+          c.contractKind === 'СПокупателем' &&
           c.periodicAmount !== undefined &&
           c.periodicAmount >= 0.01 &&
-          ((cpNorm && c.counterpartyKey === cpNorm) ||
+          ((cpNorm && normalizeCounterpartyKey1C(c.counterpartyName) === cpNorm) ||
             (qStems.length > 0 &&
-              c.subjectKeywords.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))))
+              (c.keywordStems ?? []).some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))))
       );
       if (periodicBuyerCtr && periodicBuyerCtr.periodicAmount) {
-        const cpRec = stateBefore.counterparties[periodicBuyerCtr.counterpartyKey];
+        const cpRec = stateBefore.counterparties.find(
+          (cp) =>
+            normalizeCounterpartyKey1C(cp.name) ===
+            normalizeCounterpartyKey1C(periodicBuyerCtr.counterpartyName)
+        );
         return {
           resolvedAmount: round2(periodicBuyerCtr.periodicAmount),
           amountMode: 'from_related_doc',
           counterpartyName: linkedCpName || periodicBuyerCtr.counterpartyName,
           counterpartyInn: linkedCpInn || cpRec?.inn,
           counterpartyKpp: linkedCpKpp || cpRec?.kpp,
-          contractName: linkedContract || periodicBuyerCtr.contractName,
+          contractName: linkedContract || periodicBuyerCtr.name,
           vatRate: periodicBuyerCtr.vatRate,
           vatRule: periodicBuyerCtr.vatRule,
           step01Breakdown: {
@@ -1263,10 +1299,10 @@ function resolveOperationAmountAndLinksCore(
     if (shouldCheckCustomerOrdersFirst) {
       const openCustOrders = (stateBefore.openOrders ?? []).filter(
         (o) =>
-          o.orderKind === 'customer' &&
-          o.status === 'open' &&
-          o.remainingAmount >= 0.01 &&
-          ((cpNorm && o.counterpartyKey === cpNorm) ||
+          o.direction === 'buyer' &&
+          o.status !== 'fulfilled' &&
+          (o.totalAmount >= 0.01 || o.remainingAmount >= 0.01) &&
+          ((cpNorm && normalizeCounterpartyKey1C(o.counterpartyName) === cpNorm) ||
             (!cpNorm && o.keywordStems.some((ks) => qStems.some((qs) => stemsMatch1C(ks, qs)))))
       );
       if (openCustOrders.length > 0) {
@@ -1277,8 +1313,16 @@ function resolveOperationAmountAndLinksCore(
               )
             : [];
         const chosenOrder = stemPreferred[0] || openCustOrders[0];
+        const targetAmt =
+          input.category === 'sale_goods' || input.category === 'sale_services'
+            ? chosenOrder.totalAmount >= 0.01
+              ? chosenOrder.totalAmount
+              : chosenOrder.remainingAmount
+            : chosenOrder.remainingAmount >= 0.01
+              ? chosenOrder.remainingAmount
+              : chosenOrder.totalAmount;
         return {
-          resolvedAmount: chosenOrder.remainingAmount,
+          resolvedAmount: targetAmt,
           amountMode: 'from_related_doc',
           counterpartyName: linkedCpName || chosenOrder.counterpartyName,
           counterpartyInn: linkedCpInn || chosenOrder.counterpartyInn,
@@ -1289,16 +1333,19 @@ function resolveOperationAmountAndLinksCore(
           step01Breakdown: {
             resolverLevel: 3,
             resolverLevelName: LEVEL_NAMES[3],
-            summaryFormula: `Подтянуто из счёта/договора #${chosenOrder.originOpNumber} от ${formatRuDateShort(chosenOrder.originDate)} = ${fmtMoney(chosenOrder.remainingAmount)}`,
+            summaryFormula:
+              chosenOrder.quantity && chosenOrder.unitPrice
+                ? `Подтянуто из счёта/заказа #${chosenOrder.originOpNumber} от ${formatRuDateShort(chosenOrder.originDate)}: ${chosenOrder.quantity} × ${fmtMoney(chosenOrder.unitPrice)} = ${fmtMoney(targetAmt)}`
+                : `Подтянуто из счёта/договора #${chosenOrder.originOpNumber} от ${formatRuDateShort(chosenOrder.originDate)} = ${fmtMoney(targetAmt)}`,
             steps: [
-              `Найдена предшествующая запись о выставленном счёте / заказе покупателю «${chosenOrder.counterpartyName}» (#${chosenOrder.originOpNumber} от ${formatRuDateShort(chosenOrder.originDate)}) на сумму ${fmtMoney(chosenOrder.remainingAmount)}.`,
+              `Найдена предшествующая запись о выставленном счёте / заказе покупателю «${chosenOrder.counterpartyName}» (#${chosenOrder.originOpNumber} от ${formatRuDateShort(chosenOrder.originDate)}) на сумму ${fmtMoney(targetAmt)}.`,
             ],
             sourceLinks: [
               {
                 opId: chosenOrder.originOpId,
                 opNumber: chosenOrder.originOpNumber,
                 date: chosenOrder.originDate,
-                label: `Счёт/договор #${chosenOrder.originOpNumber} от ${formatRuDateShort(chosenOrder.originDate)} (${fmtMoney(chosenOrder.remainingAmount)})`,
+                label: `Счёт/договор #${chosenOrder.originOpNumber} от ${formatRuDateShort(chosenOrder.originDate)} (${fmtMoney(targetAmt)})`,
               },
             ],
           },
@@ -2110,4 +2157,213 @@ function resolveOperationAmountAndLinksCore(
       checkedSourcesWhenMissing: checkedSources,
     },
   };
+}
+
+/**
+ * Synchronizes `step01CalculationBreakdown` (`resolverTrace`) with the FINAL operation fields
+ * (`amount`, `vatRate`, `vatRule`, `vatAmount`, `entries`, `monthlySalary`, `category`) so there is
+ * NEVER a desynchronized "в т.ч. НДС 20%" on a VAT-free operation and NEVER a stale "Уровень 8"
+ * on an operation whose amount/entries were resolved!
+ */
+export function synchronizeStep01ResolverTraceWithFinalOp(
+  op: Pick<
+    QueuedOperation,
+    | 'category'
+    | 'docType1C'
+    | 'amount'
+    | 'rawExcelAmount'
+    | 'amountMode'
+    | 'vatRate'
+    | 'vatRule'
+    | 'vatAmount'
+    | 'entries'
+    | 'monthlySalary'
+    | 'employeeName'
+    | 'counterpartyName'
+    | 'calculationProvenance'
+    | 'amountCalculationNote'
+    | 'resolverTrace'
+  >,
+  allowsZeroPostings: boolean
+): Step01CalculationBreakdown1C {
+  const existing = op.resolverTrace;
+  const isVatFree = op.vatRate === 0 || op.vatRule === 'none' || op.vatAmount < 0.01;
+  const isResolved =
+    op.amount >= 0.01 ||
+    op.entries.length > 0 ||
+    allowsZeroPostings ||
+    op.amountMode === 'calculated_by_1c';
+
+  // 1. Non-posting HR / invoice / contract / policy / writ registration
+  if (allowsZeroPostings && op.entries.length === 0) {
+    if (op.category === 'hr_hire') {
+      const sal = op.monthlySalary || op.rawExcelAmount || 0;
+      const formula =
+        sal >= 0.01
+          ? `Штатный оклад сотрудника${op.employeeName ? ` «${op.employeeName}»` : ''} = ${fmtMoney(sal)} / мес. (0 проводок Дт/Кт при приёме / кадровом приказе)`
+          : existing?.summaryFormula && existing.resolverLevel !== 8
+            ? existing.summaryFormula
+            : 'Кадровое регистрационное событие в 1С:БП 3.0 (0 проводок Дт/Кт)';
+      return (
+        sanitizeBreakdown1C({
+          resolverLevel: 1,
+          resolverLevelName:
+            'Кадровый приказ в 1С:БП 3.0 (регистрация сотрудника и оклада в ФОТ без проводок)',
+          summaryFormula: formula,
+          steps:
+            sal >= 0.01
+              ? [
+                  `Документ «Прием на работу» / «Кадровый перевод» фиксирует в регистре плановых начислений 1С оклад ${fmtMoney(sal)} в месяц (без НДС).`,
+                  'Сам кадровый приказ не формирует бухгалтерских проводок; начисление зарплаты, НДФЛ и взносов выполняется в конце месяца документом «Начисление зарплаты».',
+                ]
+              : existing?.steps?.length
+                ? existing.steps.filter((s) => !/ндс\s*20\s*%/iu.test(s))
+                : ['Кадровый документ регистрирует сведения в 1С без проводок по счетам БУ.'],
+          sourceLinks: existing?.sourceLinks ?? [],
+        }) ?? {
+          resolverLevel: 1,
+          resolverLevelName: LEVEL_NAMES[1],
+          summaryFormula: formula,
+          steps: [],
+          sourceLinks: [],
+        }
+      );
+    }
+
+    if (op.category === 'customer_invoice' || op.category === 'supplier_invoice') {
+      const invAmt = op.amount || op.rawExcelAmount || 0;
+      const vatTxt =
+        !isVatFree && op.vatAmount >= 0.01
+          ? ` (в т.ч. НДС ${op.vatRate}% = ${fmtMoney(op.vatAmount)})`
+          : isVatFree && invAmt >= 0.01
+            ? ' (без НДС)'
+            : '';
+      const formula =
+        invAmt >= 0.01
+          ? `Сумма счёта на оплату = ${fmtMoney(invAmt)}${vatTxt} (0 проводок Дт/Кт; заказ сохранён в openOrders)`
+          : 'Регистрация счёта на оплату в журнале 1С:БП 3.0 (0 проводок Дт/Кт)';
+      return {
+        resolverLevel: 1,
+        resolverLevelName:
+          op.category === 'customer_invoice'
+            ? 'Счёт покупателю на оплату (регистрация суммы заказа без проводок)'
+            : 'Счёт от поставщика на оплату (регистрация счёта без проводок)',
+        summaryFormula: formula,
+        steps: [
+          `Счёт на сумму ${fmtMoney(invAmt)} сохранён в регистре заказов живой модели 1С для автоматической привязки последующей оплаты и отгрузки.`,
+        ],
+        sourceLinks: existing?.sourceLinks ?? [],
+      };
+    }
+
+    if (existing && existing.resolverLevel !== 8) {
+      return {
+        ...existing,
+        summaryFormula: isVatFree
+          ? existing.summaryFormula.replace(/\s*\(?в\s+т\.?\s*ч\.?\s*ндс[^)]*\)?/giu, ' (без НДС)')
+          : existing.summaryFormula,
+        steps: isVatFree
+          ? existing.steps.filter((s) => !/выделен\s*\/\s*начислен\s+ндс|в\s+т\.?\s*ч\.?\s*ндс/iu.test(s))
+          : existing.steps,
+        checkedSourcesWhenMissing: undefined,
+      };
+    }
+  }
+
+  // 2. If resolved later in postingEngine (e.g. Level 5/6 balance or payroll/closing) while trace was Level 8 or missing:
+  if (isResolved && (!existing || existing.resolverLevel === 8)) {
+    const inferredLevel: 1 | 2 | 3 | 4 | 5 | 6 =
+      op.amountMode === 'explicit'
+        ? 1
+        : op.amountMode === 'from_related_doc'
+          ? 3
+          : op.amountMode === 'from_account_balance' || op.amountMode === 'from_stock_balance'
+            ? 5
+            : 6;
+    const prov =
+      op.calculationProvenance ||
+      op.amountCalculationNote ||
+      (op.amount >= 0.01
+        ? `${fmtMoney(op.amount)}${
+            !isVatFree && op.vatAmount >= 0.01
+              ? ` (в т.ч. НДС ${op.vatRate}% = ${fmtMoney(op.vatAmount)})`
+              : ' (без НДС)'
+          }`
+        : `Регламентный расчёт 1С (${op.entries.length} провод.)`);
+    return (
+      sanitizeBreakdown1C({
+        resolverLevel: inferredLevel,
+        resolverLevelName: LEVEL_NAMES[inferredLevel],
+        summaryFormula: prov,
+        steps: [
+          prov,
+          isVatFree
+            ? 'Операция не облагается НДС (ставка Без НДС).'
+            : `Ставка НДС ${op.vatRate}%, сумма НДС: ${fmtMoney(op.vatAmount)}.`,
+        ],
+        sourceLinks: existing?.sourceLinks ?? [],
+        checkedSourcesWhenMissing: undefined,
+      }) ?? {
+        resolverLevel: inferredLevel,
+        resolverLevelName: LEVEL_NAMES[inferredLevel],
+        summaryFormula: prov,
+        steps: [prov],
+        sourceLinks: [],
+      }
+    );
+  }
+
+  if (!existing) {
+    return {
+      resolverLevel: 8,
+      resolverLevelName: LEVEL_NAMES[8],
+      summaryFormula: 'Сумма требует уточнения',
+      steps: [],
+      sourceLinks: [],
+    };
+  }
+
+  // 3. Synchronize VAT & final amount if final op is VAT-free or final amount differs from preliminary trace!
+  let summaryFormula = existing.summaryFormula;
+  let steps = [...existing.steps];
+
+  if (isVatFree) {
+    if (/ндс\s*\d+\s*%/iu.test(summaryFormula)) {
+      summaryFormula =
+        op.amount >= 0.01 ? `${fmtMoney(op.amount)} (без НДС)` : summaryFormula.replace(/\s*\(?[^()]*ндс\s*\d+\s*%[^()]*\)?/giu, ' (без НДС)');
+    }
+    steps = steps.map((s) =>
+      /выделен\s*\/\s*начислен\s+ндс|расч[её]тная\s+ставка\s+ндс|сверх\s+стоимости\s+партии/iu.test(s)
+        ? 'Операция не облагается НДС (ставка Без НДС).'
+        : s
+    );
+  } else if (op.amount >= 0.01 && op.vatAmount >= 0.01 && /без\s+ндс/iu.test(summaryFormula) && op.vatRule !== 'on_top') {
+    summaryFormula = `${fmtMoney(op.amount)} (в т.ч. НДС ${op.vatRate}% = ${fmtMoney(op.vatAmount)}; база без НДС = ${fmtMoney(round2(op.amount - op.vatAmount))})`;
+  }
+
+  // If final op.amount differs materially from a Level 1/2/3 trace amount (e.g., overridden by exact subaccount balance in postingEngine), update summaryFormula!
+  if (
+    op.amount >= 0.01 &&
+    (op.calculationProvenance || op.amountCalculationNote) &&
+    !summaryFormula.includes(fmtMoney(op.amount).replace(/\s*₽$/, ''))
+  ) {
+    summaryFormula =
+      op.calculationProvenance ||
+      op.amountCalculationNote ||
+      `${fmtMoney(op.amount)}${isVatFree ? ' (без НДС)' : ` (в т.ч. НДС ${op.vatRate}% = ${fmtMoney(op.vatAmount)})`}`;
+  }
+
+  return (
+    sanitizeBreakdown1C({
+      ...existing,
+      summaryFormula,
+      steps,
+      checkedSourcesWhenMissing: isResolved ? undefined : existing.checkedSourcesWhenMissing,
+    }) ?? {
+      ...existing,
+      summaryFormula,
+      steps,
+      checkedSourcesWhenMissing: isResolved ? undefined : existing.checkedSourcesWhenMissing,
+    }
+  );
 }
