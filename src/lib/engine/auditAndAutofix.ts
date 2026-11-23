@@ -1136,12 +1136,14 @@ export function runAuditDiagnostics(params: {
       });
     }
 
-    // Missing primary amount check ("Требуется сумма") — NEVER flag HR orders, writs, contract/policy events, payroll calculated_by_1c, neutral manual ops, or reclassifiable operations!
+    // Missing primary amount check ("Требуется сумма") — NEVER flag HR orders, writs, contract/policy events, valid calculated_by_1c (>0), neutral manual ops, or reclassifiable operations!
     const isCalculatedBy1C =
-      op.amountMode === 'calculated_by_1c' ||
+      ((op.amountMode === 'calculated_by_1c' ||
+        op.category === 'payroll_accrual' ||
+        op.category === 'insurance_accrual') &&
+        (op.amount >= 0.01 || op.entries.length > 0)) ||
       doesSpecAllowZeroPostings(op.category) ||
-      op.category === 'payroll_accrual' ||
-      op.category === 'insurance_accrual' ||
+      op.category === 'closing' ||
       op.category === 'manual' ||
       naturalCheck.category === 'manual' ||
       isReclassifiableLegacy;
@@ -1478,8 +1480,9 @@ export function runAuditDiagnostics(params: {
     if (
       op.entries.length === 0 &&
       !doesSpecAllowZeroPostings(op.category) &&
-      !(op.category === 'vat_deduction' && op.amountMode === 'calculated_by_1c') &&
-      ((!op.needsAmount && op.amount >= 0.01) || op.amountMode === 'calculated_by_1c')
+      op.category !== 'closing' &&
+      !op.needsAmount &&
+      op.amount >= 0.01
     ) {
       issues.push({
         id: `empty-entries-${op.id}`,
@@ -2531,7 +2534,7 @@ export function generatePeriodClosingOperations(params: {
     const closeOp: QueuedOperation = {
       id: nextAutoFixId('op-auto-close'),
       createdAt: new Date().toISOString(),
-      sourceFileName: 'Регламентная операция 1С',
+      sourceFileName: '',
       date: closeDate,
       docNumber: 'РЕГЛ-ЗАКР',
       description: 'Регламентное закрытие счетов затрат и финансовых результатов (20, 26, 44, 90, 91, 99)',
@@ -3864,7 +3867,8 @@ export function autoFixAllBy1CDb(params: {
         updatedOp.category === 'contract_event' ||
         updatedOp.category === 'policy_event' ||
         updatedOp.category === 'customer_invoice' ||
-        updatedOp.category === 'supplier_invoice'
+        updatedOp.category === 'supplier_invoice' ||
+        updatedOp.category === 'vat_deduction'
       ) {
         updatedOp.needsAmount = undefined;
         updatedOp.readinessStatus = 'ready';

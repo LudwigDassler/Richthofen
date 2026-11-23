@@ -491,7 +491,7 @@ export function Tab3AuditAutofix() {
               </span>
             </div>
             <span
-              className={`shrink-0 whitespace-nowrap inline-flex items-center rounded-lg px-2.5 py-1 font-medium ${
+              className={`max-w-full inline-flex items-center rounded-lg px-2.5 py-1 font-medium ${
                 autoFixSummary.isOsvBalanced
                   ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border border-emerald-200/70 dark:border-emerald-800/60'
                   : 'bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 border border-rose-200/70 dark:border-rose-800/60'

@@ -2045,10 +2045,10 @@ export const DOCUMENT_SPECS: Record<OperationCategory, DocumentSpec1C> = {
   vat_deduction: makeSpec({
     docType: 'СчетФактураПолученный',
     category: 'vat_deduction',
-    label: '1С: Принятие НДС к вычету (Формирование записей книги покупок 19 → 68.02)',
+    label: '1С: Регламентная операция НДС (Формирование записей книги покупок и книги продаж)',
     uiProfile: 'taxes_bank_founders',
     menuPath1C: 'Операции → Закрытие периода → Регламентные операции НДС → Формирование записей книги покупок',
-    documentKind1C: 'Формирование записей книги покупок (Дт 68.02 Кт 19.01 / 19.02 / 19.03 / 19.04)',
+    documentKind1C: 'Формирование записей книги покупок и книги продаж (регламентная операция НДС 19 → 68.02)',
     requiresCommercialCounterparty: false,
     acceptsCounterpartySubconto: true,
     requiresIndividual: false,
@@ -2056,7 +2056,7 @@ export const DOCUMENT_SPECS: Record<OperationCategory, DocumentSpec1C> = {
     needsWarehouse: false,
     needsExpenseItem: false,
     needsCashFlowItem: false,
-    allowsZeroPostings: false,
+    allowsZeroPostings: true,
     vatPolicy: 'forbidden',
     defaultSubaccounts: {
       debit: '68.02',

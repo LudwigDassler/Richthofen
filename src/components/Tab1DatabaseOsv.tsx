@@ -250,7 +250,7 @@ export function Tab1DatabaseOsv() {
   const drilldownMovements: OsvAccountMovement[] = useMemo(() => {
     if (!selectedAccountDrilldown) return [];
     const direct = osvReport.movementsByAccount?.[selectedAccountDrilldown];
-    if (direct && direct.length > 0) return direct;
+    if (direct && direct.length > 0 && !selectedOsvRow?.isGroup) return direct;
 
     const byChildren: OsvAccountMovement[] = [];
     const map = osvReport.movementsByAccount ?? {};
@@ -262,8 +262,44 @@ export function Tab1DatabaseOsv() {
         byChildren.push(...list);
       }
     }
-    return byChildren.sort((a, b) => a.date.localeCompare(b.date));
-  }, [selectedAccountDrilldown, osvReport.movementsByAccount]);
+    const sorted = byChildren.sort((a, b) => {
+      if (a.date !== b.date) return a.date.localeCompare(b.date);
+      return a.id.localeCompare(b.id);
+    });
+
+    const accType = selectedOsvRow?.type ?? 'active_passive';
+    let runningNet =
+      Math.round(
+        ((selectedOsvRow?.startDebit ?? 0) - (selectedOsvRow?.startCredit ?? 0) + Number.EPSILON) *
+          100
+      ) / 100;
+
+    return sorted.map((m) => {
+      runningNet =
+        Math.round((runningNet + m.debitAmount - m.creditAmount + Number.EPSILON) * 100) / 100;
+      let runningDebit = 0;
+      let runningCredit = 0;
+      let isRedRunning = false;
+      if (accType === 'active') {
+        runningDebit = runningNet;
+        isRedRunning = runningNet < -0.005;
+      } else if (accType === 'passive') {
+        runningCredit = -runningNet;
+        isRedRunning = runningNet > 0.005;
+      } else if (runningNet >= 0) {
+        runningDebit = runningNet;
+      } else {
+        runningCredit = -runningNet;
+      }
+      return {
+        ...m,
+        runningNet,
+        runningDebit,
+        runningCredit,
+        isRedRunning,
+      };
+    });
+  }, [selectedAccountDrilldown, selectedOsvRow, osvReport.movementsByAccount]);
 
   const exportOsvToExcel = () => {
     const sourceLabel =

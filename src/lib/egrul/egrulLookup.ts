@@ -632,16 +632,18 @@ interface FnsEgrulRow {
 async function queryOfficialFnsEgrul(
   query: string,
   fetchImpl: typeof fetch,
-  timeoutMs: number
+  timeoutMs: number,
+  regionHint = ''
 ): Promise<EgrulCandidate[]> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    const isInnQuery = /^\d{10}(\d{2})?$/.test(query);
     const body = new URLSearchParams({
       vyp3CaptchaToken: '',
       page: '',
       query,
-      region: '',
+      region: !isInnQuery && regionHint ? regionHint : '',
       PreventChromeAutocomplete: '',
     }).toString();
 
@@ -782,11 +784,16 @@ export async function lookupCounterpartyInEgrul(
     }
 
     if (rawCandidates.length === 0) {
-      rawCandidates = await queryOfficialFnsEgrul(query, fetchImpl, timeoutMs);
+      rawCandidates = await queryOfficialFnsEgrul(query, fetchImpl, timeoutMs, regionHint);
       usedSource = 'egrul_fns';
     }
 
-    const sorted = [...rawCandidates]
+    const isInnQuery = /^\d{10}(\d{2})?$/.test(query);
+    const eligibleCandidates = isInnQuery
+      ? rawCandidates
+      : filterCandidatesForHomeRegion(rawCandidates, rawName, regionHint);
+
+    const sorted = [...eligibleCandidates]
       .sort(
         (a, b) =>
           rankEgrulCandidate(b, queryNorm, regionHint) -
@@ -808,10 +815,14 @@ export async function lookupCounterpartyInEgrul(
     };
   } catch (err) {
     if (!options.fetchImpl && queryNorm.length >= 3) {
-      const offlineHits = KNOWN_RUSSIAN_COMPANIES_FALLBACK.filter((c) => {
+      const isInnQuery = /^\d{10}(\d{2})?$/.test(query);
+      const rawOfflineHits = KNOWN_RUSSIAN_COMPANIES_FALLBACK.filter((c) => {
         const cn = normalizeEntityKey(c.name);
         return cn === queryNorm || cn.includes(queryNorm) || queryNorm.includes(cn) || c.inn === query;
       });
+      const offlineHits = isInnQuery
+        ? rawOfflineHits
+        : filterCandidatesForHomeRegion(rawOfflineHits, rawName, regionHint);
       if (offlineHits.length > 0) {
         return {
           ok: true,

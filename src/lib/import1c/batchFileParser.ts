@@ -863,7 +863,7 @@ export function extractRequisitesFromFreeText(
   const internalWriteoffMatch = text.match(
     /(?:передан\p{L}*|списан\p{L}*|отпущен\p{L}*|израсходован\p{L}*|направлен\p{L}*)\s+(?:со\s+склада\s+)?([А-Яа-яЁё][А-Яа-яЁё0-9\s«»"'-]{1,45}?)(?:\s+\d+(?:[.,]\d+)?\s*(?:шт|ед|компл|упак|рул|м2|м3|кг|т|л)\.?)?\s+(?:на\s+объект|в\s+производств\p{L}*|на\s+строительств\p{L}*|для\s+производств\p{L}*|для\s+строительств\p{L}*|для\s+изготовлен\p{L}*|в\s+цех|на\s+участок|на\s+нужды|на\s+ремонт)(?:\s+(?:для\s+)?(производств\p{L}*\s+[А-Яа-яЁё0-9\s«»"'-]{2,40}|строительств\p{L}*\s+[А-Яа-яЁё0-9\s«»"'-]{2,40}|изготовлен\p{L}*\s+[А-Яа-яЁё0-9\s«»"'-]{2,40}|[А-Яа-яЁё0-9«»"'-]{2,35}))?/iu
   );
-  if (internalWriteoffMatch && !/(?:^|\s)от\s+(?:ООО|АО|ПАО|ЗАО|ИП)\b/iu.test(text)) {
+  if (internalWriteoffMatch && !/(?:^|\s)от\s+(?:ООО|АО|ПАО|ЗАО|ОАО|ИП)(?=$|[^\p{L}])/iu.test(text)) {
     const rawItem = internalWriteoffMatch[1]
       .replace(/^(?:материалы?|сырь[её]|строительн\p{L}+\s+материалы?)\s+/iu, '')
       .trim();
@@ -997,7 +997,7 @@ export function extractRequisitesFromFreeText(
   }
 
   if (nomenclatureHint) {
-    nomenclatureHint = cleanNomenclatureName1C(nomenclatureHint) || undefined;
+    nomenclatureHint = cleanNomenclatureName1C(nomenclatureHint, text) || undefined;
   }
 
   // E2. Accountable person / employee FIO (счёт 71.01, "через Федорова Ф.Ф.", "Главному бухгалтеру", etc.)

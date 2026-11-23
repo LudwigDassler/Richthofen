@@ -99,6 +99,7 @@ function deriveReadinessStatus(op: QueuedOperation): OperationReadinessStatus {
     op.category === 'supplier_invoice' ||
     op.docType1C === 'СчетПокупателю' ||
     op.docType1C === 'СчетОтПоставщика' ||
+    op.category === 'vat_deduction' ||
     op.category === 'policy_event'
   ) {
     return 'ready';

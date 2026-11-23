@@ -1436,8 +1436,16 @@ export function advanceVirtual1CStateWithOperation(
   }
 
   // 4. Register / update Employees (including monthlySalary from rawExcelAmount, child & property tax deductions, and HR transfers)
-  const rawEmpCandidate = (op.employeeName || '').trim();
-  if (rawEmpCandidate) {
+  const isFounderOnlyOp =
+    op.category === 'charter_capital' ||
+    op.category === 'founder_contribution' ||
+    op.category === 'dividends_accrual' ||
+    op.category === 'dividends_payout';
+  const rawEmpCandidate = isFounderOnlyOp ? '' : (op.employeeName || '').trim();
+  if (
+    rawEmpCandidate &&
+    !/^(?:ООО|АО|ПАО|ЗАО|ОАО|НАО|ГУП|МУП|ИП)(?:\s|[«"'])/iu.test(rawEmpCandidate)
+  ) {
     const empName = normalizeEmployeeOrFounderName1C(rawEmpCandidate);
     const empKey = `emp:${normalizePersonIdentityKey1C(empName)}`;
     const taxDed = extractEmployeeTaxDeductions1C(op.description);
@@ -1462,7 +1470,20 @@ export function advanceVirtual1CStateWithOperation(
         ? round2(op.rawExcelAmount)
         : undefined);
 
-    const existingEmp = state.employees.find((e) => e.key === empKey);
+    const bareSurnameStem = empName
+      .split(/\s+/)[0]
+      .toLowerCase()
+      .replace(/ё/g, 'е')
+      .replace(/(?:ова|ева|ина|ына|ской|цкой|ская|цкая|ов|ев|ин|ын|ский|цкий|у|ю|ом|ем|ой|ей)$/u, '');
+
+    const existingEmp =
+      state.employees.find((e) => e.key === empKey) ||
+      (!empName.includes('.') && bareSurnameStem.length >= 4
+        ? state.employees.find((e) => {
+            const eSur = e.fullName.split(/\s+/)[0].toLowerCase().replace(/ё/g, 'е');
+            return eSur.startsWith(bareSurnameStem);
+          })
+        : undefined);
     if (existingEmp) {
       if (effectiveSalary > 0) {
         existingEmp.monthlySalary = effectiveSalary;
@@ -1491,25 +1512,27 @@ export function advanceVirtual1CStateWithOperation(
       const isHireRow =
         op.category === 'hr_hire' ||
         /принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу/iu.test(op.description);
-      state.employees.push({
-        key: empKey,
-        fullName: empName,
-        position: op.employeePosition || (empName === 'Главный бухгалтер' ? 'Главный бухгалтер' : 'Сотрудник штата'),
-        monthlySalary: effectiveSalary,
-        subdivision: 'Основное подразделение',
-        hireDate: op.date,
-        childCount: childCount && childCount > 0 ? childCount : undefined,
-        isSingleParent: isSingleParent || undefined,
-        propertyTaxDeduction: propDeduction && propDeduction > 0 ? propDeduction : undefined,
-        propertyTaxDeductionStartDate:
-          propDeduction && propDeduction > 0 && op.date ? `${op.date.slice(0, 7)}-01` : undefined,
-        isStaffEmployee: isHireRow || effectiveSalary > 0,
-        source: 'created_in_operation',
-        firstSeenOpId: op.id,
-        firstSeenOpNumber: opNumber,
-        firstSeenDate: op.date,
-        usages: [usageRef],
-      });
+      if (isHireRow || effectiveSalary > 0 || Boolean(propDeduction && propDeduction > 0)) {
+        state.employees.push({
+          key: empKey,
+          fullName: empName,
+          position: op.employeePosition || (empName === 'Главный бухгалтер' ? 'Главный бухгалтер' : 'Сотрудник штата'),
+          monthlySalary: effectiveSalary,
+          subdivision: 'Основное подразделение',
+          hireDate: op.date,
+          childCount: childCount && childCount > 0 ? childCount : undefined,
+          isSingleParent: isSingleParent || undefined,
+          propertyTaxDeduction: propDeduction && propDeduction > 0 ? propDeduction : undefined,
+          propertyTaxDeductionStartDate:
+            propDeduction && propDeduction > 0 && op.date ? `${op.date.slice(0, 7)}-01` : undefined,
+          isStaffEmployee: isHireRow || effectiveSalary > 0,
+          source: 'created_in_operation',
+          firstSeenOpId: op.id,
+          firstSeenOpNumber: opNumber,
+          firstSeenDate: op.date,
+          usages: [usageRef],
+        });
+      }
     }
   }
 

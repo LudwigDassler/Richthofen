@@ -347,6 +347,17 @@ test('Real 3-quarter coursework CSV pipeline (207 operations): all 8 systemic ch
     }
   }
 
+  // Zero counterparty prefix leakage in nomenclatureName across all operations
+  for (const op of ops) {
+    assert.equal(
+      /^(?:от\s+)?(?:ООО|АО|ПАО|ЗАО|ОАО|ИП)(?=$|[^\p{L}])/iu.test(op.nomenclatureName ?? ''),
+      false,
+      `Nomenclature must never contain counterparty prefix, got "${op.nomenclatureName}" on ${op.date}`
+    );
+  }
+  const op78 = ops.find((o) => o.date === '2026-05-04' && o.amount === 550000);
+  assert.equal(op78?.nomenclatureName, 'Строительные материалы');
+
   // Max primary operation amount must equal 10 692 000 ₽ (ООО «Ключ»), proving 0 billion-ruble INN corruptions
   const primaryOps = ops.filter((o) => o.category !== 'closing');
   const maxPrimaryAmt = Math.max(...primaryOps.map((o) => o.amount));
@@ -502,13 +513,33 @@ test('Self-heals attached 1c_workbench_snapshot.json (209 -> 207 ops): strips op
     reportingYear: 2026,
   });
 
+  const allSnapDescriptions = healed.operations.map((o) => o.description).join('\n');
   const innMap = new Map<string, Set<string>>();
   for (const op of healed.operations) {
     if (op.counterpartyName && op.counterpartyInn) {
       if (!innMap.has(op.counterpartyName)) innMap.set(op.counterpartyName, new Set());
       innMap.get(op.counterpartyName)!.add(op.counterpartyInn);
+      if (!allSnapDescriptions.includes(op.counterpartyInn)) {
+        assert.ok(
+          op.counterpartyInn.startsWith('78') || op.counterpartyInn.startsWith('47'),
+          `Non-explicit INN on healed snapshot must be home region 78/47, got ${op.counterpartyInn} for ${op.counterpartyName}`
+        );
+      }
     }
   }
   const multiInn = [...innMap.entries()].filter(([, s]) => s.size > 1);
   assert.equal(multiInn.length, 0, 'Healed snapshot must have 0 companies with >1 INN');
+
+  const maxHealedPrimary = Math.max(
+    ...healed.operations.filter((o) => o.category !== 'closing').map((o) => o.amount)
+  );
+  assert.ok(
+    maxHealedPrimary <= 10692000,
+    `Healed snapshot max primary amount must not exceed 10 692 000 ₽ (no billion INN bug), got ${maxHealedPrimary}`
+  );
+  assert.equal(
+    healed.executionSummary.remainingAutofixableCount,
+    0,
+    'Healed snapshot remainingAutofixableCount must equal 0'
+  );
 });

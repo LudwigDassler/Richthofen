@@ -414,7 +414,9 @@ export function calculateOsvReport(params: {
       cur.kt = round2(cur.kt + m.amount);
       targetMap.set(m.credit, cur);
       addSubcontoTurn(m.credit, m.creditSubconto, 'kt', m.amount);
-      pushMovementForAcc(m.credit, m);
+      if (m.credit !== m.debit) {
+        pushMovementForAcc(m.credit, m);
+      }
     }
   }
 
