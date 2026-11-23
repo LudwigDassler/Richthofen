@@ -38,6 +38,7 @@ export interface Organization1C {
 export interface AccountingPolicy1C {
   taxSystem: TaxSystem1C;
   vatRate: number;
+  profitTaxRate?: number;
   directCosting26To9008: boolean;
   inventoryValuationMethod: string;
   rawRegisters: Record<string, unknown>;
@@ -623,9 +624,21 @@ export interface QueuedOperation {
   linkedSourceOpIds?: string[];
   usefulLifeMonths?: number;
   depreciationBaseAmount?: number;
+  isOsModernization?: boolean;
   rpbTermMonths?: number;
+  rpbWriteOffMethod?: 'calendar_days' | 'monthly';
+  rpbStartDate?: string;
+  rpbEndDate?: string;
   rpbSettlementAccount?: '76.09' | '60.01';
   paidImmediatelyVia?: 'bank_51' | 'cash_50' | 'accountable_71';
+  customPostings?: Array<{
+    debit: string;
+    credit: string;
+    amount?: number;
+    debitSubconto?: string;
+    creditSubconto?: string;
+    description?: string;
+  }>;
   semanticIntent?: import('./semanticIntent').ParsedOperationIntent;
   studentExplanation?: string;
   vatRate: number;
@@ -896,6 +909,10 @@ export interface VirtualDeferredExpense1C {
   remainingAmount: number;
   termMonths: number;
   monthlyAmount: number;
+  writeOffMethod?: 'calendar_days' | 'monthly';
+  startDate?: string;
+  endDate?: string;
+  totalCalendarDays?: number;
   writeOffAccount: '20.01' | '26' | '44.01';
   startMonth: string; // YYYY-MM
   settlementAccount?: '76.09' | '60.01';

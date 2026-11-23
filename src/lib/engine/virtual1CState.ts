@@ -1531,8 +1531,15 @@ export function advanceVirtual1CStateWithOperation(
       op.description
     );
     const isSalaryUnchanged = /оклад\s+не\s+изменил/iu.test(op.description);
+    const isOneOffPayrollAccrual =
+      op.category !== 'hr_hire' &&
+      !/оклад/iu.test(op.description || '') &&
+      (op.category === 'payroll_accrual' ||
+        /больничн|нетрудоспособност|компенсац\p{L}*.*отпуск|отпускн|материальн\p{L}*\s+помощ|при\s+увольнен|преми\p{L}*/iu.test(
+          op.description || ''
+        ));
     const effectiveSalary =
-      !isTaxDedNotice && !isSalaryUnchanged
+      !isTaxDedNotice && !isSalaryUnchanged && !isOneOffPayrollAccrual
         ? op.monthlySalary && op.monthlySalary > 0
           ? round2(op.monthlySalary)
           : op.category === 'hr_hire' && op.rawExcelAmount && op.rawExcelAmount > 0 && op.rawExcelAmount < 50_000_000
@@ -1562,14 +1569,18 @@ export function advanceVirtual1CStateWithOperation(
             return eSur.startsWith(bareSurnameStem);
           })
         : undefined);
-    const isHireRow =
-      op.category === 'hr_hire' ||
-      /принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу/iu.test(op.description);
+    const isTransferRow =
+      /перевед[её]н|кадров\p{L}*\s+перевод/iu.test(op.description);
     const isDismissalRow =
       Boolean(op.employeeTerminationDate) ||
       /(?:^|[^\p{L}])(?:уволен\p{L}*|расторгнут\p{L}*\s+трудов\p{L}*\s+договор|прекращен\p{L}*\s+трудов\p{L}*)/iu.test(
         op.description
       );
+    const isHireRow =
+      !isDismissalRow &&
+      !isTransferRow &&
+      (op.category === 'hr_hire' ||
+        /принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу/iu.test(op.description));
     const resolvedHireDate = isHireRow ? resolveEmployeeHireStartDate1C(op) : op.date;
     const explicitEmpCostAcc =
       op.category === 'hr_hire' &&
@@ -1584,7 +1595,7 @@ export function advanceVirtual1CStateWithOperation(
       if (op.employeePosition) {
         existingEmp.position = op.employeePosition;
       }
-      if (op.employeePosition || explicitEmpCostAcc || !existingEmp.costAccount) {
+      if ((op.employeePosition || explicitEmpCostAcc || !existingEmp.costAccount) && !isDismissalRow) {
         existingEmp.costAccount = inferEmployeeCostAccount1C(
           op.employeePosition || existingEmp.position,
           op.description,
@@ -1615,7 +1626,19 @@ export function advanceVirtual1CStateWithOperation(
         existingEmp.hireDate = resolvedHireDate;
       }
       if (isDismissalRow) {
-        existingEmp.terminationDate = op.employeeTerminationDate || op.date;
+        const parsedTermMatch = (op.description || '').match(
+          /(?:уволен\p{L}*|расторгнут\p{L}*\s+трудов\p{L}*\s+договор|прекращен\p{L}*\s+трудов\p{L}*)[^0-9\n]{0,40}?(\d{2})[./](\d{2})(?:[./](\d{2,4}))?/iu
+        );
+        const parsedTermIso = (() => {
+          if (!parsedTermMatch) return undefined;
+          const dd = parsedTermMatch[1];
+          const mm = parsedTermMatch[2];
+          const rawY = parsedTermMatch[3];
+          const fallbackYear = (op.date || '2026-01-01').slice(0, 4);
+          const yyyy = rawY ? (rawY.length === 2 ? `20${rawY}` : rawY) : fallbackYear;
+          return `${yyyy}-${mm}-${dd}`;
+        })();
+        existingEmp.terminationDate = op.employeeTerminationDate || parsedTermIso || op.date;
       }
       existingEmp.usages = addUsageRef(existingEmp.usages, usageRef);
     } else if (empKey) {
@@ -1745,7 +1768,42 @@ export function advanceVirtual1CStateWithOperation(
     const cost = entry0101 > 0 ? entry0101 : op.amount > 0 ? op.amount : existingOs?.initialCost || 0;
     const monthlyDep = spi > 0 && cost > 0 ? round2(cost / spi) : 0;
 
-    if (existingOs) {
+    const isModernizationOp =
+      Boolean(op.isOsModernization) ||
+      /модернизац|реконструкц\p{L}*\s+(?:ос|основн\p{L}*\s+средств|оборудован|станк)|дооборудован/iu.test(
+        op.description || ''
+      );
+
+    if (
+      existingOs &&
+      existingOs.status === 'Введено в эксплуатацию (счёт 01.01)' &&
+      isModernizationOp &&
+      cost > 0
+    ) {
+      existingOs.initialCost = round2(existingOs.initialCost + cost);
+      if (op.usefulLifeMonths && op.usefulLifeMonths > 0) {
+        existingOs.usefulLifeMonths = op.usefulLifeMonths;
+      }
+      const commYm = (existingOs.commissioningDate || op.date || '').slice(0, 7);
+      const modYm = (op.date || '').slice(0, 7);
+      const elapsedBeforeMod =
+        commYm && modYm && modYm > commYm
+          ? Math.max(
+              0,
+              Number(modYm.slice(0, 4)) * 12 +
+                Number(modYm.slice(5, 7)) -
+                (Number(commYm.slice(0, 4)) * 12 + Number(commYm.slice(5, 7)))
+            )
+          : 0;
+      const totalSpi = existingOs.usefulLifeMonths > 0 ? existingOs.usefulLifeMonths : spi;
+      const remSpi = Math.max(1, totalSpi - elapsedBeforeMod);
+      const residualAfterMod = Math.max(
+        0,
+        round2(existingOs.initialCost - (existingOs.accumulatedDepreciation || 0))
+      );
+      existingOs.monthlyDepreciation = round2(residualAfterMod / remSpi);
+      existingOs.usages = addUsageRef(existingOs.usages, usageRef);
+    } else if (existingOs) {
       existingOs.status = 'Введено в эксплуатацию (счёт 01.01)';
       if (cost > 0) existingOs.initialCost = cost;
       existingOs.usefulLifeMonths = spi;
@@ -1771,29 +1829,66 @@ export function advanceVirtual1CStateWithOperation(
     }
   }
 
-  if (op.category === 'depreciation_accrual') {
-    const depAmt = round2(
-      op.entries
-        .filter((e) => e.credit === '02.01')
-        .reduce((s, e) => s + e.amount, 0) || op.amount
-    );
+  // Track accumulated depreciation from ALL Кт 02.01 postings (including month-end closing, standalone depreciation, and disposal-month accrual!)
+  const deprEntries0201 = op.entries.filter((e) => e.credit === '02.01' && e.amount >= 0.01);
+  if (deprEntries0201.length > 0) {
     const activeOs = state.fixedAssets.filter(
       (a) => a.status === 'Введено в эксплуатацию (счёт 01.01)'
     );
-    if (activeOs.length === 1 && depAmt > 0) {
+    for (const de of deprEntries0201) {
+      const subText = (de.creditSubconto || '').trim();
+      const subNorm = normalizeSimpleEntityKey1C(subText);
+      const subStems = extractKeywordStems1C(subText);
+      const matchedBySub =
+        (subNorm
+          ? state.fixedAssets.find((a) => {
+              const aNorm = normalizeSimpleEntityKey1C(a.name);
+              return Boolean(aNorm && (aNorm === subNorm || aNorm.includes(subNorm) || subNorm.includes(aNorm)));
+            })
+          : undefined) ||
+        (subStems.length > 0
+          ? state.fixedAssets.find((a) =>
+              extractKeywordStems1C(a.name).some((as) => subStems.some((ss) => stemsMatch(ss, as)))
+            )
+          : undefined);
+
+      if (matchedBySub) {
+        matchedBySub.accumulatedDepreciation = round2(
+          (matchedBySub.accumulatedDepreciation || 0) + de.amount
+        );
+        matchedBySub.usages = addUsageRef(matchedBySub.usages, usageRef);
+      } else if (activeOs.length === 1) {
+        activeOs[0].accumulatedDepreciation = round2(
+          (activeOs[0].accumulatedDepreciation || 0) + de.amount
+        );
+        activeOs[0].usages = addUsageRef(activeOs[0].usages, usageRef);
+      } else if (activeOs.length > 1) {
+        const sumMonthly = round2(activeOs.reduce((s, a) => s + (a.monthlyDepreciation || 0), 0));
+        let allocated = 0;
+        activeOs.forEach((a, idx) => {
+          const share =
+            idx === activeOs.length - 1
+              ? round2(de.amount - allocated)
+              : sumMonthly > 0
+                ? round2((de.amount * (a.monthlyDepreciation || 0)) / sumMonthly)
+                : round2(de.amount / activeOs.length);
+          allocated = round2(allocated + share);
+          if (share >= 0.01) {
+            a.accumulatedDepreciation = round2((a.accumulatedDepreciation || 0) + share);
+            a.usages = addUsageRef(a.usages, usageRef);
+          }
+        });
+      }
+    }
+  } else if (op.category === 'depreciation_accrual' && op.amount >= 0.01) {
+    const activeOs = state.fixedAssets.filter(
+      (a) => a.status === 'Введено в эксплуатацию (счёт 01.01)'
+    );
+    if (activeOs.length === 1) {
       activeOs[0].accumulatedDepreciation = round2(
-        (activeOs[0].accumulatedDepreciation || 0) + depAmt
+        (activeOs[0].accumulatedDepreciation || 0) + op.amount
       );
       activeOs[0].usages = addUsageRef(activeOs[0].usages, usageRef);
-    } else if (activeOs.length > 1) {
-      for (const a of activeOs) {
-        if (a.monthlyDepreciation > 0) {
-          a.accumulatedDepreciation = round2(
-            (a.accumulatedDepreciation || 0) + a.monthlyDepreciation
-          );
-          a.usages = addUsageRef(a.usages, usageRef);
-        }
-      }
     }
   }
 
@@ -2371,6 +2466,37 @@ export function advanceVirtual1CStateWithOperation(
       op.costAccount === '20.01' || op.costAccount === '44.01' ? op.costAccount : '26';
     const existingRpb = state.deferredExpenses.find((d) => d.key === rpbKey);
     if (!existingRpb) {
+      const explicitPeriodMatch = (op.description || '').match(
+        /(?:с|на\s+период\s+с)\s*(\d{2})[./](\d{2})[./](\d{4})\s*(?:по|до|-|—)\s*(\d{2})[./](\d{2})[./](\d{4})/iu
+      );
+      const parsedStartIso = explicitPeriodMatch
+        ? `${explicitPeriodMatch[3]}-${explicitPeriodMatch[2]}-${explicitPeriodMatch[1]}`
+        : undefined;
+      const parsedEndIso = explicitPeriodMatch
+        ? `${explicitPeriodMatch[6]}-${explicitPeriodMatch[5]}-${explicitPeriodMatch[4]}`
+        : undefined;
+
+      const hasExplicitEqualMonthlyText =
+        /равными\s+долями|по\s+месяцам|ежемесячно\s+равн|срок\s+списани\p{L}*\s+\d+\s*мес/iu.test(
+          op.description || ''
+        );
+      const hasExplicitCalDaysText = /календарн\p{L}*\s+дн/iu.test(op.description || '');
+      const resolvedMethod: 'calendar_days' | 'monthly' =
+        op.rpbWriteOffMethod ||
+        (hasExplicitCalDaysText || Boolean(op.rpbEndDate || parsedEndIso)
+          ? 'calendar_days'
+          : hasExplicitEqualMonthlyText
+            ? 'monthly'
+            : 'calendar_days');
+
+      const startIso = (op.rpbStartDate || parsedStartIso || op.date || '2026-01-01').slice(0, 10);
+      const endIso = (
+        op.rpbEndDate ||
+        parsedEndIso ||
+        computeRpbEndDateFromTermMonths1C(startIso, termMonths)
+      ).slice(0, 10);
+      const totalCalDays = countInclusiveCalendarDays1C(startIso, endIso);
+
       state.deferredExpenses.push({
         key: rpbKey,
         name: rpbLabel,
@@ -2378,13 +2504,18 @@ export function advanceVirtual1CStateWithOperation(
         remainingAmount: debit9721,
         termMonths,
         monthlyAmount: round2(debit9721 / termMonths),
+        writeOffMethod: resolvedMethod,
+        startDate: startIso,
+        endDate: endIso,
+        totalCalendarDays: totalCalDays,
         writeOffAccount: writeOffAcc,
-        startMonth: (op.date || '2026-01-01').slice(0, 7),
-        settlementAccount: op.rpbSettlementAccount || (firstRpbEntry?.credit === '76.09' ? '76.09' : '60.01'),
+        startMonth: startIso.slice(0, 7),
+        settlementAccount:
+          op.rpbSettlementAccount || (firstRpbEntry?.credit === '76.09' ? '76.09' : '60.01'),
         source: 'created_in_operation',
         originOpId: op.id,
         originOpNumber: opNumber,
-        originDate: op.date || '2026-01-01',
+        originDate: op.date || startIso,
         usages: [usageRef],
       });
     }
@@ -2419,6 +2550,103 @@ export function advanceVirtual1CStateWithOperation(
   }
 
   return state;
+}
+
+function isoDateToUtcDayIndex1C(iso: string): number | null {
+  const m = (iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const ms = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return Number.isFinite(ms) ? Math.floor(ms / 86_400_000) : null;
+}
+
+export function countInclusiveCalendarDays1C(startIso: string, endIso: string): number {
+  const s = isoDateToUtcDayIndex1C(startIso);
+  const e = isoDateToUtcDayIndex1C(endIso);
+  if (s === null || e === null || e < s) return 365;
+  return Math.max(1, e - s + 1);
+}
+
+export function computeRpbEndDateFromTermMonths1C(startIso: string, termMonths: number): string {
+  const m = (startIso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return '2026-12-31';
+  const y0 = Number(m[1]);
+  const m0 = Number(m[2]); // 1..12
+  const d0 = Number(m[3]);
+  const totalM = y0 * 12 + (m0 - 1) + Math.max(1, Math.round(termMonths));
+  const targetY = Math.floor(totalM / 12);
+  const targetM1 = (totalM % 12) + 1;
+  const maxDayInTarget = new Date(Date.UTC(targetY, targetM1, 0)).getUTCDate();
+  const clampedDay = Math.min(d0, maxDayInTarget);
+  // Subtract 1 calendar day so e.g. 2026-03-23 + 12m -> 2027-03-22 (exact 365 calendar days), 2026-01-01 + 12m -> 2026-12-31
+  const endUtc = new Date(Date.UTC(targetY, targetM1 - 1, clampedDay - 1));
+  const ey = endUtc.getUTCFullYear();
+  const em = String(endUtc.getUTCMonth() + 1).padStart(2, '0');
+  const ed = String(endUtc.getUTCDate()).padStart(2, '0');
+  return `${ey}-${em}-${ed}`;
+}
+
+/**
+ * Universal 1С:БП 3.0 monthly RPB (account 97.21) write-off calculator:
+ * - `calendar_days`: proportional to active calendar days in `closeDateIso`'s month (`totalAmount * activeDays / totalCalendarDays`),
+ *   writing off exact `remainingAmount` to `0.00` in the final month of the RPB period.
+ * - `monthly`: equal monthly shares (`totalAmount / termMonths`), writing off exact `remainingAmount` in the final month.
+ */
+export function computeMonthlyRpbWriteOff1C(
+  rpb: VirtualDeferredExpense1C,
+  closeDateIso: string
+): number {
+  if (!rpb || rpb.remainingAmount < 0.01) return 0;
+  const ymMatch = (closeDateIso || '').match(/^(\d{4})-(\d{2})/);
+  if (!ymMatch) return round2(Math.min(rpb.monthlyAmount, rpb.remainingAmount));
+
+  const closeYear = Number(ymMatch[1]);
+  const closeMonth = Number(ymMatch[2]);
+  const closeYm = `${ymMatch[1]}-${ymMatch[2]}`;
+  if (rpb.startMonth && rpb.startMonth > closeYm) return 0;
+
+  const daysInCloseMonth = new Date(Date.UTC(closeYear, closeMonth, 0)).getUTCDate();
+  const monthStartIso = `${closeYm}-01`;
+  const monthEndIso = `${closeYm}-${String(daysInCloseMonth).padStart(2, '0')}`;
+
+  const method = rpb.writeOffMethod ?? 'calendar_days';
+  if (method === 'calendar_days') {
+    const startIso = (rpb.startDate || rpb.originDate || `${rpb.startMonth || closeYm}-01`).slice(0, 10);
+    const endIso = (
+      rpb.endDate || computeRpbEndDateFromTermMonths1C(startIso, rpb.termMonths || 12)
+    ).slice(0, 10);
+
+    if (monthEndIso < startIso) return 0;
+    // In or past the final month of the RPB period -> write off exact remaining balance to 0.00!
+    if (monthEndIso >= endIso) {
+      return round2(rpb.remainingAmount);
+    }
+
+    const ovStart = monthStartIso > startIso ? monthStartIso : startIso;
+    const ovEnd = monthEndIso < endIso ? monthEndIso : endIso;
+    if (ovEnd < ovStart) return 0;
+
+    const activeDays = countInclusiveCalendarDays1C(ovStart, ovEnd);
+    const totalDays =
+      rpb.totalCalendarDays && rpb.totalCalendarDays > 0
+        ? rpb.totalCalendarDays
+        : countInclusiveCalendarDays1C(startIso, endIso);
+    const share = round2((rpb.totalAmount * activeDays) / Math.max(1, totalDays));
+    return round2(Math.min(rpb.remainingAmount, share));
+  }
+
+  // 'monthly' equal shares
+  const startParts = (rpb.startMonth || closeYm).split('-');
+  const startTotalM = Number(startParts[0]) * 12 + (Number(startParts[1]) || 1);
+  const closeTotalM = closeYear * 12 + closeMonth;
+  const elapsedMonthsIdx = closeTotalM - startTotalM;
+  if (elapsedMonthsIdx < 0) return 0;
+  if (
+    elapsedMonthsIdx >= Math.max(1, rpb.termMonths) - 1 ||
+    rpb.remainingAmount <= round2(rpb.monthlyAmount + 0.05)
+  ) {
+    return round2(rpb.remainingAmount);
+  }
+  return round2(Math.min(rpb.monthlyAmount, rpb.remainingAmount));
 }
 
 /**

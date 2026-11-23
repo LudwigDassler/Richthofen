@@ -1865,6 +1865,71 @@ function resolveOperationAmountAndLinksCore(
     }
   }
 
+  if (
+    input.category === 'payroll_payout' &&
+    !/аванс\p{L}*\s+за\s+перв\p{L}*\s+половин/iu.test(input.description || '')
+  ) {
+    let accrued70 = 0;
+    let debited70 = 0;
+    const links70: ResolverSourceLink1C[] = [];
+
+    if (input.db1C?.rawBalances) {
+      for (const b of input.db1C.rawBalances) {
+        if (b.account === '70') {
+          const openCr = round2((b.startCredit || b.rawCredit || 0) - (b.startDebit || b.rawDebit || 0));
+          if (openCr > 0.01) {
+            accrued70 = round2(accrued70 + openCr);
+            links70.push({ label: `Входящее сальдо Кт 70 (${fmtMoney(openCr)})` });
+          }
+        }
+      }
+    }
+
+    input.priorOperations.forEach((p, idx) => {
+      if (p.includeInProcessing === false || p.isDuplicateIn1C) return;
+      if (input.date && p.date && p.date > input.date) return;
+      for (const e of p.entries) {
+        if (e.credit === '70') {
+          accrued70 = round2(accrued70 + e.amount);
+          links70.push({
+            opId: p.id,
+            opNumber: idx + 1,
+            date: p.date,
+            label: `Начисление Кт 70 #${idx + 1} от ${formatRuDateShort(p.date)} (+${fmtMoney(e.amount)})`,
+          });
+        }
+        if (e.debit === '70') {
+          debited70 = round2(debited70 + e.amount);
+          links70.push({
+            opId: p.id,
+            opNumber: idx + 1,
+            date: p.date,
+            label: `Удержание / аванс Дт 70 #${idx + 1} от ${formatRuDateShort(p.date)} (−${fmtMoney(e.amount)})`,
+          });
+        }
+      }
+    });
+
+    const netPayable70 = round2(accrued70 - debited70);
+    if (netPayable70 >= 0.01) {
+      return {
+        resolvedAmount: netPayable70,
+        amountMode: 'from_account_balance',
+        vatRate: 0,
+        vatRule: 'none',
+        step01Breakdown: {
+          resolverLevel: 5,
+          resolverLevelName: LEVEL_NAMES[5],
+          summaryFormula: `${fmtMoney(accrued70)} (начислено Кт 70) − ${fmtMoney(debited70)} (НДФЛ, удержания и выплаченные авансы Дт 70) = ${fmtMoney(netPayable70)}`,
+          steps: [
+            `Определено кредитовое сальдо к выплате по счёту 70 на ${formatRuDateShort(input.date)}: начислено ${fmtMoney(accrued70)}, удержано и выплачено авансом ${fmtMoney(debited70)}.`,
+          ],
+          sourceLinks: links70.slice(-8),
+        },
+      };
+    }
+  }
+
   if (input.category === 'intangible_commissioning') {
     let balance0805 = 0;
     const links0805: ResolverSourceLink1C[] = [];

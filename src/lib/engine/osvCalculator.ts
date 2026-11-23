@@ -664,14 +664,54 @@ export function calculateOsvReport(params: {
     rows.push(leaf);
   }
 
-  // Grand totals strictly over balance-sheet leafRows (excluding off-balance accounts)
+  // Grand totals over balance-sheet accounts (excluding off-balance accounts):
+  // In 1C:BP 3.0, turnover totals sum all leaf subaccounts, whereas opening/ending balance totals
+  // sum expanded leaf balances for accounts outside {90, 91, 99} (including active-passive 60, 62, 68, 69, 70, 71, 73, 75, 76)
+  // PLUS the collapsed synthetic root balances for financial result accounts 90, 91, and 99.
   const balanceLeafRows = leafRows.filter((r) => !isOffBalanceAccountCode(r.code));
-  const totalStartDebit = round2(balanceLeafRows.reduce((s, r) => s + r.startDebit, 0));
-  const totalStartCredit = round2(balanceLeafRows.reduce((s, r) => s + r.startCredit, 0));
+  const isFinancialResultCode = (code: string) => {
+    const root = code.split('.')[0];
+    return root === '90' || root === '91' || root === '99';
+  };
+  const nonFinancialBalanceLeaves = balanceLeafRows.filter((r) => !isFinancialResultCode(r.code));
+
+  let collapsedFinStartDebit = 0;
+  let collapsedFinStartCredit = 0;
+  let collapsedFinEndDebit = 0;
+  let collapsedFinEndCredit = 0;
+
+  for (const finRoot of ['90', '91', '99'] as const) {
+    const finLeaves = balanceLeafRows.filter(
+      (r) => r.code === finRoot || r.code.startsWith(`${finRoot}.`)
+    );
+    if (finLeaves.length === 0) continue;
+    const netFinStart = round2(
+      finLeaves.reduce((s, r) => s + (r.startDebit - r.startCredit), 0)
+    );
+    const netFinEnd = round2(
+      finLeaves.reduce((s, r) => s + (r.endDebit - r.endCredit), 0)
+    );
+    if (netFinStart > 0) collapsedFinStartDebit = round2(collapsedFinStartDebit + netFinStart);
+    else if (netFinStart < 0) collapsedFinStartCredit = round2(collapsedFinStartCredit - netFinStart);
+
+    if (netFinEnd > 0) collapsedFinEndDebit = round2(collapsedFinEndDebit + netFinEnd);
+    else if (netFinEnd < 0) collapsedFinEndCredit = round2(collapsedFinEndCredit - netFinEnd);
+  }
+
+  const totalStartDebit = round2(
+    nonFinancialBalanceLeaves.reduce((s, r) => s + r.startDebit, 0) + collapsedFinStartDebit
+  );
+  const totalStartCredit = round2(
+    nonFinancialBalanceLeaves.reduce((s, r) => s + r.startCredit, 0) + collapsedFinStartCredit
+  );
   const totalTurnoverDebit = round2(balanceLeafRows.reduce((s, r) => s + r.turnoverDebit, 0));
   const totalTurnoverCredit = round2(balanceLeafRows.reduce((s, r) => s + r.turnoverCredit, 0));
-  const totalEndDebit = round2(balanceLeafRows.reduce((s, r) => s + r.endDebit, 0));
-  const totalEndCredit = round2(balanceLeafRows.reduce((s, r) => s + r.endCredit, 0));
+  const totalEndDebit = round2(
+    nonFinancialBalanceLeaves.reduce((s, r) => s + r.endDebit, 0) + collapsedFinEndDebit
+  );
+  const totalEndCredit = round2(
+    nonFinancialBalanceLeaves.reduce((s, r) => s + r.endCredit, 0) + collapsedFinEndCredit
+  );
 
   const startDiff = round2(totalStartDebit - totalStartCredit);
   const turnoverDiff = round2(totalTurnoverDebit - totalTurnoverCredit);
@@ -733,14 +773,44 @@ export function calculateOsvReport(params: {
   }
 
   // 3. Unclosed cost & financial result accounts (20.01, 25, 26, 44.01, 90, 91)
-  const unclosedCostRows = balanceLeafRows.filter(
-    (r) =>
-      (r.code === '20.01' ||
-        r.code.startsWith('25') ||
-        r.code === '26' ||
-        r.code.startsWith('44')) &&
-      (Math.abs(r.endDebit) >= 0.01 || Math.abs(r.endCredit) >= 0.01)
-  );
+  const effectiveEndYm = (
+    dateTo ||
+    queuedMovements.reduce((mx, m) => (m.date > mx ? m.date : mx), '') ||
+    dbMovements.reduce((mx, m) => (m.date > mx ? m.date : mx), '')
+  ).slice(0, 7);
+  const hasClosingInEndMonth =
+    Boolean(effectiveEndYm) &&
+    operations.some(
+      (o) =>
+        o.includeInProcessing &&
+        !o.isDuplicateIn1C &&
+        o.category === 'closing' &&
+        (o.date || '').slice(0, 7) === effectiveEndYm
+    );
+  const hasLegitimateWipOn20 = (() => {
+    if (!hasClosingInEndMonth) return false;
+    const subs20 = (subcontoRowsByAccount['20.01'] ?? []).filter((s) => s.endDebit >= 0.01);
+    if (subs20.length === 0) return false;
+    const hasNamedProjectSub = subs20.some(
+      (s) =>
+        s.subcontoLabel !== 'Без аналитики (субконто)' &&
+        s.subcontoLabel !== 'Основная номенклатурная группа'
+    );
+    const hasExplicitWipPolicy = operations.some(
+      (o) =>
+        o.includeInProcessing &&
+        !o.isDuplicateIn1C &&
+        (!dateTo || o.date <= dateTo) &&
+        /незавершенн\p{L}*\s+производств|(?:^|[^\p{L}])нзп(?=$|[^\p{L}])/iu.test(o.description || '')
+    );
+    return hasNamedProjectSub || hasExplicitWipPolicy;
+  })();
+
+  const unclosedCostRows = balanceLeafRows.filter((r) => {
+    if (Math.abs(r.endDebit) < 0.01 && Math.abs(r.endCredit) < 0.01) return false;
+    if (r.code === '20.01') return !hasLegitimateWipOn20;
+    return r.code.startsWith('25') || r.code === '26' || r.code.startsWith('44');
+  });
   const unclosedFinRoots = rows.filter(
     (r) =>
       r.isGroup &&

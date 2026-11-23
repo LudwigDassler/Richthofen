@@ -136,6 +136,12 @@ export function applyParsedIntentToDraft(
     ) {
       next.employeeHireStartDate = intent.employee.hireStartDate;
     }
+    if (
+      intent.employee.terminationDate &&
+      /^\d{4}-\d{2}-\d{2}$/.test(intent.employee.terminationDate)
+    ) {
+      next.employeeTerminationDate = intent.employee.terminationDate;
+    }
     if (intent.employee.costAccount) {
       next.costAccountHint = intent.employee.costAccount;
     }
@@ -178,16 +184,28 @@ export function applyParsedIntentToDraft(
   if (intent.rpbIntent) {
     next.rpbTermMonths = intent.rpbIntent.termMonths;
     next.rpbSettlementAccount = intent.rpbIntent.settlementAccount;
+    if (intent.rpbIntent.writeOffMethod) {
+      next.rpbWriteOffMethod = intent.rpbIntent.writeOffMethod;
+    }
+    if (intent.rpbIntent.startDate && /^\d{4}-\d{2}-\d{2}$/.test(intent.rpbIntent.startDate)) {
+      next.rpbStartDate = intent.rpbIntent.startDate;
+    }
+    if (intent.rpbIntent.endDate && /^\d{4}-\d{2}-\d{2}$/.test(intent.rpbIntent.endDate)) {
+      next.rpbEndDate = intent.rpbIntent.endDate;
+    }
     next.costAccountHint = intent.rpbIntent.costAccount;
     if (!next.nomenclatureName && intent.rpbIntent.assetName) {
       next.nomenclatureName = intent.rpbIntent.assetName;
     }
   }
 
-  // Основные средства (08.04.1 / 01.01)
+  // Основные средства (08.04.1 / 01.01 / модернизация)
   if (intent.osIntent) {
     if (intent.osIntent.spiMonths && intent.osIntent.spiMonths > 0) {
       next.usefulLifeMonths = intent.osIntent.spiMonths;
+    }
+    if (intent.osIntent.isModernization) {
+      next.isOsModernization = true;
     }
     next.costAccountHint = intent.osIntent.costAccount;
     if (!next.nomenclatureName && intent.osIntent.assetName) {
@@ -210,6 +228,11 @@ export function applyParsedIntentToDraft(
       debit: e.debit,
       credit: e.credit,
     }));
+  }
+
+  // Защитный клапан customPostings для нетиповых ручных операций (ОперацияБух)
+  if (intent.customPostings && intent.customPostings.length > 0) {
+    next.customPostings = intent.customPostings.map((cp) => ({ ...cp }));
   }
 
   if (intent.studentExplanation && intent.studentExplanation.trim().length >= 3) {

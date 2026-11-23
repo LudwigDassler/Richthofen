@@ -19,6 +19,11 @@ import {
   normalizeCounterpartyKey1C,
   stemsMatch1C,
 } from '@/lib/engine/virtual1CState';
+import {
+  ACCOUNT_MAP,
+  isOffBalanceAccountCode,
+  normalizeAccountToLeaf1C,
+} from '@/data/chartOfAccounts';
 
 export const SEMANTIC_NOMENCLATURE_ACCOUNTS = [
   '10.01',
@@ -75,12 +80,17 @@ export interface ParsedOperationIntent {
     role: 'supplier' | 'buyer' | 'founder' | 'lender' | 'other';
   };
 
-  // Сотрудник / подотчётник / кадры / вычеты / алименты
+  // Сотрудник / подотчётник / кадры / вычеты / алименты / отпуск / больничный / увольнение
   employee?: {
     fullName: string;
+    hrAction?: 'hire' | 'transfer' | 'dismissal';
     position?: string;
     monthlySalary?: number;
     hireStartDate?: string;
+    terminationDate?: string;
+    unusedVacationDays?: number;
+    isSalaryAdvance?: boolean;
+    isSickLeave?: boolean;
     costAccount?: '20.01' | '26' | '44.01';
     nomenclatureGroup?: string;
     childDeductionCount?: number;
@@ -122,16 +132,20 @@ export interface ParsedOperationIntent {
   rpbIntent?: {
     assetName: string;
     termMonths: number;
+    writeOffMethod?: 'calendar_days' | 'monthly';
+    startDate?: string;
+    endDate?: string;
     costAccount: '26' | '20.01';
     settlementAccount: '76.09' | '60.01';
   };
 
-  // Основные средства (08.04.1 -> 01.01 -> 01.09)
+  // Основные средства (08.04.1 -> 01.01 -> 01.09, модернизация)
   osIntent?: {
     assetName: string;
     spiMonths?: number;
     costAccount: '20.01' | '26';
     isAdditionalCostToLastOs?: boolean;
+    isModernization?: boolean;
   };
 
   // Финансовые вложения и векселя (58.02 / 76.09)
@@ -156,6 +170,16 @@ export interface ParsedOperationIntent {
     credit: string;
     amount?: number;
     comment?: string;
+  }>;
+
+  // Защитный клапан для экзотических ручных операций, не укладывающихся в типовые шаблоны (ОперацияБух)
+  customPostings?: Array<{
+    debit: string;
+    credit: string;
+    amount?: number;
+    debitSubconto?: string;
+    creditSubconto?: string;
+    description?: string;
   }>;
 
   // Краткое понятное пояснение для карточки студента (1-2 предложения)
@@ -206,9 +230,14 @@ export const ParsedOperationIntentSchema = z.object({
   employee: z
     .object({
       fullName: z.string().min(1),
+      hrAction: z.enum(['hire', 'transfer', 'dismissal']).optional(),
       position: z.string().optional(),
       monthlySalary: z.number().nonnegative().optional(),
       hireStartDate: z.string().optional(),
+      terminationDate: z.string().optional(),
+      unusedVacationDays: z.number().nonnegative().max(366).optional(),
+      isSalaryAdvance: z.boolean().optional(),
+      isSickLeave: z.boolean().optional(),
       costAccount: z.enum(['20.01', '26', '44.01']).optional(),
       nomenclatureGroup: z.string().optional(),
       childDeductionCount: z.number().int().nonnegative().max(20).optional(),
@@ -252,6 +281,9 @@ export const ParsedOperationIntentSchema = z.object({
     .object({
       assetName: z.string().min(1),
       termMonths: z.number().int().min(1).max(240),
+      writeOffMethod: z.enum(['calendar_days', 'monthly']).optional(),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
       costAccount: z.enum(['26', '20.01']),
       settlementAccount: z.enum(['76.09', '60.01']),
     })
@@ -263,6 +295,7 @@ export const ParsedOperationIntentSchema = z.object({
       spiMonths: z.number().int().min(1).max(1200).optional(),
       costAccount: z.enum(['20.01', '26']),
       isAdditionalCostToLastOs: z.boolean().optional(),
+      isModernization: z.boolean().optional(),
     })
     .optional(),
 
@@ -295,6 +328,19 @@ export const ParsedOperationIntentSchema = z.object({
         credit: z.string(),
         amount: z.number().nonnegative().optional(),
         comment: z.string().optional(),
+      })
+    )
+    .optional(),
+
+  customPostings: z
+    .array(
+      z.object({
+        debit: z.string().min(2),
+        credit: z.string().min(2),
+        amount: z.number().nonnegative().optional(),
+        debitSubconto: z.string().optional(),
+        creditSubconto: z.string().optional(),
+        description: z.string().optional(),
       })
     )
     .optional(),
@@ -671,6 +717,32 @@ export function sanitizeAndValidateOperationIntent(
       }
       return e;
     });
+  }
+
+  if (intent.customPostings && intent.customPostings.length > 0) {
+    const validatedCustom: NonNullable<ParsedOperationIntent['customPostings']> = [];
+    for (const cp of intent.customPostings) {
+      const dt = normalizeAccountToLeaf1C(cp.debit, 'debit', cp.description || row.description);
+      const kt = normalizeAccountToLeaf1C(cp.credit, 'credit', cp.description || row.description);
+      const dtKnown = Boolean(ACCOUNT_MAP[dt] && !ACCOUNT_MAP[dt].isGroup) || isOffBalanceAccountCode(dt);
+      const ktKnown = Boolean(ACCOUNT_MAP[kt] && !ACCOUNT_MAP[kt].isGroup) || isOffBalanceAccountCode(kt);
+      if (!dtKnown || !ktKnown || dt === kt) {
+        warnings.push(`Dropped invalid customPosting (${cp.debit} -> ${cp.credit})`);
+        continue;
+      }
+      const cleanAmt = isSuspiciousRequisiteAsMoney(cp.amount, forbiddenNumbers, row.rawExcelAmount)
+        ? undefined
+        : cp.amount;
+      validatedCustom.push({
+        debit: dt,
+        credit: kt,
+        amount: cleanAmt,
+        debitSubconto: cp.debitSubconto?.trim() || undefined,
+        creditSubconto: cp.creditSubconto?.trim() || undefined,
+        description: cp.description?.trim() || undefined,
+      });
+    }
+    intent.customPostings = validatedCustom.length > 0 ? validatedCustom : undefined;
   }
 
   // 3. Normalize ownOrganization & block ownOrganization from leaking into counterparty

@@ -920,7 +920,7 @@ export const CHART_OF_ACCOUNTS: AccountInfo[] = [
     code: '99.02.3',
     name: 'Постоянное налоговое обязательство (налоговые санкции)',
     parentCode: '99',
-    type: 'active',
+    type: 'active-passive',
     subconto: ['Прибыли и убытки'],
     category: 'Финансовые результаты',
     isGroup: false,
