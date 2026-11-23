@@ -1,6 +1,5 @@
 import crypto from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
-import { Type } from '@google/genai';
 import { z } from 'zod';
 import {
   ALL_DOC_TYPES_1C,
@@ -16,28 +15,30 @@ import {
   sanitizeAndValidateOperationIntent,
 } from '@/types/semanticIntent';
 
-const DEFAULT_GEMINI_MODEL = 'gemini-4-hydrogen';
-const FALLBACK_GEMINI_MODEL = 'gemini-3.1-flash-lite';
-const VERTEX_EXPRESS_DEFAULT_FALLBACK_MODEL = 'gemini-2.5-flash';
+const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
+const FALLBACK_GEMINI_MODEL = 'gemini-2.0-flash';
 const MAX_BATCH_SIZE = 40;
 const MAX_CACHE_ENTRIES = 1500;
 
-type LlmEndpointKind = 'vertex_express' | 'gemini_developer' | 'openai_compatible';
+type LlmEndpointKind = 'gemini_developer' | 'vertex_express' | 'openai_compatible';
 
 class UpstreamLlmError extends Error {
   readonly upstreamStatus: number;
   readonly upstreamMessage: string;
+  readonly rawRedactedBody: string;
   readonly endpointKind: LlmEndpointKind;
 
   constructor(params: {
     upstreamStatus: number;
     upstreamMessage: string;
+    rawRedactedBody?: string;
     endpointKind: LlmEndpointKind;
   }) {
     super(`HTTP ${params.upstreamStatus}: ${params.upstreamMessage}`);
     this.name = 'UpstreamLlmError';
     this.upstreamStatus = params.upstreamStatus;
     this.upstreamMessage = params.upstreamMessage;
+    this.rawRedactedBody = params.rawRedactedBody ?? params.upstreamMessage;
     this.endpointKind = params.endpointKind;
   }
 }
@@ -77,13 +78,13 @@ function extractConciseUpstreamMessage(rawBody: string, statusText: string, apiK
       const st = typeof errNode.status === 'string' ? errNode.status.trim() : '';
       const combined = st && msg && !msg.includes(st) ? `${st}: ${msg}` : msg || st;
       if (combined) {
-        return redactSecrets(combined, apiKey).slice(0, 360);
+        return redactSecrets(combined, apiKey).slice(0, 500);
       }
     }
   } catch {
     // Non-JSON upstream error payload
   }
-  return safeRaw.replace(/\s+/g, ' ').slice(0, 360);
+  return safeRaw.replace(/\s+/g, ' ').slice(0, 500);
 }
 
 function extractUpstreamErrorDetails(
@@ -93,37 +94,26 @@ function extractUpstreamErrorDetails(
   if (err instanceof UpstreamLlmError) {
     return {
       upstreamStatus: err.upstreamStatus,
-      upstreamMessage: redactSecrets(err.upstreamMessage, apiKey),
+      upstreamMessage: redactSecrets(err.upstreamMessage, apiKey).slice(0, 800),
     };
   }
   const raw = err instanceof Error ? err.message : String(err ?? 'Неизвестная ошибка обращения к ИИ');
   return {
-    upstreamMessage: redactSecrets(raw, apiKey).slice(0, 360),
+    upstreamMessage: redactSecrets(raw, apiKey).slice(0, 500),
   };
 }
 
-function isTransientOverloadError(err: unknown): boolean {
+function isTransientServerOverloadError(err: unknown): boolean {
   if (err instanceof UpstreamLlmError) {
-    return err.upstreamStatus === 429 || err.upstreamStatus === 503;
+    return err.upstreamStatus === 503;
   }
   const msg = err instanceof Error ? err.message : String(err ?? '');
-  return /503|429|UNAVAILABLE|RESOURCE_EXHAUSTED|high demand|overloaded|rate limit/i.test(msg);
+  return /\b503\b|UNAVAILABLE|high demand|overloaded/i.test(msg);
 }
 
-function buildGeminiGenerateContentEndpoint(
-  model: string,
-  apiKey: string
-): { url: string; endpointKind: 'vertex_express' | 'gemini_developer' } {
-  if (apiKey.startsWith('AQ.')) {
-    return {
-      url: `https://aiplatform.googleapis.com/v1/publishers/google/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
-      endpointKind: 'vertex_express',
-    };
-  }
-  return {
-    url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
-    endpointKind: 'gemini_developer',
-  };
+function isGeminiApiKeyInvalidError(err: UpstreamLlmError): boolean {
+  const haystack = `${err.upstreamMessage}\n${err.rawRedactedBody}`;
+  return /API_KEY_INVALID|API key not valid/i.test(haystack);
 }
 
 const serverIntentCache = new Map<string, ParsedOperationIntent>();
@@ -227,10 +217,7 @@ function resolveActiveServerProvider(preferredHeader?: string | null): ActivePro
   openaiCompatibleConfigured: boolean;
 } {
   const geminiKey = (process.env.GEMINI_API_KEY || '').trim();
-  const explicitGeminiModel = (process.env.GEMINI_MODEL || '').trim();
-  const geminiModel =
-    explicitGeminiModel ||
-    (geminiKey.startsWith('AQ.') ? VERTEX_EXPRESS_DEFAULT_FALLBACK_MODEL : DEFAULT_GEMINI_MODEL);
+  const geminiModel = (process.env.GEMINI_MODEL || '').trim() || DEFAULT_GEMINI_MODEL;
   const geminiConfigured = geminiKey.length > 5;
 
   const customBaseRaw = (process.env.LLM_BASE_URL || '').trim();
@@ -314,248 +301,31 @@ function buildChiefAccountantSystemPrompt(): string {
     '10. Векселя третьих лиц: покупка -> `financial_investment` (`billIntent.action: "buy"`, массив `bills` с номиналом и годовой ставкой `%`), оплата векселя -> `bank_out` (`billIntent.action: "pay"`), начисление процентов -> `financial_interest_accrual` (`billIntent.action: "accrue_interest"`), передача векселя поставщику в счёт оплаты долга -> `financial_disposal` (`billIntent.action: "endorse_to_supplier"`).',
     '11. СТОП ГАЛЛЮЦИНАЦИЯМ И ИНН КАК ДЕНЬГАМ: 9–20-значные коды ИНН, КПП, БИК, ОГРН и расчётных счетов НИКОГДА не являются рублями! Если в строке не назван контрагент, разрешено подставить его ТОЛЬКО из переданного `rollingContext` (по открытому счёту/договору/долгу); выдумывать новые компании строго запрещено!',
     '12. Все названия компаний приводи к каноническому именительному падежу («ООО «Стабильность»»), ФИО — к именительному падежу («Федоров Ф.Ф.»), номенклатуру — в единственном/каноническом виде без предлогов и имён поставщиков («Плита ПВХ», «Кирпич», «Строительные материалы»).',
+    '',
+    'СТРОГАЯ JSON-СХЕМА ОТВЕТА: {"intents": [ParsedOperationIntent, ...]}',
+    `Поля каждого элемента intents:`,
+    `- rowIndex: integer (точно совпадает со входной строкой)`,
+    `- category: string из списка выше`,
+    `- docType1C: string из [${ALL_DOC_TYPES_1C.join(', ')}]`,
+    `- isNonPostingEvent: boolean`,
+    `- amountIntent: { mode: "${SEMANTIC_AMOUNT_MODES.join('" | "')}", advancePercent?: number, orderTotalAmount?: number }`,
+    `- vatIntent: { rule: "included" | "on_top" | "exempt" | "not_applicable", rate: 20 | 10 | 0 }`,
+    `- ownOrganization?: { canonicalName: string, inn?: string, kpp?: string }`,
+    `- founderShares?: [{ founderName: string, sharePercent?: number, amount?: number }]`,
+    `- counterparty?: { canonicalName: string, inn?: string, kpp?: string, kind: "legal" | "individual" | "tax_authority" | "bank", role: "supplier" | "buyer" | "founder" | "lender" | "other" }`,
+    `- employee?: { fullName: string, position?: string, monthlySalary?: number, hireStartDate?: string, costAccount?: "20.01" | "26" | "44.01", nomenclatureGroup?: string, childDeductionCount?: integer, isSingleParent?: boolean, propertyDeductionAmount?: number, alimony?: { recipientName: string, recipientInn?: string, sharePercent?: number, fixedAmount?: number, startDate?: string } }`,
+    `- nomenclature?: { canonicalName: string, quantity?: number, unit?: string, unitPrice?: number, account: "${SEMANTIC_NOMENCLATURE_ACCOUNTS.join('" | "')}", nomenclatureGroup?: string }`,
+    `- rpbIntent?: { assetName: string, termMonths: integer, costAccount: "26" | "20.01", settlementAccount: "76.09" | "60.01" }`,
+    `- osIntent?: { assetName: string, spiMonths?: integer, costAccount: "20.01" | "26", isAdditionalCostToLastOs?: boolean }`,
+    `- billIntent?: { action: "buy" | "pay" | "accrue_interest" | "endorse_to_supplier", bills?: [{ nominal: number, annualRatePercent: number }], interestDays?: integer }`,
+    `- paidImmediately?: { enabled: boolean, via: "bank_51" | "cash_50" | "accountable_71" }`,
+    `- explicitEntries?: [{ debit: string, credit: string, amount?: number, comment?: string }]`,
+    `- studentExplanation: string (1-2 предложения с пояснением сути проводки, минимум 5 символов)`,
   ].join('\n');
 }
 
-const GEMINI_BATCH_RESPONSE_SCHEMA = {
-  type: Type.OBJECT,
-  properties: {
-    intents: {
-      type: Type.ARRAY,
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          rowIndex: { type: Type.INTEGER },
-          category: { type: Type.STRING, enum: OPERATION_CATEGORIES_LIST },
-          docType1C: { type: Type.STRING, enum: ALL_DOC_TYPES_1C },
-          isNonPostingEvent: { type: Type.BOOLEAN },
-          ownOrganization: {
-            type: Type.OBJECT,
-            properties: {
-              canonicalName: { type: Type.STRING },
-              inn: { type: Type.STRING },
-              kpp: { type: Type.STRING },
-            },
-            required: ['canonicalName'],
-          },
-          founderShares: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                founderName: { type: Type.STRING },
-                sharePercent: { type: Type.NUMBER },
-                amount: { type: Type.NUMBER },
-              },
-              required: ['founderName'],
-            },
-          },
-          counterparty: {
-            type: Type.OBJECT,
-            properties: {
-              canonicalName: { type: Type.STRING },
-              inn: { type: Type.STRING },
-              kpp: { type: Type.STRING },
-              kind: { type: Type.STRING, enum: ['legal', 'individual', 'tax_authority', 'bank'] },
-              role: {
-                type: Type.STRING,
-                enum: ['supplier', 'buyer', 'founder', 'lender', 'other'],
-              },
-            },
-            required: ['canonicalName', 'kind', 'role'],
-          },
-          employee: {
-            type: Type.OBJECT,
-            properties: {
-              fullName: { type: Type.STRING },
-              position: { type: Type.STRING },
-              monthlySalary: { type: Type.NUMBER },
-              hireStartDate: { type: Type.STRING },
-              costAccount: { type: Type.STRING, enum: ['20.01', '26', '44.01'] },
-              nomenclatureGroup: { type: Type.STRING },
-              childDeductionCount: { type: Type.INTEGER },
-              isSingleParent: { type: Type.BOOLEAN },
-              propertyDeductionAmount: { type: Type.NUMBER },
-              alimony: {
-                type: Type.OBJECT,
-                properties: {
-                  recipientName: { type: Type.STRING },
-                  recipientInn: { type: Type.STRING },
-                  sharePercent: { type: Type.NUMBER },
-                  fixedAmount: { type: Type.NUMBER },
-                  startDate: { type: Type.STRING },
-                },
-                required: ['recipientName'],
-              },
-            },
-            required: ['fullName'],
-          },
-          nomenclature: {
-            type: Type.OBJECT,
-            properties: {
-              canonicalName: { type: Type.STRING },
-              quantity: { type: Type.NUMBER },
-              unit: { type: Type.STRING },
-              unitPrice: { type: Type.NUMBER },
-              account: { type: Type.STRING, enum: [...SEMANTIC_NOMENCLATURE_ACCOUNTS] },
-              nomenclatureGroup: { type: Type.STRING },
-            },
-            required: ['canonicalName', 'account'],
-          },
-          amountIntent: {
-            type: Type.OBJECT,
-            properties: {
-              mode: { type: Type.STRING, enum: [...SEMANTIC_AMOUNT_MODES] },
-              advancePercent: { type: Type.NUMBER },
-              orderTotalAmount: { type: Type.NUMBER },
-            },
-            required: ['mode'],
-          },
-          vatIntent: {
-            type: Type.OBJECT,
-            properties: {
-              rule: {
-                type: Type.STRING,
-                enum: ['included', 'on_top', 'exempt', 'not_applicable'],
-              },
-              rate: { type: Type.INTEGER },
-            },
-            required: ['rule', 'rate'],
-          },
-          rpbIntent: {
-            type: Type.OBJECT,
-            properties: {
-              assetName: { type: Type.STRING },
-              termMonths: { type: Type.INTEGER },
-              costAccount: { type: Type.STRING, enum: ['26', '20.01'] },
-              settlementAccount: { type: Type.STRING, enum: ['76.09', '60.01'] },
-            },
-            required: ['assetName', 'termMonths', 'costAccount', 'settlementAccount'],
-          },
-          osIntent: {
-            type: Type.OBJECT,
-            properties: {
-              assetName: { type: Type.STRING },
-              spiMonths: { type: Type.INTEGER },
-              costAccount: { type: Type.STRING, enum: ['20.01', '26'] },
-              isAdditionalCostToLastOs: { type: Type.BOOLEAN },
-            },
-            required: ['assetName', 'costAccount'],
-          },
-          billIntent: {
-            type: Type.OBJECT,
-            properties: {
-              action: {
-                type: Type.STRING,
-                enum: ['buy', 'pay', 'accrue_interest', 'endorse_to_supplier'],
-              },
-              bills: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    nominal: { type: Type.NUMBER },
-                    annualRatePercent: { type: Type.NUMBER },
-                  },
-                  required: ['nominal', 'annualRatePercent'],
-                },
-              },
-              interestDays: { type: Type.INTEGER },
-            },
-            required: ['action'],
-          },
-          paidImmediately: {
-            type: Type.OBJECT,
-            properties: {
-              enabled: { type: Type.BOOLEAN },
-              via: { type: Type.STRING, enum: ['bank_51', 'cash_50', 'accountable_71'] },
-            },
-            required: ['enabled', 'via'],
-          },
-          explicitEntries: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                debit: { type: Type.STRING },
-                credit: { type: Type.STRING },
-                amount: { type: Type.NUMBER },
-                comment: { type: Type.STRING },
-              },
-              required: ['debit', 'credit'],
-            },
-          },
-          studentExplanation: { type: Type.STRING },
-        },
-        required: [
-          'rowIndex',
-          'category',
-          'docType1C',
-          'isNonPostingEvent',
-          'amountIntent',
-          'vatIntent',
-          'studentExplanation',
-        ],
-      },
-    },
-  },
-  required: ['intents'],
-};
-
-async function executeGoogleGenerateContentRest(params: {
-  apiKey: string;
-  model: string;
-  systemPrompt?: string;
-  userPrompt: string;
-  responseSchema: unknown;
-}): Promise<string> {
-  const { url, endpointKind } = buildGeminiGenerateContentEndpoint(params.model, params.apiKey);
-  const safeUrl = redactSecrets(url, params.apiKey);
-
-  const requestBody: Record<string, unknown> = {
-    contents: [
-      {
-        role: 'user',
-        parts: [{ text: params.userPrompt }],
-      },
-    ],
-    generationConfig: {
-      temperature: 0,
-      responseMimeType: 'application/json',
-      responseSchema: params.responseSchema,
-    },
-  };
-
-  if (params.systemPrompt && params.systemPrompt.trim().length > 0) {
-    requestBody.systemInstruction = {
-      role: 'system',
-      parts: [{ text: params.systemPrompt }],
-    };
-  }
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(requestBody),
-    signal: AbortSignal.timeout(45_000),
-  });
-
-  if (!res.ok) {
-    const rawErrBody = await res.text().catch(() => '');
-    const upstreamMessage = extractConciseUpstreamMessage(rawErrBody, res.statusText, params.apiKey);
-    console.error(
-      `[ai-parse-batch] Google ${endpointKind} HTTP ${res.status} (${safeUrl}): ${redactSecrets(rawErrBody, params.apiKey).slice(0, 1000)}`
-    );
-    throw new UpstreamLlmError({
-      upstreamStatus: res.status,
-      upstreamMessage,
-      endpointKind,
-    });
-  }
-
-  const data = (await res.json()) as {
+function parseGoogleGenerateContentPayload(
+  data: {
     candidates?: Array<{
       content?: {
         parts?: Array<{ text?: string }>;
@@ -565,8 +335,10 @@ async function executeGoogleGenerateContentRest(params: {
       blockReason?: string;
       blockReasonMessage?: string;
     };
-  };
-
+  },
+  endpointKind: 'gemini_developer' | 'vertex_express',
+  safeUrl: string
+): string {
   const text =
     data.candidates?.[0]?.content?.parts
       ?.map((p) => p.text ?? '')
@@ -588,46 +360,167 @@ async function executeGoogleGenerateContentRest(params: {
   return text;
 }
 
+async function executeGeminiDeveloperRest(params: {
+  apiKey: string;
+  model: string;
+  systemPrompt?: string;
+  userPrompt: string;
+}): Promise<string> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(params.model)}:generateContent`;
+
+  const requestBody: Record<string, unknown> = {
+    ...(params.systemPrompt && params.systemPrompt.trim().length > 0
+      ? {
+          systemInstruction: {
+            parts: [{ text: params.systemPrompt }],
+          },
+        }
+      : {}),
+    contents: [
+      {
+        role: 'user',
+        parts: [{ text: params.userPrompt }],
+      },
+    ],
+    generationConfig: {
+      temperature: 0,
+      responseMimeType: 'application/json',
+    },
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': params.apiKey,
+    },
+    body: JSON.stringify(requestBody),
+    signal: AbortSignal.timeout(45_000),
+  });
+
+  if (!res.ok) {
+    const rawErrBody = await res.text().catch(() => '');
+    const safeRawBody = redactSecrets(rawErrBody, params.apiKey);
+    const upstreamMessage = extractConciseUpstreamMessage(rawErrBody, res.statusText, params.apiKey);
+    console.error(
+      `[ai-parse-batch] Google gemini_developer HTTP ${res.status} (${url}): ${safeRawBody.slice(0, 1000)}`
+    );
+    throw new UpstreamLlmError({
+      upstreamStatus: res.status,
+      upstreamMessage,
+      rawRedactedBody: safeRawBody,
+      endpointKind: 'gemini_developer',
+    });
+  }
+
+  const data = (await res.json()) as Parameters<typeof parseGoogleGenerateContentPayload>[0];
+  return parseGoogleGenerateContentPayload(data, 'gemini_developer', url);
+}
+
+async function executeVertexExpressRest(params: {
+  apiKey: string;
+  model: string;
+  systemPrompt?: string;
+  userPrompt: string;
+}): Promise<string> {
+  const url = `https://aiplatform.googleapis.com/v1/publishers/google/models/${encodeURIComponent(params.model)}:generateContent?key=${encodeURIComponent(params.apiKey)}`;
+  const safeUrl = redactSecrets(url, params.apiKey);
+
+  const requestBody: Record<string, unknown> = {
+    ...(params.systemPrompt && params.systemPrompt.trim().length > 0
+      ? {
+          systemInstruction: {
+            role: 'system',
+            parts: [{ text: params.systemPrompt }],
+          },
+        }
+      : {}),
+    contents: [
+      {
+        role: 'user',
+        parts: [{ text: params.userPrompt }],
+      },
+    ],
+    generationConfig: {
+      temperature: 0,
+      responseMimeType: 'application/json',
+    },
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(requestBody),
+    signal: AbortSignal.timeout(45_000),
+  });
+
+  if (!res.ok) {
+    const rawErrBody = await res.text().catch(() => '');
+    const safeRawBody = redactSecrets(rawErrBody, params.apiKey);
+    const upstreamMessage = extractConciseUpstreamMessage(rawErrBody, res.statusText, params.apiKey);
+    console.error(
+      `[ai-parse-batch] Google vertex_express fallback HTTP ${res.status} (${safeUrl}): ${safeRawBody.slice(0, 1000)}`
+    );
+    throw new UpstreamLlmError({
+      upstreamStatus: res.status,
+      upstreamMessage,
+      rawRedactedBody: safeRawBody,
+      endpointKind: 'vertex_express',
+    });
+  }
+
+  const data = (await res.json()) as Parameters<typeof parseGoogleGenerateContentPayload>[0];
+  return parseGoogleGenerateContentPayload(data, 'vertex_express', safeUrl);
+}
+
 async function invokeGeminiJsonWithFallback(params: {
   apiKey: string;
   model: string;
   systemPrompt?: string;
   userPrompt: string;
-  responseSchema: unknown;
-}): Promise<{ text: string; usedModel: string }> {
-  const hasExplicitEnvModel = Boolean((process.env.GEMINI_MODEL || '').trim());
-  const isVertexExpressKey = params.apiKey.startsWith('AQ.');
-
+}): Promise<{ text: string; usedModel: string; endpointLabel: string }> {
   try {
-    const text = await executeGoogleGenerateContentRest(params);
-    return { text, usedModel: params.model };
-  } catch (err) {
-    // If Vertex AI Express key was used without an explicit GEMINI_MODEL and the default alias returned 404, try GA gemini-2.5-flash
+    const text = await executeGeminiDeveloperRest(params);
+    return { text, usedModel: params.model, endpointLabel: 'Google Gemini API' };
+  } catch (primaryErr) {
+    // Only if AQ.* key AND generativelanguage explicitly returned API_KEY_INVALID / API key not valid -> 1 fallback attempt to Vertex AI Express
     if (
-      isVertexExpressKey &&
-      !hasExplicitEnvModel &&
-      err instanceof UpstreamLlmError &&
-      err.upstreamStatus === 404 &&
-      params.model !== VERTEX_EXPRESS_DEFAULT_FALLBACK_MODEL
+      params.apiKey.startsWith('AQ.') &&
+      primaryErr instanceof UpstreamLlmError &&
+      isGeminiApiKeyInvalidError(primaryErr)
     ) {
-      const text = await executeGoogleGenerateContentRest({
-        ...params,
-        model: VERTEX_EXPRESS_DEFAULT_FALLBACK_MODEL,
-      });
-      return { text, usedModel: VERTEX_EXPRESS_DEFAULT_FALLBACK_MODEL };
+      try {
+        const text = await executeVertexExpressRest(params);
+        return { text, usedModel: params.model, endpointLabel: 'Vertex AI Express' };
+      } catch (vertexErr) {
+        const vStatus = vertexErr instanceof UpstreamLlmError ? vertexErr.upstreamStatus : undefined;
+        const vMsg =
+          vertexErr instanceof UpstreamLlmError
+            ? vertexErr.upstreamMessage
+            : redactSecrets(
+                vertexErr instanceof Error ? vertexErr.message : String(vertexErr),
+                params.apiKey
+              ).slice(0, 400);
+        const combinedMessage = `[generativelanguage HTTP ${primaryErr.upstreamStatus}] ${primaryErr.upstreamMessage} | [aiplatform fallback${vStatus ? ` HTTP ${vStatus}` : ''}] ${vMsg}`;
+        throw new UpstreamLlmError({
+          upstreamStatus: primaryErr.upstreamStatus,
+          upstreamMessage: combinedMessage,
+          endpointKind: 'gemini_developer',
+        });
+      }
     }
 
-    const fallbackModel = isVertexExpressKey
-      ? VERTEX_EXPRESS_DEFAULT_FALLBACK_MODEL
-      : FALLBACK_GEMINI_MODEL;
-    if (params.model !== fallbackModel && isTransientOverloadError(err)) {
-      const text = await executeGoogleGenerateContentRest({
+    if (params.model !== FALLBACK_GEMINI_MODEL && isTransientServerOverloadError(primaryErr)) {
+      const text = await executeGeminiDeveloperRest({
         ...params,
-        model: fallbackModel,
+        model: FALLBACK_GEMINI_MODEL,
       });
-      return { text, usedModel: fallbackModel };
+      return { text, usedModel: FALLBACK_GEMINI_MODEL, endpointLabel: 'Google Gemini API' };
     }
-    throw err;
+
+    throw primaryErr;
   }
 }
 
@@ -642,7 +535,6 @@ async function invokeGeminiJson(params: {
     model: params.model,
     systemPrompt: params.systemPrompt,
     userPrompt: params.userPrompt,
-    responseSchema: GEMINI_BATCH_RESPONSE_SCHEMA,
   });
   return text;
 }
@@ -796,11 +688,7 @@ export async function GET(req: NextRequest) {
 
   if (!active.available || !probe) {
     const providerLabel =
-      active.provider === 'gemini'
-        ? active.available && active.apiKey.startsWith('AQ.')
-          ? 'Vertex AI Express'
-          : 'Google Gemini API'
-        : 'OpenAI-совместимый API';
+      active.provider === 'gemini' ? 'Google Gemini API' : 'OpenAI-совместимый API';
     return NextResponse.json({
       available: active.available,
       provider: active.provider,
@@ -815,19 +703,11 @@ export async function GET(req: NextRequest) {
 
   try {
     if (active.provider === 'gemini') {
-      const endpointLabel = active.apiKey.startsWith('AQ.')
-        ? 'Vertex AI Express'
-        : 'Google Gemini API';
-      const { text: pingText, usedModel } = await invokeGeminiJsonWithFallback({
+      const { text: pingText, usedModel, endpointLabel } = await invokeGeminiJsonWithFallback({
         apiKey: active.apiKey,
         model: active.model,
         systemPrompt: 'Respond strictly with valid JSON {"ok": true}.',
         userPrompt: 'Верни JSON {"ok": true}',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: { ok: { type: Type.BOOLEAN } },
-          required: ['ok'],
-        },
       });
       const parsed = extractJsonObject(pingText || '{}') as { ok?: boolean };
       return NextResponse.json({
