@@ -465,8 +465,22 @@ export function Tab2ImportPostings() {
                   </div>
                 </div>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                  Секретные ключи передаются только на сервере через переменные окружения (GEMINI_API_KEY, GEMINI_MODEL или LLM_BASE_URL, LLM_API_KEY, LLM_MODEL). Статус: {aiProviderStatus.message}
+                  Секретные ключи передаются только на сервере через переменные окружения (GEMINI_API_KEY, GEMINI_MODEL или LLM_BASE_URL, LLM_API_KEY, LLM_MODEL).
                 </p>
+                {aiProviderStatus.message && (
+                  <p
+                    className={`text-xs font-medium break-words ${
+                      aiProviderStatus.available
+                        ? 'text-emerald-700 dark:text-emerald-400'
+                        : aiProviderStatus.geminiConfigured ||
+                            aiProviderStatus.openaiCompatibleConfigured
+                          ? 'text-rose-700 dark:text-rose-400'
+                          : 'text-slate-600 dark:text-slate-300'
+                    }`}
+                  >
+                    Статус: {aiProviderStatus.message}
+                  </p>
+                )}
               </div>
 
               <div className="flex items-center gap-2 shrink-0">

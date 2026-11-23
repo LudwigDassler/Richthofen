@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
-import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import { Type } from '@google/genai';
 import { z } from 'zod';
 import {
   ALL_DOC_TYPES_1C,
@@ -18,26 +18,112 @@ import {
 
 const DEFAULT_GEMINI_MODEL = 'gemini-4-hydrogen';
 const FALLBACK_GEMINI_MODEL = 'gemini-3.1-flash-lite';
+const VERTEX_EXPRESS_DEFAULT_FALLBACK_MODEL = 'gemini-2.5-flash';
 const MAX_BATCH_SIZE = 40;
 const MAX_CACHE_ENTRIES = 1500;
 
+type LlmEndpointKind = 'vertex_express' | 'gemini_developer' | 'openai_compatible';
+
+class UpstreamLlmError extends Error {
+  readonly upstreamStatus: number;
+  readonly upstreamMessage: string;
+  readonly endpointKind: LlmEndpointKind;
+
+  constructor(params: {
+    upstreamStatus: number;
+    upstreamMessage: string;
+    endpointKind: LlmEndpointKind;
+  }) {
+    super(`HTTP ${params.upstreamStatus}: ${params.upstreamMessage}`);
+    this.name = 'UpstreamLlmError';
+    this.upstreamStatus = params.upstreamStatus;
+    this.upstreamMessage = params.upstreamMessage;
+    this.endpointKind = params.endpointKind;
+  }
+}
+
+function redactSecrets(input: string, apiKey?: string): string {
+  let out = input || '';
+  if (apiKey && apiKey.trim().length >= 4) {
+    const trimmed = apiKey.trim();
+    const encoded = encodeURIComponent(trimmed);
+    out = out.split(trimmed).join('[REDACTED]');
+    if (encoded !== trimmed) {
+      out = out.split(encoded).join('[REDACTED]');
+    }
+  }
+  return out
+    .replace(/([?&]key=)[^&\s"']+/gi, '$1[REDACTED]')
+    .replace(/\bAQ\.[A-Za-z0-9._-]+/g, 'AQ.[REDACTED]')
+    .replace(/\bAIza[A-Za-z0-9_-]+/g, 'AIza[REDACTED]')
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._-]+/gi, '$1[REDACTED]');
+}
+
+function extractConciseUpstreamMessage(rawBody: string, statusText: string, apiKey?: string): string {
+  const safeRaw = redactSecrets(rawBody.trim(), apiKey);
+  if (!safeRaw) {
+    return statusText || 'Пустой ответ от провайдера ИИ';
+  }
+  try {
+    const parsed = JSON.parse(rawBody) as unknown;
+    const errNode = Array.isArray(parsed)
+      ? (parsed[0] as { error?: { message?: string; status?: string } } | undefined)?.error
+      : (parsed as { error?: { message?: string; status?: string } | string } | undefined)?.error;
+    if (typeof errNode === 'string' && errNode.trim()) {
+      return redactSecrets(errNode.trim(), apiKey).slice(0, 360);
+    }
+    if (errNode && typeof errNode === 'object') {
+      const msg = typeof errNode.message === 'string' ? errNode.message.trim() : '';
+      const st = typeof errNode.status === 'string' ? errNode.status.trim() : '';
+      const combined = st && msg && !msg.includes(st) ? `${st}: ${msg}` : msg || st;
+      if (combined) {
+        return redactSecrets(combined, apiKey).slice(0, 360);
+      }
+    }
+  } catch {
+    // Non-JSON upstream error payload
+  }
+  return safeRaw.replace(/\s+/g, ' ').slice(0, 360);
+}
+
+function extractUpstreamErrorDetails(
+  err: unknown,
+  apiKey?: string
+): { upstreamStatus?: number; upstreamMessage: string } {
+  if (err instanceof UpstreamLlmError) {
+    return {
+      upstreamStatus: err.upstreamStatus,
+      upstreamMessage: redactSecrets(err.upstreamMessage, apiKey),
+    };
+  }
+  const raw = err instanceof Error ? err.message : String(err ?? 'Неизвестная ошибка обращения к ИИ');
+  return {
+    upstreamMessage: redactSecrets(raw, apiKey).slice(0, 360),
+  };
+}
+
 function isTransientOverloadError(err: unknown): boolean {
+  if (err instanceof UpstreamLlmError) {
+    return err.upstreamStatus === 429 || err.upstreamStatus === 503;
+  }
   const msg = err instanceof Error ? err.message : String(err ?? '');
   return /503|429|UNAVAILABLE|RESOURCE_EXHAUSTED|high demand|overloaded|rate limit/i.test(msg);
 }
 
-function formatCleanLlmError(err: unknown): string {
-  const raw = err instanceof Error ? err.message : String(err ?? '');
-  if (/503|UNAVAILABLE|high demand|overloaded/i.test(raw)) {
-    return 'Сервис ИИ временно перегружен (503) — активен локальный резервный парсер 1С:БП 3.0';
+function buildGeminiGenerateContentEndpoint(
+  model: string,
+  apiKey: string
+): { url: string; endpointKind: 'vertex_express' | 'gemini_developer' } {
+  if (apiKey.startsWith('AQ.')) {
+    return {
+      url: `https://aiplatform.googleapis.com/v1/publishers/google/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+      endpointKind: 'vertex_express',
+    };
   }
-  if (/429|RESOURCE_EXHAUSTED|quota|rate limit/i.test(raw)) {
-    return 'Превышен лимит запросов к API (429) — активен локальный резервный парсер 1С:БП 3.0';
-  }
-  if (/401|403|API_KEY_INVALID|invalid api key|permission/i.test(raw)) {
-    return 'Недействительный серверный ключ API — проверьте конфигурацию переменных окружения';
-  }
-  return 'Сервис ИИ временно недоступен — активен локальный резервный парсер 1С:БП 3.0';
+  return {
+    url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+    endpointKind: 'gemini_developer',
+  };
 }
 
 const serverIntentCache = new Map<string, ParsedOperationIntent>();
@@ -141,7 +227,10 @@ function resolveActiveServerProvider(preferredHeader?: string | null): ActivePro
   openaiCompatibleConfigured: boolean;
 } {
   const geminiKey = (process.env.GEMINI_API_KEY || '').trim();
-  const geminiModel = (process.env.GEMINI_MODEL || '').trim() || DEFAULT_GEMINI_MODEL;
+  const explicitGeminiModel = (process.env.GEMINI_MODEL || '').trim();
+  const geminiModel =
+    explicitGeminiModel ||
+    (geminiKey.startsWith('AQ.') ? VERTEX_EXPRESS_DEFAULT_FALLBACK_MODEL : DEFAULT_GEMINI_MODEL);
   const geminiConfigured = geminiKey.length > 5;
 
   const customBaseRaw = (process.env.LLM_BASE_URL || '').trim();
@@ -413,47 +502,149 @@ const GEMINI_BATCH_RESPONSE_SCHEMA = {
   required: ['intents'],
 };
 
+async function executeGoogleGenerateContentRest(params: {
+  apiKey: string;
+  model: string;
+  systemPrompt?: string;
+  userPrompt: string;
+  responseSchema: unknown;
+}): Promise<string> {
+  const { url, endpointKind } = buildGeminiGenerateContentEndpoint(params.model, params.apiKey);
+  const safeUrl = redactSecrets(url, params.apiKey);
+
+  const requestBody: Record<string, unknown> = {
+    contents: [
+      {
+        role: 'user',
+        parts: [{ text: params.userPrompt }],
+      },
+    ],
+    generationConfig: {
+      temperature: 0,
+      responseMimeType: 'application/json',
+      responseSchema: params.responseSchema,
+    },
+  };
+
+  if (params.systemPrompt && params.systemPrompt.trim().length > 0) {
+    requestBody.systemInstruction = {
+      role: 'system',
+      parts: [{ text: params.systemPrompt }],
+    };
+  }
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(requestBody),
+    signal: AbortSignal.timeout(45_000),
+  });
+
+  if (!res.ok) {
+    const rawErrBody = await res.text().catch(() => '');
+    const upstreamMessage = extractConciseUpstreamMessage(rawErrBody, res.statusText, params.apiKey);
+    console.error(
+      `[ai-parse-batch] Google ${endpointKind} HTTP ${res.status} (${safeUrl}): ${redactSecrets(rawErrBody, params.apiKey).slice(0, 1000)}`
+    );
+    throw new UpstreamLlmError({
+      upstreamStatus: res.status,
+      upstreamMessage,
+      endpointKind,
+    });
+  }
+
+  const data = (await res.json()) as {
+    candidates?: Array<{
+      content?: {
+        parts?: Array<{ text?: string }>;
+      };
+    }>;
+    promptFeedback?: {
+      blockReason?: string;
+      blockReasonMessage?: string;
+    };
+  };
+
+  const text =
+    data.candidates?.[0]?.content?.parts
+      ?.map((p) => p.text ?? '')
+      .join('')
+      .trim() ?? '';
+
+  if (!text && data.promptFeedback?.blockReason) {
+    const blockMsg = data.promptFeedback.blockReasonMessage
+      ? `${data.promptFeedback.blockReason}: ${data.promptFeedback.blockReasonMessage}`
+      : `Blocked (${data.promptFeedback.blockReason})`;
+    console.error(`[ai-parse-batch] Google ${endpointKind} blocked response (${safeUrl}): ${blockMsg}`);
+    throw new UpstreamLlmError({
+      upstreamStatus: 400,
+      upstreamMessage: blockMsg,
+      endpointKind,
+    });
+  }
+
+  return text;
+}
+
+async function invokeGeminiJsonWithFallback(params: {
+  apiKey: string;
+  model: string;
+  systemPrompt?: string;
+  userPrompt: string;
+  responseSchema: unknown;
+}): Promise<{ text: string; usedModel: string }> {
+  const hasExplicitEnvModel = Boolean((process.env.GEMINI_MODEL || '').trim());
+  const isVertexExpressKey = params.apiKey.startsWith('AQ.');
+
+  try {
+    const text = await executeGoogleGenerateContentRest(params);
+    return { text, usedModel: params.model };
+  } catch (err) {
+    // If Vertex AI Express key was used without an explicit GEMINI_MODEL and the default alias returned 404, try GA gemini-2.5-flash
+    if (
+      isVertexExpressKey &&
+      !hasExplicitEnvModel &&
+      err instanceof UpstreamLlmError &&
+      err.upstreamStatus === 404 &&
+      params.model !== VERTEX_EXPRESS_DEFAULT_FALLBACK_MODEL
+    ) {
+      const text = await executeGoogleGenerateContentRest({
+        ...params,
+        model: VERTEX_EXPRESS_DEFAULT_FALLBACK_MODEL,
+      });
+      return { text, usedModel: VERTEX_EXPRESS_DEFAULT_FALLBACK_MODEL };
+    }
+
+    const fallbackModel = isVertexExpressKey
+      ? VERTEX_EXPRESS_DEFAULT_FALLBACK_MODEL
+      : FALLBACK_GEMINI_MODEL;
+    if (params.model !== fallbackModel && isTransientOverloadError(err)) {
+      const text = await executeGoogleGenerateContentRest({
+        ...params,
+        model: fallbackModel,
+      });
+      return { text, usedModel: fallbackModel };
+    }
+    throw err;
+  }
+}
+
 async function invokeGeminiJson(params: {
   apiKey: string;
   model: string;
   systemPrompt: string;
   userPrompt: string;
 }): Promise<string> {
-  const ai = new GoogleGenAI({
+  const { text } = await invokeGeminiJsonWithFallback({
     apiKey: params.apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
+    model: params.model,
+    systemPrompt: params.systemPrompt,
+    userPrompt: params.userPrompt,
+    responseSchema: GEMINI_BATCH_RESPONSE_SCHEMA,
   });
-
-  const callModel = async (targetModel: string): Promise<string> => {
-    const isGemini3Or4 = /^gemini-(?:3|4)/i.test(targetModel);
-    const response = await ai.models.generateContent({
-      model: targetModel,
-      contents: params.userPrompt,
-      config: {
-        systemInstruction: params.systemPrompt,
-        responseMimeType: 'application/json',
-        responseSchema: GEMINI_BATCH_RESPONSE_SCHEMA,
-        seed: 42,
-        ...(isGemini3Or4
-          ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-          : { temperature: 0 }),
-      },
-    });
-    return (response.text ?? '').trim();
-  };
-
-  try {
-    return await callModel(params.model);
-  } catch (err) {
-    if (params.model !== FALLBACK_GEMINI_MODEL && isTransientOverloadError(err)) {
-      return await callModel(FALLBACK_GEMINI_MODEL);
-    }
-    throw err;
-  }
+  return text;
 }
 
 async function invokeOpenAiCompatibleJson(params: {
@@ -466,6 +657,7 @@ async function invokeOpenAiCompatibleJson(params: {
   const endpoint = params.baseUrl.endsWith('/chat/completions')
     ? params.baseUrl
     : `${params.baseUrl}/chat/completions`;
+  const safeEndpoint = redactSecrets(endpoint, params.apiKey);
 
   const res = await fetch(endpoint, {
     method: 'POST',
@@ -487,7 +679,15 @@ async function invokeOpenAiCompatibleJson(params: {
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(`LLM HTTP ${res.status}: ${errText.slice(0, 220)}`);
+    const upstreamMessage = extractConciseUpstreamMessage(errText, res.statusText, params.apiKey);
+    console.error(
+      `[ai-parse-batch] OpenAI-compatible HTTP ${res.status} (${safeEndpoint}): ${redactSecrets(errText, params.apiKey).slice(0, 1000)}`
+    );
+    throw new UpstreamLlmError({
+      upstreamStatus: res.status,
+      upstreamMessage,
+      endpointKind: 'openai_compatible',
+    });
   }
 
   const data = (await res.json()) as {
@@ -596,7 +796,11 @@ export async function GET(req: NextRequest) {
 
   if (!active.available || !probe) {
     const providerLabel =
-      active.provider === 'gemini' ? 'Google Gemini API' : 'OpenAI-совместимый API';
+      active.provider === 'gemini'
+        ? active.available && active.apiKey.startsWith('AQ.')
+          ? 'Vertex AI Express'
+          : 'Google Gemini API'
+        : 'OpenAI-совместимый API';
     return NextResponse.json({
       available: active.available,
       provider: active.provider,
@@ -611,42 +815,21 @@ export async function GET(req: NextRequest) {
 
   try {
     if (active.provider === 'gemini') {
-      const ai = new GoogleGenAI({
+      const endpointLabel = active.apiKey.startsWith('AQ.')
+        ? 'Vertex AI Express'
+        : 'Google Gemini API';
+      const { text: pingText, usedModel } = await invokeGeminiJsonWithFallback({
         apiKey: active.apiKey,
-        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+        model: active.model,
+        systemPrompt: 'Respond strictly with valid JSON {"ok": true}.',
+        userPrompt: 'Верни JSON {"ok": true}',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: { ok: { type: Type.BOOLEAN } },
+          required: ['ok'],
+        },
       });
-      const pingModel = async (targetModel: string) => {
-        const isGemini3Or4 = /^gemini-(?:3|4)/i.test(targetModel);
-        return ai.models.generateContent({
-          model: targetModel,
-          contents: 'Верни JSON {"ok": true}',
-          config: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: { ok: { type: Type.BOOLEAN } },
-              required: ['ok'],
-            },
-            ...(isGemini3Or4
-              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-              : { temperature: 0 }),
-          },
-        });
-      };
-
-      let usedModel = active.model;
-      let ping;
-      try {
-        ping = await pingModel(active.model);
-      } catch (err) {
-        if (active.model !== FALLBACK_GEMINI_MODEL && isTransientOverloadError(err)) {
-          usedModel = FALLBACK_GEMINI_MODEL;
-          ping = await pingModel(FALLBACK_GEMINI_MODEL);
-        } else {
-          throw err;
-        }
-      }
-      const parsed = extractJsonObject(ping.text ?? '{}') as { ok?: boolean };
+      const parsed = extractJsonObject(pingText || '{}') as { ok?: boolean };
       return NextResponse.json({
         available: true,
         probeSuccess: Boolean(parsed.ok ?? true),
@@ -654,7 +837,7 @@ export async function GET(req: NextRequest) {
         model: usedModel,
         geminiConfigured: active.geminiConfigured,
         openaiCompatibleConfigured: active.openaiCompatibleConfigured,
-        message: 'Подключение к серверному ИИ успешно проверено (Google Gemini API)',
+        message: `Подключение успешно проверено (${endpointLabel} · ${usedModel})`,
       });
     }
 
@@ -673,18 +856,33 @@ export async function GET(req: NextRequest) {
       model: active.model,
       geminiConfigured: active.geminiConfigured,
       openaiCompatibleConfigured: active.openaiCompatibleConfigured,
-      message: 'Подключение к серверному ИИ успешно проверено (OpenAI-совместимый API)',
+      message: `Подключение успешно проверено (OpenAI-совместимый API · ${active.model})`,
     });
   } catch (err) {
-    return NextResponse.json({
-      available: false,
-      probeSuccess: false,
+    const { upstreamStatus, upstreamMessage } = extractUpstreamErrorDetails(err, active.apiKey);
+    console.error('[ai-parse-batch] Probe failed:', {
       provider: active.provider,
       model: active.model,
-      geminiConfigured: active.geminiConfigured,
-      openaiCompatibleConfigured: active.openaiCompatibleConfigured,
-      message: formatCleanLlmError(err),
+      upstreamStatus,
+      upstreamMessage,
     });
+    const formattedMsg = upstreamStatus
+      ? `Ошибка провайдера (HTTP ${upstreamStatus}): ${upstreamMessage}`
+      : `Ошибка провайдера: ${upstreamMessage}`;
+    return NextResponse.json(
+      {
+        available: false,
+        probeSuccess: false,
+        provider: active.provider,
+        model: active.model,
+        geminiConfigured: active.geminiConfigured,
+        openaiCompatibleConfigured: active.openaiCompatibleConfigured,
+        upstreamStatus,
+        upstreamMessage,
+        message: formattedMsg,
+      },
+      { status: 503 }
+    );
   }
 }
 
@@ -884,6 +1082,16 @@ export async function POST(req: NextRequest) {
       intents: finalIntents,
     });
   } catch (err) {
+    const { upstreamStatus, upstreamMessage } = extractUpstreamErrorDetails(err, active.apiKey);
+    console.error('[ai-parse-batch] Batch parse failed:', {
+      provider: active.provider,
+      model: active.model,
+      upstreamStatus,
+      upstreamMessage,
+    });
+    const errorText = upstreamStatus
+      ? `Ошибка провайдера ИИ (HTTP ${upstreamStatus}): ${upstreamMessage}`
+      : `Ошибка провайдера ИИ: ${upstreamMessage}`;
     return NextResponse.json(
       {
         ok: false,
@@ -891,7 +1099,9 @@ export async function POST(req: NextRequest) {
         fallbackToOffline: true,
         provider: active.provider,
         model: active.model,
-        error: formatCleanLlmError(err),
+        upstreamStatus,
+        upstreamMessage,
+        error: errorText,
       },
       { status: 503 }
     );
