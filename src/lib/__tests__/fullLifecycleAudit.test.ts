@@ -247,8 +247,11 @@ test('Full 28-operation multi-quarter coursework lifecycle: closed-world L1..L7 
   // Plus alimony withholding on Валеев: (80,000 - 10,400 НДФЛ) * 25% = 17,400 ₽ on Кт 76.41!
   const payrollOp = syncedOps.find((o) => o.category === 'payroll_accrual');
   assert.ok(payrollOp);
-  const grossEntry = payrollOp.entries.find((e) => e.credit === '70');
-  assert.equal(grossEntry?.amount, 170000);
+  const totalGross70 =
+    Math.round(
+      payrollOp.entries.filter((e) => e.credit === '70').reduce((s, e) => s + e.amount, 0) * 100
+    ) / 100;
+  assert.equal(totalGross70, 170000);
   const alimWithholdEntry = payrollOp.entries.find(
     (e) => e.debit === '70' && e.credit === '76.41'
   );

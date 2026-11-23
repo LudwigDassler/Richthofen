@@ -1,5 +1,8 @@
 {
   "name": "1С:Бухгалтерский Контур 8.3",
   "description": "Рабочая среда бухгалтера 1С:Предприятие 8.3 (БП 3.0, РСБУ, ОСНО): загрузка базы 1С, расчёт ОСВ, пакетный разбор документов, автопроводки, реквизит-контроль и экспорт в 1С (.bsl, EnterpriseData XML, JSON).",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

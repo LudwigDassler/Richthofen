@@ -909,10 +909,10 @@ export const CHART_OF_ACCOUNTS: AccountInfo[] = [
   },
   {
     code: '99.02.1',
-    name: 'Условный расход по налогу на прибыль',
+    name: 'Текущий налог на прибыль',
     parentCode: '99',
-    type: 'active',
-    subconto: [],
+    type: 'active-passive',
+    subconto: ['Прибыли и убытки'],
     category: 'Финансовые результаты',
     isGroup: false,
   },
@@ -1851,6 +1851,7 @@ export function normalizeAccountToLeaf1C(
   if (clean === '91.2') return '91.02';
   if (clean === '91.9') return '91.09';
   if (clean === '99.01' || clean === '99.1') return '99.01.1';
+  if (clean === '99.02' || clean === '99.2') return '99.02.1';
   if (clean === '68.04' || clean === '68.4') return '68.04.1';
   if (clean === '20.1') return '20.01';
   if (clean === '51.01' || clean === '51.1') return '51';

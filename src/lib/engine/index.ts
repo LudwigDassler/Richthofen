@@ -7,3 +7,5 @@ export * from './amountAndLinkResolver';
 export * from './mentorGuide1C';
 export * from './postingEngine';
 export * from './auditAndAutofix';
+export * from './productionCalendar2026';
+export * from './semanticIntentAdapter';

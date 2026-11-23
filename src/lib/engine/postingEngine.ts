@@ -51,6 +51,7 @@ import {
   createInitialVirtual1CState,
   extractFinancialNotesFromText1C,
   extractRecurringContractTerms1C,
+  inferEmployeeCostAccount1C,
   matchTargetActiveFinancialNote1C,
   normalizeCounterpartyKey1C,
   normalizePersonIdentityKey1C,
@@ -585,6 +586,8 @@ export interface RawDraftOperationInput {
   cashFlowItemName?: string;
   employeeName?: string;
   employeePosition?: string;
+  employeeHireStartDate?: string;
+  employeeTerminationDate?: string;
   monthlySalary?: number;
   employeeChildCount?: number;
   employeeIsSingleParent?: boolean;
@@ -598,6 +601,9 @@ export interface RawDraftOperationInput {
   injuryInsuranceRate?: number;
   usefulLifeMonths?: number;
   depreciationBaseAmount?: number;
+  rpbTermMonths?: number;
+  rpbSettlementAccount?: '76.09' | '60.01';
+  paidImmediatelyVia?: 'bank_51' | 'cash_50' | 'accountable_71';
   alimonyRecipientName?: string;
   alimonyRecipientInn?: string;
   alimonyRatePercent?: number;
@@ -609,6 +615,7 @@ export interface RawDraftOperationInput {
   disposedFinancialNoteId?: string;
   periodicPaymentAmount?: number;
   interestRatePercent?: number;
+  counterpartyKindHint?: 'ЮридическоеЛицо' | 'ИндивидуальныйПредприниматель' | 'ФизическоеЛицо';
   costAccountHint?: string;
   materialAccountHint?: string;
   directionHint?: 'in' | 'out';
@@ -618,6 +625,89 @@ export interface RawDraftOperationInput {
   explicitDebit?: string;
   explicitCredit?: string;
   explicitCorrespondences?: ExplicitCorrespondenceHint1C[];
+  semanticIntent?: import('@/types/semanticIntent').ParsedOperationIntent;
+  studentExplanation?: string;
+}
+
+import { calculateEmployeeMonthlySalaryProRata2026 } from './productionCalendar2026';
+
+export function extractCanonicalProjectNomGroup1C(rawText?: string): string | undefined {
+  const t = (rawText ?? '').trim();
+  if (!t) return undefined;
+  const low = t.toLowerCase().replace(/ё/g, 'е');
+
+  if (/реконструкц\p{L}*\s+кровл\p{L}*|ремонт\p{L}*\s+кровл\p{L}*/iu.test(low)) {
+    return 'Реконструкция кровли';
+  }
+  if (/бетонн\p{L}*\s+(?:покрыт|пол)\p{L}*/iu.test(low)) {
+    return 'Бетонное покрытие';
+  }
+  if (/ремонт\p{L}*\s+фасад\p{L}*/iu.test(low)) {
+    return 'Ремонт фасада';
+  }
+  if (/ремонт\p{L}*\s+помещен\p{L}*/iu.test(low)) {
+    return 'Ремонт помещений';
+  }
+  if (/потолочн\p{L}*\s+плит\p{L}*/iu.test(low)) {
+    return 'Устройство потолочных плит';
+  }
+  if (/кирпичн\p{L}*\s+кладк\p{L}*/iu.test(low)) {
+    return 'Кирпичная кладка';
+  }
+  if (/благоустройств\p{L}*(?:\s+территор\p{L}*)?/iu.test(low)) {
+    return 'Благоустройство территории';
+  }
+  if (
+    !/отделочн\p{L}*\s+материал/iu.test(low) &&
+    /отделк\p{L}*\s+помещен\p{L}*|(?:^|[-—:\s])отделк[аеиуой](?=$|[.,);\s])/iu.test(low)
+  ) {
+    return 'Отделка помещений';
+  }
+  if (/панел\p{L}*\s+из\s+пвх\s+и\s+мдф/iu.test(low)) {
+    return 'Панели из ПВХ и МДФ';
+  }
+  const mQuoted = t.match(
+    /(?:по\s+объекту|на\s+объекте|объект(?:\s+работ)?)\s*[«"']([^«"'\n]{3,60})[»"']/iu
+  );
+  if (mQuoted?.[1]) {
+    const cleaned = mQuoted[1].trim();
+    if (!/^(?:ооо|ао|пао|зао|ип)(?:\s|$)/iu.test(cleaned)) {
+      return extractCanonicalProjectNomGroup1C(cleaned) || cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+    }
+  }
+  return undefined;
+}
+
+function extractSurnameRootForProjectMatch1C(empName: string): string {
+  return (empName || '')
+    .trim()
+    .split(/\s+/)[0]
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/(?:ова|ева|ина|ына|ая|яя|а)$/u, '');
+}
+
+function resolveWorkerProjectAssignmentsFromText1C(opText: string): Array<{
+  surnameRootPattern: string;
+  projectGroup: string;
+}> {
+  const results: Array<{ surnameRootPattern: string; projectGroup: string }> = [];
+  if (!opText) return results;
+  // Look inside parentheses or whole text, splitting on sentence dots/semicolons or comma before new surname assignment
+  const parentheticalMatches = [...opText.matchAll(/\(([^()]{5,400})\)/g)].map((m) => m[1]);
+  const candidateBlocks = parentheticalMatches.length > 0 ? parentheticalMatches : [opText];
+
+  for (const block of candidateBlocks) {
+    // Split on '.', ';' or ', <CapitalizedSurname> ... (-|работал)'
+    const segments = block.split(/[.;]+|,\s*(?=[А-ЯЁ][а-яё]{2,}(?:\s+и\s+[А-ЯЁ][а-яё]{2,}|\s*,\s*[А-ЯЁ][а-яё]{2,})*\s*(?:[-—:]|работал))/u);
+    for (const seg of segments) {
+      const proj = extractCanonicalProjectNomGroup1C(seg);
+      if (!proj) continue;
+      const cleanSegLow = seg.toLowerCase().replace(/ё/g, 'е');
+      results.push({ surnameRootPattern: cleanSegLow, projectGroup: proj });
+    }
+  }
+  return results;
 }
 
 export interface BatchSequentialContext {
@@ -1148,12 +1238,16 @@ export function detectOperationClassification(
   if (
     draft.explicitDebit?.startsWith('97') ||
     draft.explicitCredit?.startsWith('97') ||
-    /расход\p{L}*\s+будущ\p{L}*\s+период|(?:^|[^\p{L}])рбп(?=$|[^\p{L}])|неисключительн\p{L}*\s+лицензи\p{L}*\s+на\s+срок/iu.test(
+    draft.explicitCorrespondences?.some((c) => c.debit.startsWith('97') || c.credit.startsWith('97')) ||
+    /(?:^|[^\p{L}])д\s*97(?:\.\d+)?\s*к\s*(?:76|60)/iu.test(draft.actionSequenceHint ?? '') ||
+    /вступительн\p{L}*\s+взнос.*(?:сро|саморегулируем)|расход\p{L}*\s+будущ\p{L}*\s+период|(?:^|[^\p{L}])рбп(?=$|[^\p{L}])|неисключительн\p{L}*\s+лицензи\p{L}*\s+на\s+срок/iu.test(
       itemAndDescText
     )
   ) {
     const isWriteoff97 =
-      draft.explicitCredit?.startsWith('97') || /списан\p{L}*.*(?:рбп|расход\p{L}*\s+будущ)/iu.test(itemAndDescText);
+      draft.explicitCredit?.startsWith('97') ||
+      draft.explicitCorrespondences?.some((c) => c.credit.startsWith('97') && !c.debit.startsWith('97')) ||
+      /списан\p{L}*.*(?:рбп|расход\p{L}*\s+будущ)/iu.test(itemAndDescText);
     return {
       category: 'deferred_expense_97',
       docType1C: isWriteoff97 ? 'ЗакрытиеМесяца' : 'ПоступлениеТоваровУслуг',
@@ -3723,11 +3817,76 @@ export function bindAndGenerateOperation(
     }
   }
 
-  // 6a-1. Payroll & Insurance Accrual: pull active staff roster salaries from 1C DB + prior ПриемНаРаботу / prior НачислениеЗарплаты
+  // 6a-1. Payroll & Insurance Accrual: pull active staff roster salaries from 1C DB + prior ПриемНаРаботу
+  // with Official 2026 RF Production Calendar pro-rata calculation and split by costAccount (20.01 vs 26 vs 44.01)
   if (category === 'payroll_accrual' || category === 'insurance_accrual') {
+    const workerProjectRules = resolveWorkerProjectAssignmentsFromText1C(
+      `${draft.description} ${draft.actionSequenceHint ?? ''}`
+    );
+    const singleOpProject = extractCanonicalProjectNomGroup1C(
+      `${draft.nomenclatureGroupHint ?? ''} ${draft.description}`
+    );
+
+    const resolveEmpProjectForMonth = (
+      empName: string,
+      costAcc: '20.01' | '26' | '44.01',
+      prevGroup?: string
+    ): string | undefined => {
+      if (costAcc !== '20.01') return undefined;
+      const root = extractSurnameRootForProjectMatch1C(empName);
+      if (root.length >= 3) {
+        const matchedRule = workerProjectRules.find((r) => r.surnameRootPattern.includes(root));
+        if (matchedRule) return matchedRule.projectGroup;
+      }
+      if (workerProjectRules.length === 0 && singleOpProject) {
+        return singleOpProject;
+      }
+      // Inherit worker's project from most recent prior payroll_accrual if worker keeps working on same object
+      if (root.length >= 3) {
+        for (let i = priorOps.length - 1; i >= 0; i--) {
+          const pOp = priorOps[i];
+          if (!pOp.includeInProcessing || pOp.category !== 'payroll_accrual') continue;
+          const prevStaff = pOp.payrollStaffSummary?.find((s) =>
+            extractSurnameRootForProjectMatch1C(s.name) === root
+          );
+          if (prevStaff?.nomenclatureGroup) {
+            return prevStaff.nomenclatureGroup;
+          }
+        }
+      }
+      // Or check if there is an active construction project in the current month
+      for (let i = priorOps.length - 1; i >= 0; i--) {
+        const pOp = priorOps[i];
+        if (!pOp.includeInProcessing || pOp.isDuplicateIn1C) continue;
+        if (
+          pOp.nomenclatureGroupName &&
+          pOp.nomenclatureGroupName !== 'Основная номенклатурная группа' &&
+          pOp.nomenclatureGroupName !== 'Панели из ПВХ и МДФ' &&
+          (pOp.category === 'materials_writeoff' ||
+            pOp.category === 'customer_invoice' ||
+            (pOp.category === 'bank_in' && /аванс|предоплат/iu.test(pOp.description)))
+        ) {
+          return pOp.nomenclatureGroupName;
+        }
+      }
+      return prevGroup;
+    };
+
     const rosterMap = new Map<
       string,
-      { name: string; position?: string; salary: number; source: string }
+      {
+        name: string;
+        position?: string;
+        costAccount: '20.01' | '26' | '44.01';
+        nomenclatureGroup?: string;
+        salary: number;
+        fullMonthlySalary: number;
+        workedDays?: number;
+        totalWorkingDays?: number;
+        hireDate?: string;
+        terminationDate?: string;
+        source: string;
+      }
     >();
 
     // 1. Check 1C DB employees / individuals for salary metadata
@@ -3742,51 +3901,81 @@ export function bindAndGenerateOperation(
       const parsedSal = Number(String(rawSal).replace(/[^\d.,-]/g, '').replace(',', '.'));
       if (Number.isFinite(parsedSal) && parsedSal > 0) {
         const key = normalizePersonIdentityKey1C(emp.name) || emp.id;
-        rosterMap.set(key, {
-          name: emp.name,
-          position: emp.extra?.position || emp.extra?.должность || emp.kind,
-          salary: round2(parsedSal),
-          source: 'Штатное расписание базы 1С',
+        const pos = emp.extra?.position || emp.extra?.должность || emp.kind;
+        const costAcc = inferEmployeeCostAccount1C(pos, emp.extra?.Подразделение);
+        const hireDt = emp.extra?.ДатаПриема || db1C?.periodStart || undefined;
+        const proRata = calculateEmployeeMonthlySalaryProRata2026({
+          monthlySalary: round2(parsedSal),
+          payrollDateIso: draft.date || '2026-01-31',
+          hireDateIso: hireDt,
         });
-      }
-    }
-
-    // 2. Check chronological Virtual1CState employees + prior ПриемНаРаботу operations up to draft.date
-    for (const vEmp of priorVirtualState.employees) {
-      if (vEmp.terminationDate && draft.date && vEmp.terminationDate < draft.date) continue;
-      if (vEmp.hireDate && draft.date && vEmp.hireDate > draft.date) continue;
-      const sal = round2(vEmp.monthlySalary ?? 0);
-      if (sal > 0) {
-        const key = normalizePersonIdentityKey1C(vEmp.fullName) || vEmp.key;
-        rosterMap.set(key, {
-          name: vEmp.fullName,
-          position: vEmp.position,
-          salary: sal,
-          source: vEmp.hireDate ? `Приём на работу от ${vEmp.hireDate}` : 'Штатное расписание 1С',
-        });
-      }
-    }
-    for (const pOp of priorOps) {
-      if (!pOp.includeInProcessing || pOp.isDuplicateIn1C) continue;
-      if (draft.date && pOp.date && pOp.date > draft.date) continue;
-      if (pOp.category === 'hr_hire') {
-        const sal = round2(pOp.monthlySalary || pOp.rawExcelAmount || pOp.amount || 0);
-        if (sal > 0) {
-          const empLabel = pOp.employeeName || `Сотрудник (${pOp.date})`;
-          const key = normalizePersonIdentityKey1C(empLabel) || pOp.id;
+        if (proRata.accruedSalary > 0) {
           rosterMap.set(key, {
-            name: empLabel,
-            position: pOp.employeePosition,
-            salary: sal,
-            source: `Приём на работу от ${pOp.date}`,
+            name: emp.name,
+            position: pos,
+            costAccount: costAcc,
+            nomenclatureGroup: resolveEmpProjectForMonth(emp.name, costAcc),
+            salary: proRata.accruedSalary,
+            fullMonthlySalary: round2(parsedSal),
+            workedDays: proRata.workedDays,
+            totalWorkingDays: proRata.totalWorkingDays,
+            hireDate: hireDt,
+            source: proRata.isProRata
+              ? `Штат 1С (${proRata.workedDays}/${proRata.totalWorkingDays} раб. дн.)`
+              : 'Штатное расписание базы 1С',
           });
         }
       }
     }
 
+    // 2. Check chronological Virtual1CState employees up to draft.date
+    for (const vEmp of priorVirtualState.employees) {
+      const fullSal = round2(vEmp.monthlySalary ?? 0);
+      if (fullSal <= 0) continue;
+      const proRata = calculateEmployeeMonthlySalaryProRata2026({
+        monthlySalary: fullSal,
+        payrollDateIso: draft.date || '2026-01-31',
+        hireDateIso: vEmp.hireDate,
+        terminationDateIso: vEmp.terminationDate,
+      });
+      const key = normalizePersonIdentityKey1C(vEmp.fullName) || vEmp.key;
+      if (proRata.accruedSalary <= 0) {
+        rosterMap.delete(key);
+        continue;
+      }
+      const costAcc = vEmp.costAccount || inferEmployeeCostAccount1C(vEmp.position);
+      rosterMap.set(key, {
+        name: vEmp.fullName,
+        position: vEmp.position,
+        costAccount: costAcc,
+        nomenclatureGroup: resolveEmpProjectForMonth(vEmp.fullName, costAcc, vEmp.nomenclatureGroup),
+        salary: proRata.accruedSalary,
+        fullMonthlySalary: fullSal,
+        workedDays: proRata.workedDays,
+        totalWorkingDays: proRata.totalWorkingDays,
+        hireDate: vEmp.hireDate,
+        terminationDate: vEmp.terminationDate,
+        source: proRata.isProRata
+          ? `Приём с ${vEmp.hireDate} (${proRata.workedDays}/${proRata.totalWorkingDays} раб. дн. 2026 г.)`
+          : vEmp.hireDate
+            ? `Приём на работу с ${vEmp.hireDate}`
+            : 'Штатное расписание 1С',
+      });
+    }
+
     const rosterArr = Array.from(rosterMap.values());
     if (rosterArr.length > 0) {
-      payrollStaffSummary = rosterArr;
+      payrollStaffSummary = rosterArr.map((r) => ({
+        name: r.name,
+        position: r.position,
+        costAccount: r.costAccount,
+        nomenclatureGroup: r.nomenclatureGroup,
+        salary: r.salary,
+        fullMonthlySalary: r.fullMonthlySalary,
+        workedDays: r.workedDays,
+        totalWorkingDays: r.totalWorkingDays,
+        source: r.source,
+      }));
     } else if (db1C && (db1C.employees.length > 0 || db1C.individuals.length > 0)) {
       const namesSource = db1C.employees.length > 0 ? db1C.employees : db1C.individuals;
       payrollStaffSummary = namesSource.slice(0, 8).map((e) => ({
@@ -3815,12 +4004,15 @@ export function bindAndGenerateOperation(
           : rosterFot;
       amountMode = 'from_related_doc';
       const breakdown = rosterArr
-        .map((r) => `${r.name}: ${r.salary.toLocaleString('ru-RU')} ₽`)
+        .map((r) =>
+          r.workedDays && r.totalWorkingDays && r.workedDays < r.totalWorkingDays
+            ? `${r.name} [сч. ${r.costAccount}]: ${r.salary.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽ (${r.workedDays}/${r.totalWorkingDays} дн.)`
+            : `${r.name} [сч. ${r.costAccount}]: ${r.salary.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽`
+        )
         .join(' + ');
-      calculationProvenance = `Авторасчёт из кадровых приказов / штата (${breakdown}) → ФОТ ${rosterFot.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽`;
+      calculationProvenance = `Авторасчёт по производственному календарю 2026 г. (${breakdown}) → ФОТ ${rosterFot.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽`;
       amountCalculationNote = calculationProvenance;
     } else if (effectiveDraftAmount < 0.01) {
-      // Inherit monthly ФОТ from earlier payroll_accrual in the same reporting year if already filled
       const prevPayroll = [...priorOps]
         .reverse()
         .find(
@@ -4456,8 +4648,112 @@ export function bindAndGenerateOperation(
               ].includes(category)
           );
 
+  const resolvedProjectNomGroup = (() => {
+    if (
+      /производств\p{L}*\s+труб\p{L}*|кирпичн\p{L}*\s+труб\p{L}*/iu.test(
+        `${draft.description} ${draft.nomenclatureGroupHint || ''}`
+      ) &&
+      priorOps.some(
+        (p) =>
+          p.includeInProcessing &&
+          !p.isDuplicateIn1C &&
+          p.nomenclatureGroupName === 'Реконструкция кровли'
+      )
+    ) {
+      return 'Реконструкция кровли';
+    }
+
+    const explicitHint =
+      draft.nomenclatureGroupHint &&
+      draft.nomenclatureGroupHint.trim() &&
+      draft.nomenclatureGroupHint.trim() !== 'Основная номенклатурная группа'
+        ? extractCanonicalProjectNomGroup1C(draft.nomenclatureGroupHint) || draft.nomenclatureGroupHint.trim()
+        : undefined;
+    if (explicitHint) return explicitHint;
+
+    const fromText = extractCanonicalProjectNomGroup1C(
+      `${draft.description} ${nomName || ''} ${draft.actionSequenceHint || ''}`
+    );
+    if (fromText) return fromText;
+
+    // For customer handover / advance / invoice with known counterparty (e.g. "Сданы работы заказчику ООО «Слава»"),
+    // inherit project group from earlier customer_invoice / advance for the same counterparty
+    if (
+      cpName &&
+      ['sale_services', 'sale_goods', 'customer_invoice', 'bank_in'].includes(category)
+    ) {
+      const cpNorm = normalizeCounterpartyKey1C(cpName);
+      for (let i = priorOps.length - 1; i >= 0; i--) {
+        const pOp = priorOps[i];
+        if (!pOp.includeInProcessing || pOp.isDuplicateIn1C) continue;
+        if (normalizeCounterpartyKey1C(pOp.counterpartyName) !== cpNorm) continue;
+        if (
+          pOp.nomenclatureGroupName &&
+          pOp.nomenclatureGroupName !== 'Основная номенклатурная группа'
+        ) {
+          return pOp.nomenclatureGroupName;
+        }
+        const pProj = extractCanonicalProjectNomGroup1C(pOp.description);
+        if (pProj) return pProj;
+      }
+    }
+
+    // For 20.01 direct production costs (materials write-off, purchase_materials with immediate write-off, workwear, subcontract services),
+    // infer active construction project from material type or current month's open customer order
+    if (
+      resolvedCostAccount === '20.01' &&
+      ['materials_writeoff', 'purchase_materials', 'workwear_issue', 'purchase_services'].includes(category)
+    ) {
+      const matLow = `${nomName || ''} ${draft.description}`.toLowerCase().replace(/ё/g, 'е');
+      const findActivePriorProject = (preferred: string[]): string | undefined => {
+        for (const pref of preferred) {
+          if (
+            priorOps.some(
+              (p) =>
+                p.includeInProcessing &&
+                !p.isDuplicateIn1C &&
+                p.nomenclatureGroupName === pref
+            )
+          ) {
+            return pref;
+          }
+        }
+        return undefined;
+      };
+      if (/обои|краск/iu.test(matLow)) {
+        const p = findActivePriorProject(['Отделка помещений', 'Ремонт помещений']);
+        if (p) return p;
+      }
+      if (/бетон|доск/iu.test(matLow)) {
+        const p = findActivePriorProject(['Бетонное покрытие']);
+        if (p) return p;
+      }
+      if (/керамогранит|металлопрофил|утеплител/iu.test(matLow)) {
+        const p = findActivePriorProject(['Ремонт фасада']);
+        if (p) return p;
+      }
+      const curMonth = (draft.date || '').slice(0, 7);
+      for (let i = priorOps.length - 1; i >= 0; i--) {
+        const pOp = priorOps[i];
+        if (!pOp.includeInProcessing || pOp.isDuplicateIn1C) continue;
+        if (curMonth && !(pOp.date || '').startsWith(curMonth)) continue;
+        if (
+          pOp.nomenclatureGroupName &&
+          pOp.nomenclatureGroupName !== 'Основная номенклатурная группа' &&
+          (pOp.category === 'customer_invoice' ||
+            (pOp.category === 'bank_in' && /аванс|предоплат/iu.test(pOp.description)) ||
+            pOp.category === 'materials_writeoff')
+        ) {
+          return pOp.nomenclatureGroupName;
+        }
+      }
+    }
+
+    return undefined;
+  })();
+
   const nomGroup =
-    draft.nomenclatureGroupHint?.trim() ||
+    resolvedProjectNomGroup ||
     matchedNomGroup ||
     db1C?.nomenclatureGroups[0]?.name ||
     'Основная номенклатурная группа';
@@ -6390,27 +6686,92 @@ export function bindAndGenerateOperation(
       }
 
       case 'payroll_accrual': {
-        const wageCostAcc = resolvedCostAccount || '26';
+        const fallbackWageCostAcc = resolvedCostAccount || '26';
         const empLabel =
           employeeName ||
           (payrollStaffSummary && payrollStaffSummary.length > 0
             ? payrollStaffSummary.map((s) => s.name).join(', ')
             : 'Сотрудники организации');
         const injRate = resolvedInjuryRate;
-        pushEntry(
-          wageCostAcc,
-          '70',
-          totalWithVat,
-          wageCostAcc === '20.01'
-            ? [nomGroup, expenseItemName || 'Оплата труда'].filter(Boolean).join(' / ')
-            : expenseItemName || 'Оплата труда',
-          empLabel,
-          'Начислена заработная плата за месяц',
+
+        const activeRosterForTax =
+          payrollStaffSummary && payrollStaffSummary.some((s) => s.salary > 0)
+            ? payrollStaffSummary.filter((s) => s.salary > 0)
+            : [];
+        const rosterSumCheck = round2(activeRosterForTax.reduce((acc, s) => acc + s.salary, 0));
+        const useSplitRosterPostings =
+          activeRosterForTax.length > 0 && Math.abs(rosterSumCheck - totalWithVat) < 1;
+
+        const wageBuckets = new Map<
+          string,
           {
-            allowZeroCalculated: isCalculatedBy1C,
-            amountRuleNote: 'По штатному ФОТ за месяц (кнопка «Заполнить» в 1С)',
+            costAcc: '20.01' | '26' | '44.01';
+            groupLabel: string;
+            amount: number;
+            employees: string[];
           }
-        );
+        >();
+
+        if (useSplitRosterPostings) {
+          for (const staffRow of activeRosterForTax) {
+            const cAcc: '20.01' | '26' | '44.01' =
+              staffRow.costAccount || inferEmployeeCostAccount1C(staffRow.position);
+            const gLabel =
+              cAcc === '20.01'
+                ? staffRow.nomenclatureGroup || nomGroup
+                : '';
+            const bucketKey = `${cAcc}|||${gLabel}`;
+            const prev = wageBuckets.get(bucketKey);
+            if (prev) {
+              prev.amount = round2(prev.amount + staffRow.salary);
+              prev.employees.push(staffRow.name);
+            } else {
+              wageBuckets.set(bucketKey, {
+                costAcc: cAcc,
+                groupLabel: gLabel,
+                amount: round2(staffRow.salary),
+                employees: [staffRow.name],
+              });
+            }
+          }
+
+          for (const bucket of wageBuckets.values()) {
+            pushEntry(
+              bucket.costAcc,
+              '70',
+              bucket.amount,
+              bucket.costAcc === '20.01'
+                ? [bucket.groupLabel || nomGroup, expenseItemName || 'Оплата труда']
+                    .filter(Boolean)
+                    .join(' / ')
+                : expenseItemName || 'Оплата труда',
+              bucket.employees.join(', '),
+              bucket.costAcc === '20.01'
+                ? `Начислена заработная плата производственного персонала (${bucket.groupLabel || nomGroup})`
+                : 'Начислена заработная плата административно-управленческого персонала (АУП)',
+              {
+                allowZeroCalculated: isCalculatedBy1C,
+                amountRuleNote: 'По штатному расписанию и производственному календарю 2026 г.',
+              }
+            );
+          }
+        } else {
+          pushEntry(
+            fallbackWageCostAcc,
+            '70',
+            totalWithVat,
+            fallbackWageCostAcc === '20.01'
+              ? [nomGroup, expenseItemName || 'Оплата труда'].filter(Boolean).join(' / ')
+              : expenseItemName || 'Оплата труда',
+            empLabel,
+            'Начислена заработная плата за месяц',
+            {
+              allowZeroCalculated: isCalculatedBy1C,
+              amountRuleNote: 'По штатному ФОТ за месяц (кнопка «Заполнить» в 1С)',
+            }
+          );
+        }
+
         // Compute exact 2026 employee-by-employee НДФЛ 13% with standard child deductions (1400/2800/6000 up to 450k YTD, doubled for single parent) and property tax deduction (2 000 000 ₽)
         const computeMonthlyChildDeduction2026 = (children: number, singleParent: boolean): number => {
           if (!children || children <= 0) return 0;
@@ -6421,39 +6782,40 @@ export function bindAndGenerateOperation(
           return singleParent ? base * 2 : base;
         };
 
-        const priorPayrollCountForEmp = (personKey: string, hireDate?: string): number => {
-          let months = 0;
+        const sumPriorYtdGrossForEmp = (personKey: string, hireDate?: string, fallbackSalary = 0): number => {
+          let ytd = 0;
           for (const pOp of priorOps) {
             if (!pOp.includeInProcessing || pOp.isDuplicateIn1C) continue;
             if (pOp.category !== 'payroll_accrual') continue;
             if (draft.date && pOp.date && pOp.date >= draft.date) continue;
             if (hireDate && pOp.date && pOp.date < hireDate) continue;
-            const inSummary = pOp.payrollStaffSummary?.some(
+            const matchedRow = pOp.payrollStaffSummary?.find(
               (s) => normalizePersonIdentityKey1C(s.name) === personKey
             );
-            if (inSummary || !pOp.payrollStaffSummary?.length) {
-              months += 1;
+            if (matchedRow) {
+              ytd = round2(ytd + (matchedRow.salary || 0));
+            } else if (!pOp.payrollStaffSummary?.length) {
+              ytd = round2(ytd + fallbackSalary);
             }
           }
-          return months;
+          return ytd;
         };
 
         const ndflByPersonKey = new Map<string, number>();
         let computedTotalNdfl = 0;
-        const activeRosterForTax =
-          payrollStaffSummary && payrollStaffSummary.some((s) => s.salary > 0)
-            ? payrollStaffSummary.filter((s) => s.salary > 0)
-            : [];
-        const rosterSumCheck = round2(activeRosterForTax.reduce((acc, s) => acc + s.salary, 0));
 
-        if (activeRosterForTax.length > 0 && Math.abs(rosterSumCheck - totalWithVat) < 1) {
+        if (useSplitRosterPostings) {
           for (const staffRow of activeRosterForTax) {
             const pKey = normalizePersonIdentityKey1C(staffRow.name);
             const vEmp = priorVirtualState.employees.find(
               (e) => normalizePersonIdentityKey1C(e.fullName) === pKey || e.key === `emp:${pKey}`
             );
-            const priorMonths = priorPayrollCountForEmp(pKey, vEmp?.hireDate);
-            const ytdGrossIncludingCurrent = round2((priorMonths + 1) * staffRow.salary);
+            const priorYtdGross = sumPriorYtdGrossForEmp(
+              pKey,
+              vEmp?.hireDate,
+              staffRow.fullMonthlySalary ?? staffRow.salary
+            );
+            const ytdGrossIncludingCurrent = round2(priorYtdGross + staffRow.salary);
 
             let childDed = 0;
             if ((vEmp?.childCount ?? 0) > 0 && ytdGrossIncludingCurrent <= 450_000) {
@@ -6471,7 +6833,6 @@ export function bindAndGenerateOperation(
                 !draft.date ||
                 vEmp.propertyTaxDeductionStartDate <= draft.date)
             ) {
-              // Count prior months where property deduction was already active
               let usedPropDeduction = 0;
               for (const pOp of priorOps) {
                 if (!pOp.includeInProcessing || pOp.isDuplicateIn1C) continue;
@@ -6484,7 +6845,12 @@ export function bindAndGenerateOperation(
                 ) {
                   continue;
                 }
-                usedPropDeduction = round2(usedPropDeduction + staffRow.salary);
+                const prevRow = pOp.payrollStaffSummary?.find(
+                  (s) => normalizePersonIdentityKey1C(s.name) === pKey
+                );
+                usedPropDeduction = round2(
+                  usedPropDeduction + (prevRow ? prevRow.salary : staffRow.salary)
+                );
               }
               const remProp = Math.max(0, round2(vEmp.propertyTaxDeduction - usedPropDeduction));
               const appliedProp = Math.min(taxableAfterChild, remProp);
@@ -6573,43 +6939,80 @@ export function bindAndGenerateOperation(
           }
         }
 
-        pushEntry(
-          wageCostAcc,
-          '69.09',
-          round2(totalWithVat * 0.3),
-          wageCostAcc === '20.01'
-            ? [nomGroup, 'Страховые взносы'].filter(Boolean).join(' / ')
-            : 'Страховые взносы',
-          'Страховые взносы по единому тарифу',
-          'Начислены страховые взносы по единому тарифу (30%)',
-          {
-            allowZeroCalculated: isCalculatedBy1C,
-            amountRuleNote: '30% от начисленного ФОТ',
+        if (useSplitRosterPostings && wageBuckets.size > 0) {
+          for (const bucket of wageBuckets.values()) {
+            const subDt =
+              bucket.costAcc === '20.01'
+                ? [bucket.groupLabel || nomGroup, 'Страховые взносы'].filter(Boolean).join(' / ')
+                : 'Страховые взносы';
+            pushEntry(
+              bucket.costAcc,
+              '69.09',
+              round2(bucket.amount * 0.3),
+              subDt,
+              'Страховые взносы по единому тарифу',
+              bucket.costAcc === '20.01'
+                ? `Начислены страховые взносы 30% с ФОТ рабочих (${bucket.groupLabel || nomGroup})`
+                : 'Начислены страховые взносы 30% с ФОТ АУП',
+              {
+                allowZeroCalculated: isCalculatedBy1C,
+                amountRuleNote: '30% от начисленного ФОТ подразделения',
+              }
+            );
+            pushEntry(
+              bucket.costAcc,
+              '69.11',
+              round2(bucket.amount * (injRate / 100)),
+              subDt,
+              'Взносы от НС и ПЗ',
+              `Начислены взносы на травматизм (${injRate}%)`,
+              {
+                allowZeroCalculated: isCalculatedBy1C,
+                amountRuleNote: `${injRate}% от начисленного ФОТ подразделения`,
+              }
+            );
           }
-        );
-        pushEntry(
-          wageCostAcc,
-          '69.11',
-          round2(totalWithVat * (injRate / 100)),
-          wageCostAcc === '20.01'
-            ? [nomGroup, 'Страховые взносы'].filter(Boolean).join(' / ')
-            : 'Страховые взносы',
-          'Взносы от НС и ПЗ',
-          `Начислены взносы на травматизм (${injRate}%)`,
-          {
-            allowZeroCalculated: isCalculatedBy1C,
-            amountRuleNote: `${injRate}% от начисленного ФОТ`,
-          }
-        );
+        } else {
+          pushEntry(
+            fallbackWageCostAcc,
+            '69.09',
+            round2(totalWithVat * 0.3),
+            fallbackWageCostAcc === '20.01'
+              ? [nomGroup, 'Страховые взносы'].filter(Boolean).join(' / ')
+              : 'Страховые взносы',
+            'Страховые взносы по единому тарифу',
+            'Начислены страховые взносы по единому тарифу (30%)',
+            {
+              allowZeroCalculated: isCalculatedBy1C,
+              amountRuleNote: '30% от начисленного ФОТ',
+            }
+          );
+          pushEntry(
+            fallbackWageCostAcc,
+            '69.11',
+            round2(totalWithVat * (injRate / 100)),
+            fallbackWageCostAcc === '20.01'
+              ? [nomGroup, 'Страховые взносы'].filter(Boolean).join(' / ')
+              : 'Страховые взносы',
+            'Взносы от НС и ПЗ',
+            `Начислены взносы на травматизм (${injRate}%)`,
+            {
+              allowZeroCalculated: isCalculatedBy1C,
+              amountRuleNote: `${injRate}% от начисленного ФОТ`,
+            }
+          );
+        }
         break;
       }
 
       case 'closing': {
         // Chronological Month-End Closing (ЗакрытиеМесяца):
         // 1) Accrue monthly depreciation on commissioned OS if not already accrued in this month
-        // 2) Close 20.01, 25, 26, 44.01 -> 90.02.1 / 90.08.1
-        // 3) Close 90 & 91 -> 99.01.1
-        // 4) At quarter-end (03, 06, 09, 12) on OSNO, accrue 20% corporate income tax (Дт 99.01.1 Кт 68.04.1)
+        // 2) Write off monthly share of Deferred Expenses (РБП on 97.21 -> 26 / 20.01 / 44.01)
+        // 3) Close 25 -> 20.01; close 20.01 -> 90.02.1 ONLY for completed nomenclature groups (preserving НЗП!); close 26 -> 90.08.1; close 44.01 -> 90.02.1
+        // 4) Close 90 -> 90.09 -> 99.01.1 and 91 -> 91.09 -> 99.01.1
+        // 5) At quarter-end (03, 06, 09, 12) on OSNO, accrue 20% corporate income tax strictly on Дт 99.02.1 Кт 68.04.1
+        // 6) On Dec 31 (Реформация баланса), close 90.* -> 90.09, 91.* -> 91.09, and BOTH 99.01.1 and 99.02.1 -> 84.01 / 84.02
         const closeMonthPrefix = (draft.date ?? '').slice(0, 7);
         const alreadyHasDeprInMonth = priorOps.some(
           (p) =>
@@ -6622,6 +7025,7 @@ export function bindAndGenerateOperation(
 
         let extraDepr20 = 0;
         let extraDepr26 = 0;
+        let extraRpb44 = 0;
         if (!alreadyHasDeprInMonth && closeMonthPrefix) {
           const activeOsForMonth = Object.values(priorVirtualState.fixedAssets).filter(
             (fa) =>
@@ -6642,13 +7046,46 @@ export function bindAndGenerateOperation(
                 targetAcc,
                 '02.01',
                 mDepr,
-                'Амортизация',
+                targetAcc === '20.01'
+                  ? [nomGroup, 'Амортизация'].filter(Boolean).join(' / ')
+                  : 'Амортизация',
                 fa.name || 'Основные средства',
                 `Регламентное начисление амортизации ОС (${fa.name || 'ОС'})`
               );
               if (targetAcc === '26') extraDepr26 = round2(extraDepr26 + mDepr);
               else extraDepr20 = round2(extraDepr20 + mDepr);
             }
+          }
+        }
+
+        // 1b) Monthly write-off of Deferred Expenses (РБП on 97.21)
+        const alreadyHasRpbWriteoffInMonth = priorOps.some(
+          (p) =>
+            p.includeInProcessing &&
+            !p.isDuplicateIn1C &&
+            closeMonthPrefix &&
+            (p.date ?? '').startsWith(closeMonthPrefix) &&
+            p.entries.some((e) => e.credit === '97.21' || e.credit === '97')
+        );
+        if (!alreadyHasRpbWriteoffInMonth && closeMonthPrefix) {
+          for (const rpb of priorVirtualState.deferredExpenses ?? []) {
+            if (rpb.remainingAmount < 0.01) continue;
+            if (rpb.startMonth && rpb.startMonth > closeMonthPrefix) continue;
+            const rpbAmt = round2(Math.min(rpb.monthlyAmount, rpb.remainingAmount));
+            if (rpbAmt < 0.01) continue;
+            pushEntry(
+              rpb.writeOffAccount,
+              '97.21',
+              rpbAmt,
+              rpb.writeOffAccount === '20.01'
+                ? [nomGroup, 'Расходы будущих периодов'].filter(Boolean).join(' / ')
+                : 'Расходы будущих периодов',
+              rpb.name,
+              `Регламентное ежемесячное списание РБП (${rpb.name})`
+            );
+            if (rpb.writeOffAccount === '26') extraDepr26 = round2(extraDepr26 + rpbAmt);
+            else if (rpb.writeOffAccount === '44.01') extraRpb44 = round2(extraRpb44 + rpbAmt);
+            else extraDepr20 = round2(extraDepr20 + rpbAmt);
           }
         }
 
@@ -6692,6 +7129,96 @@ export function bindAndGenerateOperation(
           extraDepr20 = round2(extraDepr20 + bal25);
         }
 
+        // Determine completed nomenclatureGroups in closeMonthPrefix vs WIP (НЗП) holds on 20.01
+        const normalizeGroupKey = (g: string): string =>
+          (g || '').trim().toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ');
+        const GENERIC_20_SUBCONTOS = new Set([
+          '',
+          'без аналитики (субконто)',
+          'основная номенклатурная группа',
+          'оплата труда',
+          'страховые взносы',
+          'материальные расходы',
+          'амортизация',
+          'расходы будущих периодов',
+          'прочие расходы',
+        ]);
+
+        const completedGroupsInMonth = new Set<string>();
+        const explicitWipGroupsInMonth = new Set<string>();
+        let explicitAllWipInMonth = false;
+        let monthHasProductOrWorkHandover = false;
+
+        for (const pOp of priorOps) {
+          if (!pOp.includeInProcessing || pOp.isDuplicateIn1C) continue;
+          if (closeMonthPrefix && !(pOp.date ?? '').startsWith(closeMonthPrefix)) continue;
+
+          if (/незавер[шщ][её]нн\p{L}*\s+производств|(?:^|[^\p{L}])инвентаризаци\p{L}*\s+нзп/iu.test(pOp.description)) {
+            const wipProj =
+              extractCanonicalProjectNomGroup1C(pOp.description) ||
+              (pOp.nomenclatureGroupName &&
+              !GENERIC_20_SUBCONTOS.has(normalizeGroupKey(pOp.nomenclatureGroupName))
+                ? pOp.nomenclatureGroupName
+                : undefined);
+            if (wipProj) {
+              explicitWipGroupsInMonth.add(normalizeGroupKey(wipProj));
+            } else {
+              explicitAllWipInMonth = true;
+            }
+          }
+
+          const has9001Or43 = pOp.entries.some(
+            (e) => e.credit === '90.01.1' || e.debit === '43' || e.debit === '40'
+          );
+          if (has9001Or43) {
+            const isPureRent =
+              /аренд\p{L}*\s+(?:лесов|помещен|оборудован)/iu.test(pOp.description) &&
+              !extractCanonicalProjectNomGroup1C(pOp.description);
+            if (!isPureRent) {
+              monthHasProductOrWorkHandover = true;
+            }
+            if (pOp.nomenclatureGroupName) {
+              completedGroupsInMonth.add(normalizeGroupKey(pOp.nomenclatureGroupName));
+            }
+            const pProj = extractCanonicalProjectNomGroup1C(pOp.description);
+            if (pProj) {
+              completedGroupsInMonth.add(normalizeGroupKey(pProj));
+            }
+            for (const e of pOp.entries) {
+              if (e.credit === '90.01.1' && e.creditSubconto) {
+                const subHead = e.creditSubconto.split(' / ')[0].trim();
+                if (subHead) completedGroupsInMonth.add(normalizeGroupKey(subHead));
+              }
+            }
+          }
+        }
+        // If no month-scoped priorOps exist (e.g. closing against db1C balances directly), check runningOsv 90.01.1
+        if (
+          !monthHasProductOrWorkHandover &&
+          !explicitAllWipInMonth &&
+          priorOps.filter((p) => closeMonthPrefix && (p.date ?? '').startsWith(closeMonthPrefix)).length === 0
+        ) {
+          const rev9001 = runningOsv.leafRows.find((r) => r.code === '90.01.1')?.endCredit ?? 0;
+          if (rev9001 > 0.01) monthHasProductOrWorkHandover = true;
+        }
+
+        const shouldClose20Group = (rawSubcontoLabel: string): boolean => {
+          const head = (rawSubcontoLabel || '').split(' / ')[0].trim();
+          const normHead = normalizeGroupKey(head);
+          const canonicalHead = extractCanonicalProjectNomGroup1C(head);
+          const effectiveKey = canonicalHead ? normalizeGroupKey(canonicalHead) : normHead;
+
+          if (!GENERIC_20_SUBCONTOS.has(effectiveKey)) {
+            if (completedGroupsInMonth.has(effectiveKey)) return true;
+            return false; // Named project without handover in this month stays as WIP (НЗП) on 20.01!
+          }
+          // Generic 20.01 subconto: stays open if explicit blanket WIP instruction is present and no work/product handover occurred
+          if (explicitAllWipInMonth && !monthHasProductOrWorkHandover) {
+            return false;
+          }
+          return monthHasProductOrWorkHandover || (!explicitAllWipInMonth && explicitWipGroupsInMonth.size === 0);
+        };
+
         const leafEnd20 = runningOsv.leafRows.find((r) => r.code === '20.01')?.endDebit ?? 0;
         const bal20 = round2(leafEnd20 + extraDepr20);
         if (bal20 > 0.01) {
@@ -6701,26 +7228,33 @@ export function bindAndGenerateOperation(
           const sumSubs20 = round2(subs20.reduce((acc, s) => acc + s.endDebit, 0));
           if (subs20.length > 0 && Math.abs(sumSubs20 - leafEnd20) < 0.02) {
             for (const s20 of subs20) {
+              if (!shouldClose20Group(s20.subcontoLabel)) continue;
+              const s20Head = s20.subcontoLabel.split(' / ')[0].trim();
+              const targetNomGroup =
+                extractCanonicalProjectNomGroup1C(s20Head) ||
+                (!GENERIC_20_SUBCONTOS.has(normalizeGroupKey(s20Head)) ? s20Head : nomGroup);
               pushEntry(
                 '90.02.1',
                 '20.01',
                 s20.endDebit,
-                nomGroup,
+                targetNomGroup,
                 s20.subcontoLabel === 'Без аналитики (субконто)' ? '' : s20.subcontoLabel,
                 `Закрытие счёта 20.01 в себестоимость продаж (${s20.subcontoLabel})`
               );
+              added9002 = round2(added9002 + s20.endDebit);
             }
-            if (extraDepr20 > 0.01) {
+            if (extraDepr20 > 0.01 && shouldClose20Group(nomGroup)) {
               pushEntry(
                 '90.02.1',
                 '20.01',
                 extraDepr20,
                 nomGroup,
-                bal25 > 0.01 ? nomGroup : 'Амортизация',
+                bal25 > 0.01 ? nomGroup : [nomGroup, 'Амортизация'].filter(Boolean).join(' / '),
                 'Закрытие регламентных расходов 20.01 в себестоимость продаж'
               );
+              added9002 = round2(added9002 + extraDepr20);
             }
-          } else {
+          } else if (shouldClose20Group(nomGroup)) {
             pushEntry(
               '90.02.1',
               '20.01',
@@ -6729,8 +7263,8 @@ export function bindAndGenerateOperation(
               nomGroup,
               'Закрытие счёта 20.01 в себестоимость продаж'
             );
+            added9002 = round2(added9002 + bal20);
           }
-          added9002 = round2(added9002 + bal20);
         }
 
         const leafEnd26 = runningOsv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0;
@@ -6753,14 +7287,19 @@ export function bindAndGenerateOperation(
               );
             }
             if (extraDepr26 > 0.01) {
-              pushEntry(
-                target26,
-                '26',
-                extraDepr26,
-                nomGroup,
-                'Амортизация',
-                'Закрытие амортизации со счёта 26 («Директ-костинг»)'
-              );
+              const hasRpb26 = entries.some((e) => e.debit === '26' && e.credit === '97.21');
+              for (const regEntry of entries.filter(
+                (e) => e.debit === '26' && (e.credit === '02.01' || e.credit === '97.21')
+              )) {
+                pushEntry(
+                  target26,
+                  '26',
+                  regEntry.amount,
+                  nomGroup,
+                  regEntry.debitSubconto || (hasRpb26 ? 'Расходы будущих периодов' : 'Амортизация'),
+                  `Закрытие регламентных расходов со счёта 26 («Директ-костинг»)`
+                );
+              }
             }
           } else {
             pushEntry(
@@ -6776,13 +7315,14 @@ export function bindAndGenerateOperation(
           else added9002 = round2(added9002 + bal26);
         }
 
-        const bal44 = runningOsv.leafRows.find((r) => r.code === '44.01')?.endDebit ?? 0;
+        const leafEnd44 = runningOsv.leafRows.find((r) => r.code === '44.01')?.endDebit ?? 0;
+        const bal44 = round2(leafEnd44 + extraRpb44);
         if (bal44 > 0.01) {
           const subs44 = (runningOsv.subcontoRowsByAccount?.['44.01'] ?? []).filter(
             (s) => s.endDebit >= 0.01
           );
           const sumSubs44 = round2(subs44.reduce((acc, s) => acc + s.endDebit, 0));
-          if (subs44.length > 0 && Math.abs(sumSubs44 - bal44) < 0.02) {
+          if (subs44.length > 0 && Math.abs(sumSubs44 - leafEnd44) < 0.02) {
             for (const s44 of subs44) {
               pushEntry(
                 '90.02.1',
@@ -6791,6 +7331,16 @@ export function bindAndGenerateOperation(
                 nomGroup,
                 s44.subcontoLabel === 'Без аналитики (субконто)' ? '' : s44.subcontoLabel,
                 `Закрытие счёта 44.01 (${s44.subcontoLabel})`
+              );
+            }
+            if (extraRpb44 > 0.01) {
+              pushEntry(
+                '90.02.1',
+                '44.01',
+                extraRpb44,
+                nomGroup,
+                'Расходы будущих периодов',
+                'Закрытие РБП со счёта 44.01'
               );
             }
           } else {
@@ -6810,7 +7360,7 @@ export function bindAndGenerateOperation(
         const net90 = round2(
           children90.reduce((s, r) => s + (r.endDebit - r.endCredit), 0) + added9002 + added9008
         );
-        let profitDeltaTo99 = 0;
+        let profitDeltaTo9901 = 0;
         if (Math.abs(net90) > 0.01) {
           if (net90 < 0) {
             const p90 = round2(-net90);
@@ -6822,7 +7372,7 @@ export function bindAndGenerateOperation(
               'Прибыль (убыток) от продаж',
               'Финансовый результат (прибыль от продаж)'
             );
-            profitDeltaTo99 = round2(profitDeltaTo99 + p90);
+            profitDeltaTo9901 = round2(profitDeltaTo9901 + p90);
           } else {
             pushEntry(
               '99.01.1',
@@ -6832,7 +7382,7 @@ export function bindAndGenerateOperation(
               nomGroup,
               'Финансовый результат (убыток от продаж)'
             );
-            profitDeltaTo99 = round2(profitDeltaTo99 - net90);
+            profitDeltaTo9901 = round2(profitDeltaTo9901 - net90);
           }
         }
 
@@ -6849,7 +7399,7 @@ export function bindAndGenerateOperation(
               'Прочие доходы и расходы',
               'Закрытие счёта 91 (прибыль по прочим операциям)'
             );
-            profitDeltaTo99 = round2(profitDeltaTo99 + p91);
+            profitDeltaTo9901 = round2(profitDeltaTo9901 + p91);
           } else {
             pushEntry(
               '99.01.1',
@@ -6859,15 +7409,31 @@ export function bindAndGenerateOperation(
               '',
               'Закрытие счёта 91 (сальдо прочих расходов)'
             );
-            profitDeltaTo99 = round2(profitDeltaTo99 - net91);
+            profitDeltaTo9901 = round2(profitDeltaTo9901 - net91);
           }
         }
 
-        // Quarter-end (03, 06, 09, 12) corporate income tax 20% on OSNO
+        // Quarter-end (03, 06, 09, 12) corporate income tax 20% on OSNO -> strictly Дт 99.02.1 Кт 68.04.1
         const closeMonth = (draft.date ?? '').slice(5, 7);
-        if (isOsno && ['03', '06', '09', '12'].includes(closeMonth)) {
-          const row99 = runningOsv.leafRows.find((r) => r.code === '99.01.1');
-          const alreadyAccruedTax = priorOps
+        const children99 = runningOsv.leafRows.filter((r) => r.code.startsWith('99.'));
+        const row9901 = runningOsv.leafRows.find((r) => r.code === '99.01.1');
+        const alreadyAccruedTax = round2(
+          priorOps
+            .filter(
+              (p) =>
+                p.includeInProcessing &&
+                !p.isDuplicateIn1C &&
+                (!draft.date || !p.date || p.date <= draft.date)
+            )
+            .flatMap((p) => p.entries)
+            .filter(
+              (e) =>
+                (e.debit === '99.02.1' || e.debit === '99.01.1') && e.credit.startsWith('68.04')
+            )
+            .reduce((s, e) => s + e.amount, 0)
+        );
+        const legacyTaxOn9901 = round2(
+          priorOps
             .filter(
               (p) =>
                 p.includeInProcessing &&
@@ -6876,121 +7442,140 @@ export function bindAndGenerateOperation(
             )
             .flatMap((p) => p.entries)
             .filter((e) => e.debit === '99.01.1' && e.credit.startsWith('68.04'))
-            .reduce((s, e) => s + e.amount, 0);
+            .reduce((s, e) => s + e.amount, 0)
+        );
 
-          const currentNetProfitAfterPrevTax = round2(
-            ((row99?.endCredit ?? 0) - (row99?.endDebit ?? 0)) + profitDeltaTo99
-          );
-          const preTaxCumulativeProfit = round2(currentNetProfitAfterPrevTax + alreadyAccruedTax);
-          let taxDeltaApplied = 0;
+        const preTaxCumulativeProfit = round2(
+          ((row9901?.endCredit ?? 0) - (row9901?.endDebit ?? 0)) +
+            profitDeltaTo9901 +
+            legacyTaxOn9901
+        );
+
+        if (isOsno && ['03', '06', '09', '12'].includes(closeMonth)) {
           if (preTaxCumulativeProfit > 0.01) {
             const targetTaxTotal = round2(preTaxCumulativeProfit * 0.2);
             const taxDelta = round2(targetTaxTotal - alreadyAccruedTax);
             if (taxDelta > 0.01) {
-              taxDeltaApplied = taxDelta;
               pushEntry(
-                '99.01.1',
+                '99.02.1',
                 '68.04.1',
                 taxDelta,
-                'Налог на прибыль и аналогичные платежи',
+                'Текущий налог на прибыль',
                 'Налог на прибыль организаций (20%)',
                 'Регламентный расчёт налога на прибыль организаций (20%) за отчётный период'
               );
             }
           }
+        }
 
-          // Year-end Реформация баланса (31.12 or explicit «реформация баланса»)
-          if ((draft.date ?? '').endsWith('-12-31') || /реформация\s+баланса/iu.test(descLower)) {
-            const codes90 = new Set<string>([
-              ...children90.map((r) => r.code),
-              ...entries
-                .flatMap((e) => [e.debit, e.credit])
-                .filter((c) => c.startsWith('90.')),
-            ]);
-            for (const code90 of codes90) {
-              if (code90 === '90.09') continue;
-              const baseRow = children90.find((r) => r.code === code90);
-              const extraDt = entries
-                .filter((e) => e.debit === code90)
-                .reduce((s, e) => s + e.amount, 0);
-              const extraKt = entries
-                .filter((e) => e.credit === code90)
-                .reduce((s, e) => s + e.amount, 0);
-              const balCr = round2(
-                ((baseRow?.endCredit ?? 0) + extraKt) - ((baseRow?.endDebit ?? 0) + extraDt)
-              );
-              if (balCr > 0.01) {
-                pushEntry(code90, '90.09', balCr, nomGroup, nomGroup, `Реформация баланса: закрытие субсчёта ${code90}`);
-              } else if (balCr < -0.01) {
-                pushEntry('90.09', code90, Math.abs(balCr), nomGroup, nomGroup, `Реформация баланса: закрытие субсчёта ${code90}`);
-              }
-            }
-            const codes91 = new Set<string>([
-              ...children91.map((r) => r.code),
-              ...entries
-                .flatMap((e) => [e.debit, e.credit])
-                .filter((c) => c.startsWith('91.')),
-            ]);
-            for (const code91 of codes91) {
-              if (code91 === '91.09') continue;
-              const baseRow = children91.find((r) => r.code === code91);
-              const extraDt = entries
-                .filter((e) => e.debit === code91)
-                .reduce((s, e) => s + e.amount, 0);
-              const extraKt = entries
-                .filter((e) => e.credit === code91)
-                .reduce((s, e) => s + e.amount, 0);
-              const balCr = round2(
-                ((baseRow?.endCredit ?? 0) + extraKt) - ((baseRow?.endDebit ?? 0) + extraDt)
-              );
-              if (balCr > 0.01) {
-                pushEntry(code91, '91.09', balCr, 'Прочие доходы и расходы', 'Прочие доходы и расходы', `Реформация баланса: закрытие субсчёта ${code91}`);
-              } else if (balCr < -0.01) {
-                pushEntry('91.09', code91, Math.abs(balCr), 'Прочие доходы и расходы', 'Прочие доходы и расходы', `Реформация баланса: закрытие субсчёта ${code91}`);
-              }
-            }
-            const finalNetCredit99 = round2(currentNetProfitAfterPrevTax - taxDeltaApplied);
-            if (finalNetCredit99 > 0.01) {
-              pushEntry(
-                '99.01.1',
-                '84.01',
-                finalNetCredit99,
-                'Прибыль (убыток) от продаж',
-                'Прибыль, подлежащая распределению',
-                'Реформация баланса: зачисление чистой прибыли отчётного года на счёт 84.01'
-              );
-            } else if (finalNetCredit99 < -0.01) {
-              pushEntry(
-                '84.02',
-                '99.01.1',
-                Math.abs(finalNetCredit99),
-                'Убыток, подлежащий покрытию',
-                'Прибыль (убыток) от продаж',
-                'Реформация баланса: списание чистого убытка отчётного года на счёт 84.02'
-              );
+        // Year-end Реформация баланса (31.12 or explicit «реформация баланса»):
+        // Closes 90.* -> 90.09, 91.* -> 91.09, and ALL 99.* subaccounts (99.01.1, 99.02.1, 99.02.3) -> 84.01 / 84.02
+        if ((draft.date ?? '').endsWith('-12-31') || /реформация\s+баланса/iu.test(descLower)) {
+          const codes90 = new Set<string>([
+            ...children90.map((r) => r.code),
+            ...entries
+              .flatMap((e) => [e.debit, e.credit])
+              .filter((c) => c.startsWith('90.')),
+          ]);
+          for (const code90 of codes90) {
+            if (code90 === '90.09') continue;
+            const baseRow = children90.find((r) => r.code === code90);
+            const extraDt = entries
+              .filter((e) => e.debit === code90)
+              .reduce((s, e) => s + e.amount, 0);
+            const extraKt = entries
+              .filter((e) => e.credit === code90)
+              .reduce((s, e) => s + e.amount, 0);
+            const balCr = round2(
+              ((baseRow?.endCredit ?? 0) + extraKt) - ((baseRow?.endDebit ?? 0) + extraDt)
+            );
+            if (balCr > 0.01) {
+              pushEntry(code90, '90.09', balCr, nomGroup, nomGroup, `Реформация баланса: закрытие субсчёта ${code90}`);
+            } else if (balCr < -0.01) {
+              pushEntry('90.09', code90, Math.abs(balCr), nomGroup, nomGroup, `Реформация баланса: закрытие субсчёта ${code90}`);
             }
           }
-        } else if (/реформация\s+баланса/iu.test(descLower)) {
-          const row99 = runningOsv.leafRows.find((r) => r.code === '99.01.1');
-          const finalNetCredit99 = round2(((row99?.endCredit ?? 0) - (row99?.endDebit ?? 0)) + profitDeltaTo99);
-          if (finalNetCredit99 > 0.01) {
-            pushEntry(
-              '99.01.1',
-              '84.01',
-              finalNetCredit99,
-              'Прибыль (убыток) от продаж',
-              'Прибыль, подлежащая распределению',
-              'Реформация баланса: зачисление чистой прибыли отчётного года на счёт 84.01'
+
+          const codes91 = new Set<string>([
+            ...children91.map((r) => r.code),
+            ...entries
+              .flatMap((e) => [e.debit, e.credit])
+              .filter((c) => c.startsWith('91.')),
+          ]);
+          for (const code91 of codes91) {
+            if (code91 === '91.09') continue;
+            const baseRow = children91.find((r) => r.code === code91);
+            const extraDt = entries
+              .filter((e) => e.debit === code91)
+              .reduce((s, e) => s + e.amount, 0);
+            const extraKt = entries
+              .filter((e) => e.credit === code91)
+              .reduce((s, e) => s + e.amount, 0);
+            const balCr = round2(
+              ((baseRow?.endCredit ?? 0) + extraKt) - ((baseRow?.endDebit ?? 0) + extraDt)
             );
-          } else if (finalNetCredit99 < -0.01) {
-            pushEntry(
-              '84.02',
-              '99.01.1',
-              Math.abs(finalNetCredit99),
-              'Убыток, подлежащий покрытию',
-              'Прибыль (убыток) от продаж',
-              'Реформация баланса: списание чистого убытка отчётного года на счёт 84.02'
+            if (balCr > 0.01) {
+              pushEntry(code91, '91.09', balCr, 'Прочие доходы и расходы', 'Прочие доходы и расходы', `Реформация баланса: закрытие субсчёта ${code91}`);
+            } else if (balCr < -0.01) {
+              pushEntry('91.09', code91, Math.abs(balCr), 'Прочие доходы и расходы', 'Прочие доходы и расходы', `Реформация баланса: закрытие субсчёта ${code91}`);
+            }
+          }
+
+          const codes99 = new Set<string>([
+            ...children99.map((r) => r.code),
+            ...entries
+              .flatMap((e) => [e.debit, e.credit])
+              .filter((c) => c.startsWith('99.')),
+          ]);
+          const netByCode99 = new Map<string, number>();
+          let totalNetCreditAll99 = 0;
+          for (const code99 of codes99) {
+            const baseRow = children99.find((r) => r.code === code99);
+            const extraDt = entries
+              .filter((e) => e.debit === code99)
+              .reduce((s, e) => s + e.amount, 0);
+            const extraKt = entries
+              .filter((e) => e.credit === code99)
+              .reduce((s, e) => s + e.amount, 0);
+            const netCr = round2(
+              ((baseRow?.endCredit ?? 0) + extraKt) - ((baseRow?.endDebit ?? 0) + extraDt)
             );
+            if (Math.abs(netCr) > 0.01) {
+              netByCode99.set(code99, netCr);
+              totalNetCreditAll99 = round2(totalNetCreditAll99 + netCr);
+            }
+          }
+          const target84 = totalNetCreditAll99 >= 0 ? '84.01' : '84.02';
+          const target84Sub =
+            target84 === '84.01'
+              ? 'Прибыль, подлежащая распределению'
+              : 'Убыток, подлежащий покрытию';
+          for (const [code99, netCr] of netByCode99.entries()) {
+            const sub99 =
+              code99 === '99.02.1'
+                ? 'Текущий налог на прибыль'
+                : code99 === '99.02.3'
+                  ? 'Налоговые санкции'
+                  : 'Прибыль (убыток) от продаж';
+            if (netCr > 0.01) {
+              pushEntry(
+                code99,
+                target84,
+                netCr,
+                sub99,
+                target84Sub,
+                `Реформация баланса: перенос кредитового сальдо ${code99} на счёт ${target84}`
+              );
+            } else if (netCr < -0.01) {
+              pushEntry(
+                target84,
+                code99,
+                Math.abs(netCr),
+                target84Sub,
+                sub99,
+                `Реформация баланса: списание дебетового сальдо ${code99} на счёт ${target84}`
+              );
+            }
           }
         }
 
@@ -7473,33 +8058,88 @@ export function bindAndGenerateOperation(
       }
 
       case 'deferred_expense_97': {
-        const rbpSub = nomName || 'Расходы будущих периодов';
-        if (docType1C === 'ЗакрытиеМесяца' || /списан/iu.test(descLower)) {
-          const costAcc = draft.costAccountHint || resolvedCostAccount || '26';
+        const isSroEntrance = /вступительн\p{L}*\s+взнос.*(?:сро|саморегулируем)/iu.test(descLower);
+        const rbpSub =
+          nomName ||
+          (isSroEntrance ? 'Вступительный взнос в СРО' : 'Расходы будущих периодов');
+        if (docType1C === 'ЗакрытиеМесяца' || /списан\p{L}*.*(?:рбп|расход\p{L}*\s+будущ)/iu.test(descLower)) {
+          const costAcc = draft.costAccountHint || (isSroEntrance ? '26' : resolvedCostAccount || '26');
           pushEntry(
             costAcc,
             '97.21',
             totalWithVat,
-            expenseItemName || 'Прочие расходы',
+            costAcc === '20.01'
+              ? [nomGroup, expenseItemName || 'Расходы будущих периодов'].filter(Boolean).join(' / ')
+              : expenseItemName || 'Расходы будущих периодов',
             rbpSub,
             'Ежемесячное списание расходов будущих периодов'
           );
         } else {
+          const actionLow = (draft.actionSequenceHint ?? '').toLowerCase();
+          const settlementAcc: '76.09' | '60.01' =
+            draft.rpbSettlementAccount ||
+            (isSroEntrance ||
+            draft.explicitCorrespondences?.some(
+              (c) => c.debit.startsWith('76') || c.credit.startsWith('76')
+            ) ||
+            /д\s*97(?:\.\d+)?\s*к\s*76|страхов\p{L}*|полис/iu.test(`${descLower} ${actionLow}`)
+              ? '76.09'
+              : '60.01');
+          const paidVia: 'bank_51' | 'cash_50' | 'accountable_71' | undefined =
+            draft.paidImmediatelyVia ||
+            (/д\s*(?:76|60)(?:\.\d+)?\s*к\s*51|(?:^|[^\p{L}])(?:перечислен|оплачен|уплачен|списан\p{L}*\s+с\s+р\/с)/iu.test(
+              `${descLower} ${actionLow}`
+            )
+              ? 'bank_51'
+              : /из\s+касс|наличн/iu.test(descLower)
+                ? 'cash_50'
+                : undefined);
+          const cpLabel = cpSubconto || cpName || (settlementAcc === '76.09' ? 'Контрагент (сч. 76.09)' : 'Поставщик');
+
+          if (paidVia === 'bank_51') {
+            pushEntry(
+              settlementAcc,
+              '51',
+              totalWithVat,
+              cpLabel,
+              bankSubconto,
+              `Перечисление средств с расчётного счёта (${rbpSub})`
+            );
+          } else if (paidVia === 'cash_50') {
+            pushEntry(
+              settlementAcc,
+              '50.01',
+              totalWithVat,
+              cpLabel,
+              cashFlowItemName || 'Оплата поставщику',
+              `Оплата наличными из кассы (${rbpSub})`
+            );
+          } else if (paidVia === 'accountable_71') {
+            pushEntry(
+              settlementAcc,
+              '71.01',
+              totalWithVat,
+              cpLabel,
+              employeeName || 'Подотчётное лицо',
+              `Оплата через подотчётное лицо (${rbpSub})`
+            );
+          }
+
           pushEntry(
             '97.21',
-            '60.01',
+            settlementAcc,
             netWithoutVat,
             rbpSub,
-            cpSubconto || 'Поставщик',
+            cpLabel,
             `Приняты к учёту расходы будущих периодов (${rbpSub})`
           );
           if (vatAmount > 0) {
             pushEntry(
               '19.04',
-              '60.01',
+              settlementAcc,
               vatAmount,
-              cpSubconto || 'Поставщик',
-              cpSubconto || 'Поставщик',
+              cpLabel,
+              cpLabel,
               'Входной НДС по расходам будущих периодов'
             );
             if (hasInvoiceSF) {
@@ -7508,7 +8148,7 @@ export function bindAndGenerateOperation(
                 '19.04',
                 vatAmount,
                 'Налог (взносы): к вычету',
-                cpSubconto || 'Поставщик',
+                cpLabel,
                 'Принят к вычету НДС по РБП'
               );
             }
@@ -7931,6 +8571,8 @@ export function bindAndGenerateOperation(
     needsAmount: (needsAmount && finalOpAmount < 0.01) || undefined,
     amountCalculationNote,
     monthlySalary: resolvedMonthlySalary,
+    employeeHireStartDate: draft.employeeHireStartDate,
+    employeeTerminationDate: draft.employeeTerminationDate,
     employeePosition: resolvedEmployeePosition,
     employeeChildCount: resolvedEmployeeChildCount,
     employeeIsSingleParent: resolvedEmployeeIsSingleParent,
@@ -7944,6 +8586,14 @@ export function bindAndGenerateOperation(
     payrollStaffSummary,
     usefulLifeMonths: resolvedUsefulLifeMonths,
     depreciationBaseAmount: resolvedDeprBaseAmount,
+    rpbTermMonths:
+      category === 'deferred_expense_97'
+        ? draft.rpbTermMonths || resolvedUsefulLifeMonths || 12
+        : draft.rpbTermMonths,
+    rpbSettlementAccount: draft.rpbSettlementAccount,
+    paidImmediatelyVia: draft.paidImmediatelyVia,
+    semanticIntent: draft.semanticIntent,
+    studentExplanation: draft.studentExplanation || draft.semanticIntent?.studentExplanation,
     alimonyRecipientName: resolvedAlimonyRecipientName || undefined,
     alimonyRecipientInn: resolvedAlimonyRecipientInn || undefined,
     alimonyRatePercent: resolvedAlimonyRatePercent,
@@ -7978,6 +8628,7 @@ export function bindAndGenerateOperation(
     organizationBankName: orgDefaultBankName,
     organizationBankAccount: orgDefaultBankAccount || undefined,
     counterpartyKind:
+      draft.counterpartyKindHint ??
       matchedCpKind ??
       (['founder_contribution', 'charter_capital', 'dividends_accrual', 'dividends_payout'].includes(
         category
@@ -8011,7 +8662,10 @@ export function bindAndGenerateOperation(
       'payroll_accrual',
       'insurance_accrual',
     ].includes(category)
-      ? resolvedCostAccount
+      ? category === 'deferred_expense_97'
+        ? draft.costAccountHint ||
+          (/вступительн\p{L}*\s+взнос.*(?:сро|саморегулируем)/iu.test(descLower) ? '26' : resolvedCostAccount || '26')
+        : resolvedCostAccount
       : undefined,
     materialAccount: [
       'purchase_materials',
@@ -8157,6 +8811,8 @@ export function recalculateOperationsChronologically(
               : op.amountMode === 'explicit'
                 ? op.monthlySalary
                 : undefined,
+          employeeHireStartDate: op.employeeHireStartDate,
+          employeeTerminationDate: op.employeeTerminationDate,
           employeePosition: op.employeePosition,
           employeeChildCount: op.employeeChildCount,
           employeeIsSingleParent: op.employeeIsSingleParent,
@@ -8167,6 +8823,11 @@ export function recalculateOperationsChronologically(
           usefulLifeMonths: op.usefulLifeMonths,
           depreciationBaseAmount:
             op.amountMode === 'explicit' ? op.depreciationBaseAmount : undefined,
+          rpbTermMonths: op.rpbTermMonths,
+          rpbSettlementAccount: op.rpbSettlementAccount,
+          paidImmediatelyVia: op.paidImmediatelyVia,
+          semanticIntent: op.semanticIntent,
+          studentExplanation: op.studentExplanation,
           alimonyRecipientName: op.alimonyRecipientName,
           alimonyRecipientInn: op.alimonyRecipientInn,
           alimonyRatePercent: op.alimonyRatePercent,
@@ -8268,6 +8929,9 @@ export function recalculateOperationsChronologically(
 }
 
 export function isMisclassifiedLegacyOperation(op: QueuedOperation): boolean {
+  if (op.semanticIntent) {
+    return false;
+  }
   const natural = detectOperationClassification({
     description: op.description,
     nomenclatureName: op.nomenclatureName,
@@ -8388,6 +9052,8 @@ export function rebindOperationsAgainst1CDb(
         rawExcelAmount: op.rawExcelAmount,
         orderTotalAmount: op.orderTotalAmount,
         monthlySalary: op.monthlySalary,
+        employeeHireStartDate: op.employeeHireStartDate,
+        employeeTerminationDate: op.employeeTerminationDate,
         employeePosition: op.employeePosition,
         employeeChildCount: op.employeeChildCount,
         employeeIsSingleParent: op.employeeIsSingleParent,
@@ -8396,6 +9062,11 @@ export function rebindOperationsAgainst1CDb(
         injuryInsuranceRate: op.injuryInsuranceRate,
         usefulLifeMonths: op.usefulLifeMonths,
         depreciationBaseAmount: op.depreciationBaseAmount,
+        rpbTermMonths: op.rpbTermMonths,
+        rpbSettlementAccount: op.rpbSettlementAccount,
+        paidImmediatelyVia: op.paidImmediatelyVia,
+        semanticIntent: op.semanticIntent,
+        studentExplanation: op.studentExplanation,
         alimonyRecipientName: op.alimonyRecipientName,
         alimonyRecipientInn: op.alimonyRecipientInn,
         alimonyRatePercent: op.alimonyRatePercent,

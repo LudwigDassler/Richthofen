@@ -42,6 +42,20 @@ import {
   QueuedOperation,
   SkippedExcelRowReason,
 } from '@/types/accounting';
+import {
+  AiRawBatchRowInput,
+  buildRollingContextFromVirtualState,
+  ParsedOperationIntent,
+} from '@/types/semanticIntent';
+import {
+  AiBatchFetchFunction,
+  AiBatchProgressState1C,
+  DEFAULT_AI_BATCH_CHUNK_SIZE,
+  ParserMode1C,
+  PreferredLlmProvider1C,
+  requestAiSemanticChunk,
+} from '@/lib/ai/aiBatchClient';
+import { applyParsedIntentToDraft } from '@/lib/engine/semanticIntentAdapter';
 
 export interface BatchImportFileInput {
   name: string;
@@ -51,6 +65,14 @@ export interface BatchImportFileInput {
 export interface BatchImportOptions {
   reportingYear?: number;
   priorOperations?: QueuedOperation[];
+}
+
+export interface AsyncBatchImportOptions extends BatchImportOptions {
+  parserMode?: ParserMode1C;
+  preferredLlmProvider?: PreferredLlmProvider1C;
+  aiChunkSize?: number;
+  onAiBatchProgress?: (progress: AiBatchProgressState1C) => void;
+  fetchImpl?: AiBatchFetchFunction;
 }
 
 export interface BatchImportResult {
@@ -65,6 +87,10 @@ export interface BatchImportResult {
   }>;
   completenessStats: BatchImportCompletenessStats;
   errors: string[];
+  usedAiParser?: boolean;
+  aiFallbackTriggered?: boolean;
+  aiFallbackReason?: string;
+  aiWarnings?: string[];
 }
 
 export function decodeSmartText(buffer: ArrayBuffer): string {
@@ -824,7 +850,7 @@ export function extractRequisitesFromFreeText(
   );
   const qtyItemPriceMatch = !qtyPriceAdjacentMatch
     ? text.match(
-        /(\d+(?:[.,]\d+)?)\s*(тыс\.?\s*шт\.?|шт\.?|ед\.?|компл\.?|уп(?:ак)?\.?|рул\.?|п\.?\s*м\.?|кв\.?\s*м\.?|м2|м3|м(?=$|[\s.,;/)])|кг|т(?=$|[\s.,;)])|тонн\p{L}*|л(?=$|[\s.,;/)]))\s+([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{1,70}?)\s+(?:по\s+цене|по\s+стоимости|по)(?:\s+(?:без\s*(?:уч[её]та\s*)?ндс(?:\s*\d+\s*%)?|с\s*(?:уч[её]том\s*)?ндс(?:\s*\d+\s*%)?|в\s*т\.?\s*ч\.?\s*ндс(?:\s*\d+\s*%)?|вкл\.?\s*ндс|за\s+(?:шт|ед)\.?))*\s*(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.?)/iu
+        /(\d+(?:[.,]\d+)?)\s*(тыс\.?\s*шт\.?|шт\.?|ед\.?|компл\.?|уп(?:ак)?\.?|рул\.?|пач\p{L}*\.?|меш\p{L}*\.?|бан\p{L}*\.?|вед\p{L}*\.?|п\.?\s*м\.?|кв\.?\s*м\.?|м2|м3|м(?=$|[\s.,;/)])|кг|т(?=$|[\s.,;)])|тонн\p{L}*|л(?=$|[\s.,;/)]))\s+([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{1,70}?)\s+(?:по\s+цене|по\s+стоимости|по)(?:\s+(?:без\s*(?:уч[её]та\s*)?ндс(?:\s*\d+\s*%)?|с\s*(?:уч[её]том\s*)?ндс(?:\s*\d+\s*%)?|в\s*т\.?\s*ч\.?\s*ндс(?:\s*\d+\s*%)?|вкл\.?\s*ндс|за\s+(?:шт|ед)\.?))*\s*(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.?)/iu
       )
     : null;
 
@@ -850,7 +876,7 @@ export function extractRequisitesFromFreeText(
     }
   } else {
     const qtyOnlyMatch = text.match(
-      /(?:в\s+кол(?:-ве|ичестве)\s*)?(\d+(?:[.,]\d+)?)\s*(тыс\.?\s*шт\.?|шт\.?|ед\.?|компл\.?|уп(?:ак)?\.?|рул\.?|кв\.?\s*м\.?|м2|м3|кг|тонн\p{L}*)(?=$|[^\p{L}])/iu
+      /(?:в\s+кол(?:-ве|ичестве)\s*)?(\d+(?:[.,]\d+)?)\s*(тыс\.?\s*шт\.?|шт\.?|ед\.?|компл\.?|уп(?:ак)?\.?|рул\.?|пач\p{L}*\.?|меш\p{L}*\.?|бан\p{L}*\.?|вед\p{L}*\.?|кв\.?\s*м\.?|м2|м3|кг|тонн\p{L}*)(?=$|[^\p{L}])/iu
     );
     if (qtyOnlyMatch) {
       const rawQ = parseRussianNumber(qtyOnlyMatch[1]);
@@ -861,7 +887,7 @@ export function extractRequisitesFromFreeText(
 
   // A. Internal write-off to object / production: e.g. "Передан кирпич на объект для производства трубы"
   const internalWriteoffMatch = text.match(
-    /(?:передан\p{L}*|списан\p{L}*|отпущен\p{L}*|израсходован\p{L}*|направлен\p{L}*)\s+(?:со\s+склада\s+)?([А-Яа-яЁё][А-Яа-яЁё0-9\s«»"'-]{1,45}?)(?:\s+\d+(?:[.,]\d+)?\s*(?:шт|ед|компл|упак|рул|м2|м3|кг|т|л)\.?)?\s+(?:на\s+объект|в\s+производств\p{L}*|на\s+строительств\p{L}*|для\s+производств\p{L}*|для\s+строительств\p{L}*|для\s+изготовлен\p{L}*|в\s+цех|на\s+участок|на\s+нужды|на\s+ремонт)(?:\s+(?:для\s+)?(производств\p{L}*\s+[А-Яа-яЁё0-9\s«»"'-]{2,40}|строительств\p{L}*\s+[А-Яа-яЁё0-9\s«»"'-]{2,40}|изготовлен\p{L}*\s+[А-Яа-яЁё0-9\s«»"'-]{2,40}|[А-Яа-яЁё0-9«»"'-]{2,35}))?/iu
+    /(?:передан\p{L}*|списан\p{L}*|отпущен\p{L}*|израсходован\p{L}*|направлен\p{L}*)\s+(?:со\s+склада\s+)?([А-Яа-яЁё][А-Яа-яЁё0-9\s«»"'-]{1,45}?)(?:\s+\d+(?:[.,]\d+)?\s*(?:шт|ед|компл|упак|рул|пач\p{L}*|меш\p{L}*|бан\p{L}*|вед\p{L}*|м2|м3|кг|т|л)\.?)?\s+(?:на\s+объект|в\s+производств\p{L}*|на\s+строительств\p{L}*|для\s+производств\p{L}*|для\s+строительств\p{L}*|для\s+изготовлен\p{L}*|в\s+цех|на\s+участок|на\s+нужды|на\s+ремонт)(?:\s+(?:для\s+)?(производств\p{L}*\s+[А-Яа-яЁё0-9\s«»"'-]{2,40}|строительств\p{L}*\s+[А-Яа-яЁё0-9\s«»"'-]{2,40}|изготовлен\p{L}*\s+[А-Яа-яЁё0-9\s«»"'-]{2,40}|[А-Яа-яЁё0-9«»"'-]{2,35}))?/iu
   );
   if (internalWriteoffMatch && !/(?:^|\s)от\s+(?:ООО|АО|ПАО|ЗАО|ОАО|ИП)(?=$|[^\p{L}])/iu.test(text)) {
     const rawItem = internalWriteoffMatch[1]
@@ -964,7 +990,7 @@ export function extractRequisitesFromFreeText(
   // D. Extract nomenclature hint before quantity (purchases & sales: "за оконные блоки 133 шт", "за заготовку МДФ в кол-ве 284 шт", "Поступила от ООО Конкурент заготовка МДФ (284 шт)")
   if (!nomenclatureHint) {
     const nomBeforeQty = text.match(
-      /(?:за\s+|поставлен[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|отгружен[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|реализован[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|продан[аыо]?(?:\s+товар\p{L}*|\s+продукци[яию])?\s+|поступил[аио]?(?:\s+от\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|приобретен[аыо]?(?:\s+за\s+наличн\p{L}*\s+расч[её]т)?(?:\s+материал\p{L}*|\s+товар\p{L}*|\s+оборудован\p{L}*)?(?:\s+у\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|оприходован[аыо]?\s+)([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{2,55}?)\s*(?:\(\s*|\s+в\s+кол(?:-ве|ичестве)\s+|\s+)\d+(?:[.,]\d+)?\s*(?:шт|ед|компл|упак|рул|м2|м3|кг|т|л)/iu
+      /(?:за\s+|поставлен[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|отгружен[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|реализован[аыо]?(?:\s+(?:готов\p{L}*\s+)?продукци[яию]|\s+товар\p{L}*)?\s+|продан[аыо]?(?:\s+товар\p{L}*|\s+продукци[яию])?\s+|поступил[аио]?(?:\s+от\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|приобретен[аыо]?(?:\s+за\s+наличн\p{L}*\s+расч[её]т)?(?:\s+материал\p{L}*|\s+товар\p{L}*|\s+оборудован\p{L}*)?(?:\s+у\s+(?:ООО|АО|ПАО|ЗАО|ИП)\s*(?:[«"'„“][^»"'”]+[»"'”]|\S+))?\s+|оприходован[аыо]?\s+)([А-Яа-яЁёA-Za-z«»"'-][А-Яа-яЁёA-Za-z0-9\s«»"'-]{2,55}?)\s*(?:\(\s*|\s+в\s+кол(?:-ве|ичестве)\s+|\s+)\d+(?:[.,]\d+)?\s*(?:шт|ед|компл|упак|рул|пач\p{L}*|меш\p{L}*|бан\p{L}*|вед\p{L}*|м2|м3|кг|т|л)/iu
     );
     if (nomBeforeQty && nomBeforeQty[1]) {
       const cleanedNom = nomBeforeQty[1]
@@ -1084,9 +1110,9 @@ export function extractRequisitesFromFreeText(
     });
   }
 
-  if (/принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу/iu.test(text)) {
+  if (/принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу|принять\s+на\s+работу/iu.test(text)) {
     const hireDateFromText = text.match(
-      /(?:принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу)[^.;]{0,40}?\bс\s*(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)/iu
+      /(?:принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу|принять\s+на\s+работу)[^.;]{0,40}?(?:^|[^\p{L}])с\s*(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)/iu
     );
     if (hireDateFromText && hireDateFromText[1]) {
       hireStartDateHint = normalizeOperationDateToReportingYear(
@@ -1795,17 +1821,23 @@ function mapTabularRowToDraft(params: {
   const isNonPostingRow = Boolean(description && isNonPostingManagementOrPolicyText(description));
   const finalInn = innCell.replace(/\D/g, '') || extracted.inn;
   const finalKpp = kppCell.replace(/\D/g, '') || extracted.kpp;
-  const effectiveRowDate =
-    extracted.hireStartDateHint && date && extracted.hireStartDateHint > date
-      ? extracted.hireStartDateHint
-      : date;
+  let actionSeqHireStartDate: string | undefined;
+  if (actionSeqCell && /принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу|принять\s+на\s+работу/iu.test(actionSeqCell)) {
+    const mStart = actionSeqCell.match(
+      /(?:принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу|принять\s+на\s+работу)[^.;]{0,40}?(?:^|[^\p{L}])с\s*(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)/iu
+    );
+    if (mStart?.[1]) {
+      actionSeqHireStartDate = normalizeOperationDateToReportingYear(mStart[1], reportingYear);
+    }
+  }
+  const effectiveHireStartDate = extracted.hireStartDateHint || actionSeqHireStartDate;
   const cleanedNomFinal = cleanNomenclatureName1C(nomCell || extracted.nomenclatureHint || '');
 
   return {
     draft: {
       rowKey,
       sourceFileName: fileName,
-      date: effectiveRowDate,
+      date,
       docNumber: docNumber || extracted.docNumber,
       description: description || nomCell || counterpartyCell || 'Хозяйственная операция',
       amount: effectiveAmount,
@@ -1846,6 +1878,7 @@ function mapTabularRowToDraft(params: {
         ? normalizeEmployeeOrFounderName1C(empCell)
         : extracted.employeeHint || undefined,
       employeePosition: extracted.employeePositionHint,
+      employeeHireStartDate: effectiveHireStartDate,
       monthlySalary: extracted.monthlySalaryHint,
       employeeChildCount: extracted.employeeChildCountHint,
       employeeIsSingleParent: extracted.employeeIsSingleParentHint,
@@ -2354,6 +2387,7 @@ export function parseFreeTextOrDelimitedOperations(
       nomenclatureGroupHint: req.productionObjectHint,
       employeeName: req.employeeHint,
       employeePosition: req.employeePositionHint,
+      employeeHireStartDate: req.hireStartDateHint,
       monthlySalary: req.monthlySalaryHint,
       usefulLifeMonths: req.usefulLifeMonthsHint,
       alimonyRecipientName: req.alimonyRecipientHint,
@@ -2576,12 +2610,26 @@ function expandWorksheetVerticalDateMerges(sheet: XLSX.WorkSheet, rawMatrix: unk
   }
 }
 
-export function processBatchFiles(
+interface PreparedBatchDraftsBundle {
+  reportingYear: number;
+  workingDb: Database1CSnapshot | null;
+  updatedDb1C: Database1CSnapshot | null;
+  nonDbFiles: Array<{ file: BatchImportFileInput; fileIndex: number }>;
+  indexedDrafts: Array<{ draft: RawDraftOperationInput; fIdx: number; origIdx: number }>;
+  fileSummaries: BatchImportResult['fileSummaries'];
+  allSkippedReasons: SkippedExcelRowReason[];
+  errors: string[];
+  detectedDefaultBik: string;
+  detectedDefaultBankName: string;
+  detectedDefaultCorr: string;
+  collectedHeaderNotes: string[];
+}
+
+function prepareSortedBatchDrafts(
   files: BatchImportFileInput[],
   currentDb1C: Database1CSnapshot | null,
-  options?: BatchImportOptions
-): BatchImportResult {
-  const reportingYear = options?.reportingYear ?? DEFAULT_REPORTING_YEAR;
+  reportingYear: number
+): PreparedBatchDraftsBundle {
   let workingDb = currentDb1C;
   let updatedDb1C: Database1CSnapshot | null = null;
   const rawDraftsQueue: RawDraftOperationInput[] = [];
@@ -2629,8 +2677,6 @@ export function processBatchFiles(
   });
 
   // Second pass: extract all operation rows from every file WITHOUT dropping empty-amount rows or deduplicating across files
-  const draftsCountPerFile = new Map<number, RawDraftOperationInput[]>();
-
   for (const { file, fileIndex } of nonDbFiles) {
     const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
     try {
@@ -2693,7 +2739,6 @@ export function processBatchFiles(
         );
       }
 
-      draftsCountPerFile.set(fileIndex, fileDrafts);
       rawDraftsQueue.push(...fileDrafts);
     } catch (e) {
       errors.push(`${file.name}: ${e instanceof Error ? e.message : 'Не удалось разобрать файл'}`);
@@ -2701,7 +2746,6 @@ export function processBatchFiles(
   }
 
   // Third pass: Stable chronological ordering across all uploaded files (date -> fileIndex -> rowOrder)
-  // so hiring in Q1 feeds payroll in Q1-Q3, advances feed receipts, and OS commissioning feeds depreciation!
   const indexedDrafts = rawDraftsQueue.map((draft, origIdx) => {
     const m = (draft.rowKey ?? '').match(/^(\d+)_/);
     const fIdx = m ? Number(m[1]) : 999;
@@ -2715,44 +2759,48 @@ export function processBatchFiles(
     return a.origIdx - b.origIdx;
   });
 
-  const priorExistingOps = options?.priorOperations ?? [];
-  let runningVirtualState = createInitialVirtual1CState(workingDb);
-  priorExistingOps.forEach((pOp, idx) => {
-    if (pOp.includeInProcessing) {
-      runningVirtualState = advanceVirtual1CStateWithOperation(runningVirtualState, pOp, idx + 1);
-    }
-  });
+  return {
+    reportingYear,
+    workingDb,
+    updatedDb1C,
+    nonDbFiles,
+    indexedDrafts,
+    fileSummaries,
+    allSkippedReasons,
+    errors,
+    detectedDefaultBik,
+    detectedDefaultBankName,
+    detectedDefaultCorr,
+    collectedHeaderNotes,
+  };
+}
 
-  const rawGeneratedOperations: QueuedOperation[] = [];
-  const generatedByFileIndex = new Map<number, QueuedOperation[]>();
+function finalizeBatchResultFromGeneratedOps(
+  bundle: PreparedBatchDraftsBundle,
+  priorExistingOps: QueuedOperation[],
+  rawGeneratedOperations: QueuedOperation[],
+  aiMeta?: {
+    usedAiParser?: boolean;
+    aiFallbackTriggered?: boolean;
+    aiFallbackReason?: string;
+    aiWarnings?: string[];
+  }
+): BatchImportResult {
+  const {
+    reportingYear,
+    workingDb,
+    updatedDb1C,
+    nonDbFiles,
+    indexedDrafts,
+    fileSummaries,
+    allSkippedReasons,
+    errors,
+    detectedDefaultBik,
+    detectedDefaultBankName,
+    detectedDefaultCorr,
+    collectedHeaderNotes,
+  } = bundle;
 
-  indexedDrafts.forEach(({ draft }, globalIdx) => {
-    const seqContext: BatchSequentialContext = {
-      priorOperations: [...priorExistingOps, ...rawGeneratedOperations],
-      virtualStateBefore: runningVirtualState,
-      currentOpNumber: priorExistingOps.length + rawGeneratedOperations.length + 1,
-      reportingYear,
-      defaultBik: detectedDefaultBik,
-      defaultBankName: detectedDefaultBankName,
-      assumeInvoiceOnVatPurchase: true,
-    };
-
-    const deterministicId = `op-${reportingYear}-${globalIdx + 1}-${Math.random()
-      .toString(36)
-      .slice(2, 6)}`;
-    const op = bindAndGenerateOperation(draft, workingDb, deterministicId, seqContext);
-    rawGeneratedOperations.push(op);
-    if (op.includeInProcessing) {
-      runningVirtualState = advanceVirtual1CStateWithOperation(
-        runningVirtualState,
-        op,
-        priorExistingOps.length + rawGeneratedOperations.length
-      );
-    }
-  });
-
-  // Two-pass bidirectional convergence: resolves forward references (e.g., invoice before contract,
-  // delivery before supplier payment with full INN/sum) and attaches chronological Step 00 prep steps
   const allCombinedWithStep00 =
     rawGeneratedOperations.length > 0
       ? recalculateOperationsChronologically(
@@ -2765,6 +2813,8 @@ export function processBatchFiles(
           workingDb
         );
   const generatedOperations = allCombinedWithStep00.slice(priorExistingOps.length);
+  const generatedByFileIndex = new Map<number, QueuedOperation[]>();
+
   indexedDrafts.forEach(({ fIdx }, idx) => {
     const op = generatedOperations[idx];
     if (op && fIdx > 0 && fIdx < 999) {
@@ -2816,5 +2866,327 @@ export function processBatchFiles(
     fileSummaries,
     completenessStats,
     errors,
+    ...aiMeta,
   };
 }
+
+function mapDraftToAiRowInput(
+  draft: RawDraftOperationInput,
+  rowIndex: number,
+  reportingYear: number
+): AiRawBatchRowInput {
+  return {
+    rowIndex,
+    date: draft.date || `${reportingYear}-01-01`,
+    docNumber: draft.docNumber || undefined,
+    description: draft.description,
+    rawExcelAmount:
+      draft.rawExcelAmount !== undefined && draft.rawExcelAmount > 0
+        ? draft.rawExcelAmount
+        : draft.amount > 0
+          ? draft.amount
+          : 0,
+    counterpartyCell: draft.counterpartyName || undefined,
+    actionSequenceHint: draft.actionSequenceHint || undefined,
+  };
+}
+
+export function processBatchFiles(
+  files: BatchImportFileInput[],
+  currentDb1C: Database1CSnapshot | null,
+  options?: BatchImportOptions
+): BatchImportResult {
+  const reportingYear = options?.reportingYear ?? DEFAULT_REPORTING_YEAR;
+  const bundle = prepareSortedBatchDrafts(files, currentDb1C, reportingYear);
+  const priorExistingOps = options?.priorOperations ?? [];
+
+  let runningVirtualState = createInitialVirtual1CState(bundle.workingDb);
+  priorExistingOps.forEach((pOp, idx) => {
+    if (pOp.includeInProcessing) {
+      runningVirtualState = advanceVirtual1CStateWithOperation(runningVirtualState, pOp, idx + 1);
+    }
+  });
+
+  const rawGeneratedOperations: QueuedOperation[] = [];
+  bundle.indexedDrafts.forEach(({ draft }, globalIdx) => {
+    const seqContext: BatchSequentialContext = {
+      priorOperations: [...priorExistingOps, ...rawGeneratedOperations],
+      virtualStateBefore: runningVirtualState,
+      currentOpNumber: priorExistingOps.length + rawGeneratedOperations.length + 1,
+      reportingYear,
+      defaultBik: bundle.detectedDefaultBik,
+      defaultBankName: bundle.detectedDefaultBankName,
+      assumeInvoiceOnVatPurchase: true,
+    };
+
+    const deterministicId = `op-${reportingYear}-${globalIdx + 1}-${Math.random()
+      .toString(36)
+      .slice(2, 6)}`;
+    const op = bindAndGenerateOperation(draft, bundle.workingDb, deterministicId, seqContext);
+    rawGeneratedOperations.push(op);
+    if (op.includeInProcessing) {
+      runningVirtualState = advanceVirtual1CStateWithOperation(
+        runningVirtualState,
+        op,
+        priorExistingOps.length + rawGeneratedOperations.length
+      );
+    }
+  });
+
+  return finalizeBatchResultFromGeneratedOps(bundle, priorExistingOps, rawGeneratedOperations, {
+    usedAiParser: false,
+    aiFallbackTriggered: false,
+  });
+}
+
+/**
+ * Гибридный асинхронный конвейер (Слой 1: ИИ-главбух пачками по 30 строк со скользящим контекстом
+ * + Слой 2: детерминированное математическое ядро 1С:БП 3.0 с бесшовным откатом на офлайн-парсер).
+ */
+export async function processBatchFilesAsync(
+  files: BatchImportFileInput[],
+  currentDb1C: Database1CSnapshot | null,
+  options?: AsyncBatchImportOptions
+): Promise<BatchImportResult> {
+  const parserMode: ParserMode1C = options?.parserMode ?? 'offline';
+  if (parserMode === 'offline') {
+    return processBatchFiles(files, currentDb1C, options);
+  }
+
+  const reportingYear = options?.reportingYear ?? DEFAULT_REPORTING_YEAR;
+  const bundle = prepareSortedBatchDrafts(files, currentDb1C, reportingYear);
+  const priorExistingOps = options?.priorOperations ?? [];
+  const totalRows = bundle.indexedDrafts.length;
+
+  if (totalRows === 0) {
+    return finalizeBatchResultFromGeneratedOps(bundle, priorExistingOps, [], {
+      usedAiParser: false,
+      aiFallbackTriggered: false,
+    });
+  }
+
+  let runningVirtualState = createInitialVirtual1CState(bundle.workingDb);
+  priorExistingOps.forEach((pOp, idx) => {
+    if (pOp.includeInProcessing) {
+      runningVirtualState = advanceVirtual1CStateWithOperation(runningVirtualState, pOp, idx + 1);
+    }
+  });
+
+  const chunkSize = Math.max(5, Math.min(35, options?.aiChunkSize ?? DEFAULT_AI_BATCH_CHUNK_SIZE));
+  const totalBatches = Math.ceil(totalRows / chunkSize);
+  const rawGeneratedOperations: QueuedOperation[] = [];
+  const aiWarnings: string[] = [];
+  let usedAiParser = false;
+  let aiFallbackTriggered = false;
+  let aiFallbackReason: string | undefined;
+
+  for (let batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
+    const startIdx = batchIdx * chunkSize;
+    const endIdx = Math.min(totalRows, startIdx + chunkSize);
+    const chunkItems = bundle.indexedDrafts.slice(startIdx, endIdx);
+
+    options?.onAiBatchProgress?.({
+      currentBatch: batchIdx + 1,
+      totalBatches,
+      processedRows: startIdx,
+      totalRows,
+    });
+
+    let intentsMap = new Map<number, ParsedOperationIntent>();
+    if (!aiFallbackTriggered) {
+      const rollingContext = buildRollingContextFromVirtualState(runningVirtualState);
+      const aiRows = chunkItems.map((item, localIdx) =>
+        mapDraftToAiRowInput(item.draft, localIdx, reportingYear)
+      );
+      const chunkRes = await requestAiSemanticChunk({
+        rows: aiRows,
+        rollingContext,
+        preferredProvider: options?.preferredLlmProvider,
+        fetchImpl: options?.fetchImpl,
+      });
+
+      if (chunkRes.ok) {
+        usedAiParser = true;
+        intentsMap = chunkRes.intentsByRowIndex;
+        if (chunkRes.warnings.length > 0) {
+          aiWarnings.push(...chunkRes.warnings);
+        }
+      } else {
+        aiFallbackTriggered = true;
+        aiFallbackReason = chunkRes.error || 'Сервер ИИ недоступен, выполнен переход на офлайн-парсер';
+      }
+    }
+
+    chunkItems.forEach(({ draft }, localIdx) => {
+      const globalIdx = startIdx + localIdx;
+      const intent = intentsMap.get(localIdx);
+      const effectiveDraft = intent ? applyParsedIntentToDraft(draft, intent) : draft;
+
+      const seqContext: BatchSequentialContext = {
+        priorOperations: [...priorExistingOps, ...rawGeneratedOperations],
+        virtualStateBefore: runningVirtualState,
+        currentOpNumber: priorExistingOps.length + rawGeneratedOperations.length + 1,
+        reportingYear,
+        defaultBik: bundle.detectedDefaultBik,
+        defaultBankName: bundle.detectedDefaultBankName,
+        assumeInvoiceOnVatPurchase: true,
+      };
+
+      const deterministicId = `op-${reportingYear}-${globalIdx + 1}-${Math.random()
+        .toString(36)
+        .slice(2, 6)}`;
+      const op = bindAndGenerateOperation(
+        effectiveDraft,
+        bundle.workingDb,
+        deterministicId,
+        seqContext
+      );
+      rawGeneratedOperations.push(op);
+      if (op.includeInProcessing) {
+        runningVirtualState = advanceVirtual1CStateWithOperation(
+          runningVirtualState,
+          op,
+          priorExistingOps.length + rawGeneratedOperations.length
+        );
+      }
+    });
+
+    options?.onAiBatchProgress?.({
+      currentBatch: batchIdx + 1,
+      totalBatches,
+      processedRows: endIdx,
+      totalRows,
+    });
+  }
+
+  return finalizeBatchResultFromGeneratedOps(bundle, priorExistingOps, rawGeneratedOperations, {
+    usedAiParser,
+    aiFallbackTriggered,
+    aiFallbackReason,
+    aiWarnings,
+  });
+}
+
+/**
+ * Точечный переразбор одной выбранной карточки операции через серверного ИИ-главбуха
+ * с учётом актуального хронологического контекста всех предыдущих операций журнала.
+ */
+export async function reparseSingleOperationWithAI(params: {
+  targetOpId: string;
+  operations: QueuedOperation[];
+  db1C: Database1CSnapshot | null;
+  reportingYear?: number;
+  preferredLlmProvider?: PreferredLlmProvider1C;
+  fetchImpl?: AiBatchFetchFunction;
+}): Promise<{
+  ok: boolean;
+  operations: QueuedOperation[];
+  intent?: ParsedOperationIntent;
+  error?: string;
+}> {
+  const { targetOpId, operations, db1C } = params;
+  const reportingYear = params.reportingYear ?? DEFAULT_REPORTING_YEAR;
+  const targetIdx = operations.findIndex((o) => o.id === targetOpId);
+  if (targetIdx < 0) {
+    return { ok: false, operations, error: 'Операция не найдена в журнале' };
+  }
+
+  const targetOp = operations[targetIdx];
+  let virtualStateBefore = createInitialVirtual1CState(db1C);
+  const priorOps = operations.slice(0, targetIdx);
+  priorOps.forEach((pOp, idx) => {
+    if (pOp.includeInProcessing) {
+      virtualStateBefore = advanceVirtual1CStateWithOperation(virtualStateBefore, pOp, idx + 1);
+    }
+  });
+
+  const rollingContext = buildRollingContextFromVirtualState(virtualStateBefore);
+
+  const extracted = extractRequisitesFromFreeText(
+    `${targetOp.description} ${targetOp.counterpartyName || ''} ${targetOp.contractName || ''}`,
+    reportingYear,
+    targetOp.rawExcelAmount ?? (targetOp.amount > 0 ? targetOp.amount : undefined)
+  );
+
+  const baseDraft: RawDraftOperationInput = {
+    rowKey: targetOp.rowKey,
+    sourceFileName: targetOp.sourceFileName,
+    date: targetOp.date,
+    docNumber: targetOp.docNumber,
+    description: targetOp.description,
+    amount: targetOp.rawExcelAmount ?? targetOp.amount,
+    rawExcelAmount: targetOp.rawExcelAmount,
+    vatRate: targetOp.vatRate,
+    vatRule: targetOp.vatRule,
+    quantity: targetOp.quantity ?? extracted.quantity,
+    unitPrice: targetOp.unitPrice ?? extracted.unitPrice,
+    counterpartyName: targetOp.counterpartyName || extracted.counterparty,
+    counterpartyInn: targetOp.counterpartyInn || extracted.inn,
+    counterpartyKpp: targetOp.counterpartyKpp || extracted.kpp,
+    contractName: targetOp.contractName,
+    contractNumber: targetOp.contractNumber || extracted.contractNumber,
+    contractDate: targetOp.contractDate || extracted.contractDate,
+    nomenclatureName: targetOp.nomenclatureName || extracted.nomenclatureHint,
+    nomenclatureGroupHint: targetOp.nomenclatureGroupName || extracted.productionObjectHint,
+    warehouseName: targetOp.warehouseName,
+    expenseItemName: targetOp.expenseItemName,
+    cashFlowItemName: targetOp.cashFlowItemName,
+    employeeName: targetOp.employeeName || extracted.employeeHint,
+    employeePosition: targetOp.employeePosition || extracted.employeePositionHint,
+    employeeHireStartDate: targetOp.employeeHireStartDate || extracted.hireStartDateHint,
+    monthlySalary: targetOp.monthlySalary ?? extracted.monthlySalaryHint,
+    usefulLifeMonths: targetOp.usefulLifeMonths ?? extracted.usefulLifeMonthsHint,
+    actionSequenceHint: targetOp.actionSequenceHint,
+  };
+
+  const singleRowInput = mapDraftToAiRowInput(baseDraft, 0, reportingYear);
+  const res = await requestAiSemanticChunk({
+    rows: [singleRowInput],
+    rollingContext,
+    preferredProvider: params.preferredLlmProvider,
+    bypassCache: true,
+    fetchImpl: params.fetchImpl,
+  });
+
+  const intent = res.intentsByRowIndex.get(0);
+  if (!res.ok || !intent) {
+    return {
+      ok: false,
+      operations,
+      error: res.error || 'ИИ-главбух недоступен (проверьте серверные переменные GEMINI_API_KEY или LLM_BASE_URL)',
+    };
+  }
+
+  const updatedDraft = applyParsedIntentToDraft(baseDraft, intent);
+  const seqContext: BatchSequentialContext = {
+    priorOperations: priorOps,
+    virtualStateBefore,
+    currentOpNumber: targetIdx + 1,
+    reportingYear,
+    defaultBik: targetOp.organizationBik || db1C?.organization.bik || DEFAULT_SBERBANK_BIK,
+    defaultBankName:
+      targetOp.organizationBankName || db1C?.organization.bankName || DEFAULT_SBERBANK_NAME,
+    assumeInvoiceOnVatPurchase: true,
+  };
+
+  const reboundOp = bindAndGenerateOperation(updatedDraft, db1C, targetOp.id, seqContext);
+  const mergedTarget: QueuedOperation = {
+    ...reboundOp,
+    id: targetOp.id,
+    includeInProcessing: targetOp.includeInProcessing,
+    sourceFileName: targetOp.sourceFileName,
+    rowKey: targetOp.rowKey,
+  };
+
+  const nextOps = operations.map((op, i) => (i === targetIdx ? mergedTarget : op));
+  const recalculated = recalculateOperationsChronologically(nextOps, db1C, {
+    reportingYear,
+  });
+
+  return {
+    ok: true,
+    operations: recalculated,
+    intent,
+  };
+}
+

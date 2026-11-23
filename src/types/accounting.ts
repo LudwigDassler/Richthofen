@@ -584,6 +584,8 @@ export interface QueuedOperation {
   calculationProvenance?: string;
   stockSourceNote?: string;
   monthlySalary?: number;
+  employeeHireStartDate?: string;
+  employeeTerminationDate?: string;
   employeePosition?: string;
   employeeChildCount?: number;
   employeeIsSingleParent?: boolean;
@@ -598,7 +600,12 @@ export interface QueuedOperation {
   payrollStaffSummary?: Array<{
     name: string;
     position?: string;
+    costAccount?: '20.01' | '26' | '44.01';
+    nomenclatureGroup?: string;
     salary: number;
+    fullMonthlySalary?: number;
+    workedDays?: number;
+    totalWorkingDays?: number;
     source: string;
   }>;
   alimonyRecipientName?: string;
@@ -616,6 +623,11 @@ export interface QueuedOperation {
   linkedSourceOpIds?: string[];
   usefulLifeMonths?: number;
   depreciationBaseAmount?: number;
+  rpbTermMonths?: number;
+  rpbSettlementAccount?: '76.09' | '60.01';
+  paidImmediatelyVia?: 'bank_51' | 'cash_50' | 'accountable_71';
+  semanticIntent?: import('./semanticIntent').ParsedOperationIntent;
+  studentExplanation?: string;
   vatRate: number;
   vatRule: 'included' | 'on_top' | 'none';
   vatAmount: number;
@@ -747,6 +759,8 @@ export interface VirtualEmployee1C {
   fullName: string;
   position: string;
   monthlySalary: number;
+  costAccount?: '20.01' | '26' | '44.01';
+  nomenclatureGroup?: string;
   subdivision: string;
   hireDate: string;
   terminationDate?: string;
@@ -875,6 +889,23 @@ export interface VirtualOwnOrganization1C {
   kpp?: string;
 }
 
+export interface VirtualDeferredExpense1C {
+  key: string;
+  name: string;
+  totalAmount: number;
+  remainingAmount: number;
+  termMonths: number;
+  monthlyAmount: number;
+  writeOffAccount: '20.01' | '26' | '44.01';
+  startMonth: string; // YYYY-MM
+  settlementAccount?: '76.09' | '60.01';
+  source: VirtualEntityOriginSource1C;
+  originOpId?: string;
+  originOpNumber?: number;
+  originDate: string;
+  usages: VirtualEntityUsageRef1C[];
+}
+
 export interface Virtual1CStateSnapshot {
   ownOrganization?: VirtualOwnOrganization1C;
   counterparties: VirtualCounterparty1C[];
@@ -882,6 +913,7 @@ export interface Virtual1CStateSnapshot {
   nomenclature: VirtualNomenclature1C[];
   employees: VirtualEmployee1C[];
   fixedAssets: VirtualFixedAsset1C[];
+  deferredExpenses?: VirtualDeferredExpense1C[];
   writsOfExecution: VirtualWritOfExecution1C[];
   financialInvestments: VirtualFinancialInvestment1C[];
   openSettlements: VirtualOpenSettlement1C[];

@@ -141,14 +141,23 @@ test('2. Chronological HR -> Payroll -> Payout -> Tax payment chain across multi
   assert.ok(payrollOp.calculationProvenance?.includes('Иванов И.И.'));
   assert.ok(payrollOp.calculationProvenance?.includes('180'));
 
-  const e70 = payrollOp.entries.find((e) => e.credit === '70');
+  const sumByCredit = (acc: string) =>
+    Math.round(
+      payrollOp.entries.filter((e) => e.credit === acc).reduce((s, e) => s + e.amount, 0) * 100
+    ) / 100;
   const eNdfl = payrollOp.entries.find((e) => e.debit === '70' && e.credit === '68.01');
-  const eIns = payrollOp.entries.find((e) => e.credit === '69.09');
-  const eInj = payrollOp.entries.find((e) => e.credit === '69.11');
-  assert.equal(e70?.amount, 180000);
+  assert.equal(sumByCredit('70'), 180000);
+  assert.equal(
+    payrollOp.entries.find((e) => e.debit === '26' && e.credit === '70')?.amount,
+    100000
+  );
+  assert.equal(
+    payrollOp.entries.find((e) => e.debit === '20.01' && e.credit === '70')?.amount,
+    80000
+  );
   assert.equal(eNdfl?.amount, 23400); // 13% of 180 000
-  assert.equal(eIns?.amount, 54000); // 30% of 180 000
-  assert.equal(eInj?.amount, 360); // 0.2% of 180 000
+  assert.equal(sumByCredit('69.09'), 54000); // 30% of 180 000
+  assert.equal(sumByCredit('69.11'), 360); // 0.2% of 180 000
 
   // Payout on 05.04 automatically pulls net payable 180 000 - 23 400 = 156 600 ₽ from Kt 70
   const payoutOp = batch.operations[3];
@@ -261,11 +270,11 @@ test('3. Full quarter chain: supplier advance (60.02), OS commissioning (08.04.1
   assert.ok(depEntry, 'Expected linear OS depreciation on 02.01');
   assert.equal(depEntry.amount, 8333.33);
 
-  // 3) Quarter-end closing to 99.01.1 and 20% corporate profit tax Дт 99.01.1 Кт 68.04.1
+  // 3) Quarter-end closing to 99.01.1 and 20% corporate profit tax Дт 99.02.1 Кт 68.04.1
   const profitTaxEntry = allEntries.find(
-    (e) => e.debit === '99.01.1' && e.credit === '68.04.1'
+    (e) => e.debit === '99.02.1' && e.credit === '68.04.1'
   );
-  assert.ok(profitTaxEntry, 'Expected 20% corporate profit tax Дт 99.01.1 Кт 68.04.1');
+  assert.ok(profitTaxEntry, 'Expected 20% corporate profit tax Дт 99.02.1 Кт 68.04.1');
   // Revenue without VAT = 800 000; expenses = 8 333.33 -> profit = 791 666.67 -> 20% tax = 158 333.33
   assert.equal(profitTaxEntry.amount, 158333.33);
 

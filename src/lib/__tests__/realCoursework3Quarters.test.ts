@@ -123,7 +123,7 @@ test('Universal grammar classifier handles incoming payments, СчетПокуп
   const sro = detectOperationClassification({
     description: 'Перечислен вступительный взнос в саморегулируемую организацию (СРО) (без НДС).',
   });
-  assert.equal(sro.category, 'purchase_services');
+  assert.equal(sro.category, 'deferred_expense_97');
 
   const intIn = detectOperationClassification({
     description: 'Получена от Банка задолженность по %%.',
@@ -221,12 +221,12 @@ test('Real 3-quarter coursework CSV pipeline (207 operations): all 8 systemic ch
   assert.equal(q2Ops[17].amount, 2320000, 'Q2 #18 СчетПокупателю Слава must be 2 320 000 ₽');
   assert.equal(q2Ops[17].entries.length, 0);
 
-  // Monthly payroll accruals (Feb..Sep): 203 400, 273 300, 345 500, 427 800, 513 800 x 4
+  // Monthly payroll accruals (Feb..Sep) pro-rated by official 2026 RF Production Calendar
   const payrollAccruals = ops.filter((o) => o.category === 'payroll_accrual');
   assert.deepEqual(
     payrollAccruals.map((p) => p.amount),
-    [203400, 273300, 345500, 427800, 513800, 513800, 513800, 513800],
-    'Monthly ФОТ across Feb–Sep 2026 must match exact staffing schedule'
+    [189442.11, 273300, 335654.55, 427800, 493323.81, 513800, 513800, 513800],
+    'Monthly ФОТ across Feb–Sep 2026 must match exact staffing schedule & 2026 RF production calendar pro-rata'
   );
 
   // Alimony payouts (Q3: 155 037.50 ₽ and 90 025.00 ₽)

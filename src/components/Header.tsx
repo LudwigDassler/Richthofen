@@ -285,7 +285,7 @@ export function Header() {
 
       {/* Compact Mobile/Tablet Tab Strip */}
       <nav
-        className="xl:hidden max-w-[1600px] mx-auto px-4 flex items-center gap-1 border-t border-slate-100 dark:border-slate-800/80 overflow-x-auto scrollbar-thin"
+        className="xl:hidden max-w-[1600px] mx-auto px-2 sm:px-4 flex items-center justify-between sm:justify-start gap-0.5 sm:gap-1 border-t border-slate-100 dark:border-slate-800/80 overflow-x-auto scrollbar-thin"
         aria-label="Разделы рабочего места (компактно)"
       >
         {tabs.map((tab, idx) => {
@@ -295,7 +295,7 @@ export function Header() {
               key={tab.id}
               type="button"
               onClick={() => setActiveTab(tab.id)}
-              className={`py-2.5 px-3 text-xs font-medium whitespace-nowrap shrink-0 border-b-2 transition-colors ${
+              className={`py-2 px-2 sm:px-3 text-[11px] sm:text-xs font-medium whitespace-nowrap shrink-0 border-b-2 transition-colors ${
                 isActive
                   ? 'border-amber-500 text-slate-900 dark:text-white'
                   : 'border-transparent text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
@@ -307,7 +307,7 @@ export function Header() {
               </span>
               {tab.countText !== undefined && (
                 <span
-                  className={`ml-1.5 tabular-nums text-[11px] ${
+                  className={`ml-1 tabular-nums text-[10px] sm:text-[11px] ${
                     tab.tone === 'red'
                       ? 'text-rose-600 dark:text-rose-400 font-semibold'
                       : tab.tone === 'amber'

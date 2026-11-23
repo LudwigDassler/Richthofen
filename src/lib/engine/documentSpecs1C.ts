@@ -2575,3 +2575,8 @@ export function resolveCardProfileFromSpec(
   }
   return getDocumentSpecForOperation(op).uiProfile;
 }
+
+export const OPERATION_CATEGORIES_LIST: OperationCategory[] = Object.keys(
+  DOCUMENT_SPECS
+) as OperationCategory[];
+

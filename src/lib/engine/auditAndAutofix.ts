@@ -872,29 +872,64 @@ export function runAuditDiagnostics(params: {
   // 4. Unclosed month-end accounts (20.01, 25, 26, 44.01, 90, 91)
   const acc20 = osv.leafRows.find((r) => r.code === '20.01');
   if (acc20 && acc20.endDebit > 0.01) {
-    issues.push({
-      id: 'unclosed-20',
-      fixId: 'close_period_accounts',
-      severity: 'warning',
-      category: 'unclosed_period',
-      accountCode: '20.01',
-      title: 'Остаток на счёте 20.01 «Основное производство»',
-      description: `На конец периода на счёте 20.01 числится дебетовый остаток ${acc20.endDebit.toFixed(2)} ₽ (незавершённое производство или не выполнено закрытие счёта 20).`,
-      accountingReason: `Если у организации нет незавершённого производства (НЗП), прямые производственные затраты по счёту 20.01 закрываются ежемесячно в Дт 90.02.1 (или 43/40) по номенклатурным группам.`,
-      quickFixLabel: 'Нажмите «Исправить» для регламентного закрытия месяца',
-      guide1C: {
-        menuPath: 'Операции → Закрытие месяца',
-        documentKind: 'Регламентная операция «Закрытие счетов 20, 23, 25, 26»',
-        checkPoints: [
-          'Проверьте совпадение субконто «Номенклатурная группа» на счёте 20.01 и выручки на счёте 90.01.1',
-          'В «Главное → Учетная политика → Затраты» проверьте правила учёта прямых расходов и НЗП',
-        ],
-        repostInstruction: 'Операции → Закрытие месяца → Выполнить закрытие месяца',
-        verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 20.01 и Справка-расчет себестоимости',
-      },
-      canAutoFixBy1C: true,
-      autoFixActionLabel: 'Закрыть счёт 20.01 в Дт 90.02.1',
-    });
+    // Check if the open 20.01 balance is legitimate Work-in-Progress (НЗП) on named projects without handover in the ending month
+    const endMonthPrefix = (osv.dateTo ?? '').slice(0, 7);
+    const hasClosingInEndMonth = operations.some(
+      (o) =>
+        o.includeInProcessing &&
+        o.category === 'closing' &&
+        (!endMonthPrefix || (o.date ?? '').startsWith(endMonthPrefix))
+    );
+    const hasExplicitWipPolicy = operations.some(
+      (o) =>
+        o.includeInProcessing &&
+        (!endMonthPrefix || (o.date ?? '').startsWith(endMonthPrefix)) &&
+        /незавер[шщ][её]нн\p{L}*\s+производств|(?:^|[^\p{L}])инвентаризаци\p{L}*\s+нзп/iu.test(
+          o.description
+        )
+    );
+    const subs20Open = (osv.subcontoRowsByAccount?.['20.01'] ?? []).filter((s) => s.endDebit >= 0.01);
+    const allSubsAreNamedWipProjects =
+      hasClosingInEndMonth &&
+      subs20Open.length > 0 &&
+      subs20Open.every((s) => {
+        const head = s.subcontoLabel.split(' / ')[0].trim().toLowerCase();
+        return (
+          head !== '' &&
+          head !== 'без аналитики (субконто)' &&
+          head !== 'основная номенклатурная группа' &&
+          head !== 'оплата труда' &&
+          head !== 'страховые взносы' &&
+          head !== 'материальные расходы' &&
+          head !== 'амортизация'
+        );
+      });
+
+    if (!hasExplicitWipPolicy && !allSubsAreNamedWipProjects) {
+      issues.push({
+        id: 'unclosed-20',
+        fixId: 'close_period_accounts',
+        severity: 'warning',
+        category: 'unclosed_period',
+        accountCode: '20.01',
+        title: 'Остаток на счёте 20.01 «Основное производство»',
+        description: `На конец периода на счёте 20.01 числится дебетовый остаток ${acc20.endDebit.toFixed(2)} ₽ (незавершённое производство или не выполнено закрытие счёта 20).`,
+        accountingReason: `Если у организации нет незавершённого производства (НЗП), прямые производственные затраты по счёту 20.01 закрываются ежемесячно в Дт 90.02.1 (или 43/40) по завершённым номенклатурным группам.`,
+        quickFixLabel: 'Нажмите «Исправить» для регламентного закрытия месяца',
+        guide1C: {
+          menuPath: 'Операции → Закрытие месяца',
+          documentKind: 'Регламентная операция «Закрытие счетов 20, 23, 25, 26»',
+          checkPoints: [
+            'Проверьте совпадение субконто «Номенклатурная группа» на счёте 20.01 и выручки на счёте 90.01.1',
+            'В «Главное → Учетная политика → Затраты» проверьте правила учёта прямых расходов и НЗП',
+          ],
+          repostInstruction: 'Операции → Закрытие месяца → Выполнить закрытие месяца',
+          verifyInOsv: 'Отчеты → Оборотно-сальдовая ведомость по счету 20.01 и Справка-расчет себестоимости',
+        },
+        canAutoFixBy1C: true,
+        autoFixActionLabel: 'Закрыть счёт 20.01 в Дт 90.02.1',
+      });
+    }
   }
 
   const acc25 = osv.leafRows.find((r) => r.code === '25');
@@ -1033,19 +1068,21 @@ export function runAuditDiagnostics(params: {
     (o) => o.includeInProcessing && (o.date ?? '').slice(5, 7) === '12'
   );
   if ((osv.dateTo ?? '').endsWith('-12-31') && hasDecemberActivity) {
-    const row99YearEnd = osv.leafRows.find((r) => r.code === '99.01.1' || r.code === '99');
-    if (row99YearEnd && (row99YearEnd.endCredit > 0.01 || row99YearEnd.endDebit > 0.01)) {
-      const bal99 = row99YearEnd.endCredit > 0.01 ? row99YearEnd.endCredit : -row99YearEnd.endDebit;
+    const openRows99 = osv.leafRows.filter(
+      (r) => (r.code.startsWith('99.') || r.code === '99') && (r.endCredit > 0.01 || r.endDebit > 0.01)
+    );
+    if (openRows99.length > 0) {
+      const bal99 = openRows99.reduce((s, r) => s + (r.endCredit - r.endDebit), 0);
       issues.push({
         id: 'unclosed-99-reformation',
         fixId: 'close_period_accounts',
         severity: 'warning',
         category: 'unclosed_period',
-        accountCode: '99.01.1',
+        accountCode: openRows99[0].code,
         title: 'На 31 декабря не выполнена реформация баланса (счёт 99 не закрыт на счёт 84)',
-        description: `По состоянию на 31.12 на счёте 99.01.1 сохраняется сальдо ${Math.abs(bal99).toFixed(2)} ₽.`,
+        description: `По состоянию на 31.12 на субсчетах счёта 99 (${openRows99.map((r) => r.code).join(', ')}) сохраняется незакрытое сальдо (${Math.abs(bal99).toFixed(2)} ₽).`,
         accountingReason:
-          'Заключительными записями декабря (регламентная операция «Реформация баланса») сальдо счёта 99 списывается на счёт 84 «Нераспределённая прибыль (непокрытый убыток)», а внутренние субсчета 90 и 91 закрываются на 90.09 и 91.09.',
+          'Заключительными записями декабря (регламентная операция «Реформация баланса») сальдо всех субсчетов счёта 99 (99.01.1, 99.02.1) списывается на счёт 84 «Нераспределённая прибыль (непокрытый убыток)», а внутренние субсчета 90 и 91 закрываются на 90.09 и 91.09.',
         quickFixLabel: 'Выполнить реформацию баланса кнопкой «Исправить»',
         guide1C: {
           menuPath: 'Операции → Закрытие месяца',
@@ -2330,49 +2367,64 @@ export function generatePeriodClosingOperations(params: {
     }
   }
 
-  // Quarter-end / Year-end 20% Corporate Profit Tax (Дт 99.01.1 Кт 68.04.1) on OSNO
+  // Quarter-end / Year-end 20% Corporate Profit Tax strictly Дт 99.02.1 Кт 68.04.1 on OSNO
   const closeMonthNum = Number((closeDate || '').slice(5, 7)) || 0;
   const isQuarterEnd = [3, 6, 9, 12].includes(closeMonthNum);
-  const alreadyHasProfitTax = operations.some(
+  const alreadyHasProfitTaxInMonth = operations.some(
     (o) =>
       o.includeInProcessing &&
       o.date.slice(0, 7) === closeDate.slice(0, 7) &&
-      o.entries.some((e) => e.debit.startsWith('99') && e.credit === '68.04.1')
+      o.entries.some((e) => e.debit.startsWith('99') && e.credit.startsWith('68.04'))
   );
-  let profitTaxApplied = 0;
-  if (isOsno && isQuarterEnd && !alreadyHasProfitTax) {
-    const existing99Row = osv.leafRows.find((r) => r.code === '99.01.1' || r.code === '99');
-    const existingNetCredit99 = existing99Row
-      ? round2(existing99Row.endCredit - existing99Row.endDebit)
+  if (isOsno && isQuarterEnd && !alreadyHasProfitTaxInMonth) {
+    const existing9901Row = osv.leafRows.find((r) => r.code === '99.01.1' || r.code === '99');
+    const existingNetCredit9901 = existing9901Row
+      ? round2(existing9901Row.endCredit - existing9901Row.endDebit)
       : 0;
-    const closingDeltaCredit99 = round2(
+    const alreadyAccruedTax = round2(
+      operations
+        .filter((o) => o.includeInProcessing && !o.isDuplicateIn1C && o.date <= closeDate)
+        .flatMap((o) => o.entries)
+        .filter((e) => (e.debit === '99.02.1' || e.debit === '99.01.1') && e.credit.startsWith('68.04'))
+        .reduce((s, e) => s + e.amount, 0)
+    );
+    const legacyTaxOn9901 = round2(
+      operations
+        .filter((o) => o.includeInProcessing && !o.isDuplicateIn1C && o.date <= closeDate)
+        .flatMap((o) => o.entries)
+        .filter((e) => e.debit === '99.01.1' && e.credit.startsWith('68.04'))
+        .reduce((s, e) => s + e.amount, 0)
+    );
+    const closingDeltaCredit9901 = round2(
       closingEntries.reduce((acc, e) => {
         if (e.credit === '99.01.1') return acc + e.amount;
         if (e.debit === '99.01.1') return acc - e.amount;
         return acc;
       }, 0)
     );
-    const totalProfitBeforeTax = round2(existingNetCredit99 + closingDeltaCredit99);
+    const totalProfitBeforeTax = round2(
+      existingNetCredit9901 + closingDeltaCredit9901 + legacyTaxOn9901
+    );
     if (totalProfitBeforeTax > 0.01) {
-      const profitTax20 = round2(totalProfitBeforeTax * 0.2);
-      if (profitTax20 >= 0.01) {
-        profitTaxApplied = profitTax20;
+      const targetTaxTotal = round2(totalProfitBeforeTax * 0.2);
+      const profitTaxDelta = round2(targetTaxTotal - alreadyAccruedTax);
+      if (profitTaxDelta >= 0.01) {
         closingEntries.push({
           id: nextAutoFixId('close-profit-tax'),
-          debit: '99.01.1',
+          debit: '99.02.1',
           credit: '68.04.1',
-          debitSubconto: 'Налог на прибыль и аналогичные платежи',
+          debitSubconto: 'Текущий налог на прибыль',
           creditSubconto: 'Налог (взносы): начислено / уплачено',
-          amount: profitTax20,
+          amount: profitTaxDelta,
           description: 'Расчёт налога на прибыль организаций (20%) по итогам отчётного периода',
         });
         log.push(
-          `Начислен налог на прибыль 20%: Дт 99.01.1 Кт 68.04.1 на ${profitTax20.toFixed(2)} ₽ (база прибыли ${totalProfitBeforeTax.toFixed(2)} ₽)`
+          `Начислен налог на прибыль 20%: Дт 99.02.1 Кт 68.04.1 на ${profitTaxDelta.toFixed(2)} ₽ (база прибыли ${totalProfitBeforeTax.toFixed(2)} ₽)`
         );
         structuredChanges.push({
           id: nextAutoFixId('chg-profit-tax'),
           whatWas: `Прибыль до налогообложения на счёте 99.01.1 = ${totalProfitBeforeTax.toFixed(2)} ₽`,
-          whatBecame: `Проводка Дт 99.01.1 Кт 68.04.1 = ${profitTax20.toFixed(2)} ₽ (ставка 20% ОСНО)`,
+          whatBecame: `Проводка Дт 99.02.1 Кт 68.04.1 = ${profitTaxDelta.toFixed(2)} ₽ (ставка 20% ОСНО)`,
           basis: 'Ст. 284 НК РФ — регламентная операция «Расчёт налога на прибыль» 1С:БП 3.0',
           category: 'closing',
         });
@@ -2380,7 +2432,7 @@ export function generatePeriodClosingOperations(params: {
     }
   }
 
-  // Year-end Реформация баланса on December 31: close 90.* -> 90.09, 91.* -> 91.09, and 99.01.1 -> 84.01 / 84.02
+  // Year-end Реформация баланса on December 31: close 90.* -> 90.09, 91.* -> 91.09, and ALL 99.* (99.01.1, 99.02.1, 99.02.3) -> 84.01 / 84.02
   if (closeDate.endsWith('-12-31')) {
     const alreadyHasReformation = operations.some(
       (o) =>
@@ -2469,58 +2521,73 @@ export function generatePeriodClosingOperations(params: {
         }
       }
 
-      const existing99Row = osv.leafRows.find((r) => r.code === '99.01.1' || r.code === '99');
-      const existingNetCredit99 = existing99Row
-        ? round2(existing99Row.endCredit - existing99Row.endDebit)
-        : 0;
-      const closingDeltaCredit99AfterTax = round2(
-        closingEntries.reduce((acc, e) => {
-          if (e.credit === '99.01.1') return acc + e.amount;
-          if (e.debit === '99.01.1') return acc - e.amount;
-          return acc;
-        }, 0)
-      );
-      const netProfitYearEnd = round2(existingNetCredit99 + closingDeltaCredit99AfterTax);
-      void profitTaxApplied;
-      if (netProfitYearEnd > 0.01) {
-        closingEntries.push({
-          id: nextAutoFixId('ref-99-profit'),
-          debit: '99.01.1',
-          credit: '84.01',
-          debitSubconto: 'Прибыль (убыток) от продаж',
-          creditSubconto: 'Прибыль, подлежащая распределению',
-          amount: netProfitYearEnd,
-          description: 'Реформация баланса: зачисление чистой прибыли отчётного года на счёт 84.01',
-        });
+      const children99 = osv.leafRows.filter((r) => r.code.startsWith('99.') || r.code === '99');
+      const codes99 = new Set<string>([
+        ...children99.map((r) => r.code),
+        ...closingEntries
+          .flatMap((e) => [e.debit, e.credit])
+          .filter((c) => c.startsWith('99.') || c === '99'),
+      ]);
+      const netByCode99 = new Map<string, number>();
+      let totalNetCreditAll99 = 0;
+      for (const code99 of codes99) {
+        const baseRow = children99.find((r) => r.code === code99);
+        const extraDt = closingEntries
+          .filter((e) => e.debit === code99)
+          .reduce((s, e) => s + e.amount, 0);
+        const extraKt = closingEntries
+          .filter((e) => e.credit === code99)
+          .reduce((s, e) => s + e.amount, 0);
+        const netCr = round2(
+          ((baseRow?.endCredit ?? 0) + extraKt) - ((baseRow?.endDebit ?? 0) + extraDt)
+        );
+        if (Math.abs(netCr) > 0.01) {
+          netByCode99.set(code99, netCr);
+          totalNetCreditAll99 = round2(totalNetCreditAll99 + netCr);
+        }
+      }
+      if (netByCode99.size > 0) {
+        const target84 = totalNetCreditAll99 >= 0 ? '84.01' : '84.02';
+        const target84Sub =
+          target84 === '84.01'
+            ? 'Прибыль, подлежащая распределению'
+            : 'Убыток, подлежащий покрытию';
+        for (const [code99, netCr] of netByCode99.entries()) {
+          const sub99 =
+            code99 === '99.02.1'
+              ? 'Текущий налог на прибыль'
+              : code99 === '99.02.3'
+                ? 'Налоговые санкции'
+                : 'Прибыль (убыток) от продаж';
+          if (netCr > 0.01) {
+            closingEntries.push({
+              id: nextAutoFixId(`ref-${code99}`),
+              debit: code99,
+              credit: target84,
+              debitSubconto: sub99,
+              creditSubconto: target84Sub,
+              amount: netCr,
+              description: `Реформация баланса: перенос кредитового сальдо ${code99} на счёт ${target84}`,
+            });
+          } else if (netCr < -0.01) {
+            closingEntries.push({
+              id: nextAutoFixId(`ref-${code99}`),
+              debit: target84,
+              credit: code99,
+              debitSubconto: target84Sub,
+              creditSubconto: sub99,
+              amount: Math.abs(netCr),
+              description: `Реформация баланса: списание дебетового сальдо ${code99} на счёт ${target84}`,
+            });
+          }
+        }
         log.push(
-          `Реформация баланса на ${closeDate}: чистая прибыль ${netProfitYearEnd.toFixed(2)} ₽ перенесена проводкой Дт 99.01.1 Кт 84.01`
+          `Реформация баланса на ${closeDate}: финансовый результат (${totalNetCreditAll99.toFixed(2)} ₽) перенесён со счёта 99 на счёт ${target84}`
         );
         structuredChanges.push({
           id: nextAutoFixId('chg-reformation-84'),
-          whatWas: `Сальдо счёта 99.01.1 на 31.12 = ${netProfitYearEnd.toFixed(2)} ₽`,
-          whatBecame: `Проводка Дт 99.01.1 Кт 84.01 = ${netProfitYearEnd.toFixed(2)} ₽ (счета 90, 91, 99 закрыты в ноль)`,
-          basis: 'Инструкция к Плану счетов РСБУ — заключительные записи декабря («Реформация баланса»)',
-          category: 'closing',
-          ruleId: 'close_period_accounts',
-        });
-      } else if (netProfitYearEnd < -0.01) {
-        const netLoss = Math.abs(netProfitYearEnd);
-        closingEntries.push({
-          id: nextAutoFixId('ref-99-loss'),
-          debit: '84.02',
-          credit: '99.01.1',
-          debitSubconto: 'Убыток, подлежащий покрытию',
-          creditSubconto: 'Прибыль (убыток) от продаж',
-          amount: netLoss,
-          description: 'Реформация баланса: списание чистого убытка отчётного года на счёт 84.02',
-        });
-        log.push(
-          `Реформация баланса на ${closeDate}: чистый убыток ${netLoss.toFixed(2)} ₽ перенесён проводкой Дт 84.02 Кт 99.01.1`
-        );
-        structuredChanges.push({
-          id: nextAutoFixId('chg-reformation-84-loss'),
-          whatWas: `Дебетовое сальдо убытка на счёте 99.01.1 на 31.12 = ${netLoss.toFixed(2)} ₽`,
-          whatBecame: `Проводка Дт 84.02 Кт 99.01.1 = ${netLoss.toFixed(2)} ₽ (счета 90, 91, 99 закрыты в ноль)`,
+          whatWas: `Незакрытые субсчета счёта 99 (${[...netByCode99.keys()].join(', ')}) на 31.12`,
+          whatBecame: `Заключительные записи на счёт ${target84} на чистую сумму ${Math.abs(totalNetCreditAll99).toFixed(2)} ₽ (счета 90, 91, 99 закрыты в ноль)`,
           basis: 'Инструкция к Плану счетов РСБУ — заключительные записи декабря («Реформация баланса»)',
           category: 'closing',
           ruleId: 'close_period_accounts',

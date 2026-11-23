@@ -8,6 +8,7 @@ import {
   Virtual1CStateSnapshot,
   VirtualContract1C,
   VirtualCounterparty1C,
+  VirtualDeferredExpense1C,
   VirtualEmployee1C,
   VirtualEntityUsageRef1C,
   VirtualFinancialInvestment1C,
@@ -37,6 +38,58 @@ export function formatRuDateShort(iso?: string): string {
   const m = iso.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (!m) return iso;
   return `${m[3]}.${m[2]}.${m[1]}`;
+}
+
+export function inferEmployeeCostAccount1C(
+  position?: string,
+  description?: string,
+  explicitCostAccount?: string
+): '20.01' | '26' | '44.01' {
+  if (explicitCostAccount === '20.01' || explicitCostAccount === '26' || explicitCostAccount === '44.01') {
+    return explicitCostAccount;
+  }
+  const combined = `${position ?? ''} ${description ?? ''}`.toLowerCase().replace(/ё/g, 'е');
+  if (
+    /(?:^|[^\p{L}])(?:менеджер\s+по\s+продаж|продавец|кассир|маркетолог|торгов\p{L}*\s+представител)/iu.test(
+      combined
+    )
+  ) {
+    return '44.01';
+  }
+  if (
+    /(?:^|[^\p{L}])(?:фрезеровщик|каменщик|маляр|штукатур|слесарь|плотник|сварщик|монтажник|токарь|электрик|электромонтер|водитель|рабочий|разнорабочий|кровельщик|бетонщик|арматурщик|плиточник|отделочник|прораб|мастер\s+участка|мастер\s+смр|инженер\s+пто|основн\p{L}*\s+производств)/iu.test(
+      combined
+    )
+  ) {
+    return '20.01';
+  }
+  return '26';
+}
+
+export function resolveEmployeeHireStartDate1C(op: {
+  date?: string;
+  description?: string;
+  actionSequenceHint?: string;
+  employeeHireStartDate?: string;
+}): string {
+  if (op.employeeHireStartDate && /^\d{4}-\d{2}-\d{2}$/.test(op.employeeHireStartDate.trim())) {
+    return op.employeeHireStartDate.trim();
+  }
+  const combined = `${op.description ?? ''} ${op.actionSequenceHint ?? ''}`;
+  const m = combined.match(
+    /(?:принять|принят\p{L}*|приступить\s+к\s+работе|выход\s+на\s+работу)\s+(?:на\s+работу\s+)?с\s+(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?(?=$|[^\d])/iu
+  );
+  if (m) {
+    const day = Number(m[1]);
+    const month = Number(m[2]);
+    const rawYear = m[3] ? Number(m[3]) : undefined;
+    const fallbackYear = op.date && /^\d{4}/.test(op.date) ? Number(op.date.slice(0, 4)) : 2026;
+    const year = rawYear ? (rawYear < 100 ? 2000 + rawYear : rawYear) : fallbackYear;
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
+  return op.date || '2026-01-01';
 }
 
 export function normalizeCounterpartyKey1C(raw: string): string {
@@ -583,6 +636,7 @@ export function cloneVirtual1CState(state: Virtual1CStateSnapshot): Virtual1CSta
     nomenclature: state.nomenclature.map((n) => ({ ...n, usages: [...n.usages] })),
     employees: state.employees.map((e) => ({ ...e, usages: [...e.usages] })),
     fixedAssets: state.fixedAssets.map((a) => ({ ...a, usages: [...a.usages] })),
+    deferredExpenses: (state.deferredExpenses ?? []).map((d) => ({ ...d, usages: [...d.usages] })),
     writsOfExecution: state.writsOfExecution.map((w) => ({ ...w, usages: [...w.usages] })),
     financialInvestments: state.financialInvestments.map((f) => ({ ...f, usages: [...f.usages] })),
     openSettlements: state.openSettlements.map((s) => ({
@@ -613,6 +667,7 @@ export function createInitialVirtual1CState(
     nomenclature: [],
     employees: [],
     fixedAssets: [],
+    deferredExpenses: [],
     writsOfExecution: [],
     financialInvestments: [],
     openSettlements: [],
@@ -710,11 +765,13 @@ export function createInitialVirtual1CState(
         item.extra?.salary ||
         0
     );
+    const empPos = item.extra?.Должность || item.extra?.должность || item.kind || 'Сотрудник штата';
     state.employees.push({
       key,
       fullName,
-      position: item.extra?.Должность || item.extra?.должность || item.kind || 'Сотрудник штата',
+      position: empPos,
       monthlySalary: Number.isFinite(rawSalary) && rawSalary > 0 ? round2(rawSalary) : 0,
+      costAccount: inferEmployeeCostAccount1C(empPos, item.extra?.Подразделение),
       subdivision: item.extra?.Подразделение || 'Основное подразделение',
       hireDate: item.extra?.ДатаПриема || db1C.periodStart || '',
       inn: item.extra?.ИНН || '',
@@ -726,12 +783,33 @@ export function createInitialVirtual1CState(
   for (const emp of db1C.employees) pushDbPerson(emp, true);
   for (const ind of db1C.individuals) pushDbPerson(ind, false);
 
-  // 5. Seed Fixed Assets, Financial Investments & Open Settlements from db1C rawBalances + postings
+  // 5. Seed Fixed Assets, Deferred Expenses (97.21), Financial Investments & Open Settlements from db1C rawBalances + postings
   for (const b of db1C.rawBalances) {
     const acc = (b.account || '').trim();
     const sub = (b.subconto || '').trim();
     const debitBal = round2(Math.max(0, b.endDebit || b.startDebit || b.rawDebit || 0));
     const creditBal = round2(Math.max(0, b.endCredit || b.startCredit || b.rawCredit || 0));
+
+    if ((acc === '97.21' || acc === '97') && debitBal >= 0.01) {
+      const label = sub || 'Расходы будущих периодов из базы 1С';
+      const key = `rpb:${normalizeSimpleEntityKey1C(label)}`;
+      if (!(state.deferredExpenses ?? []).some((d) => d.key === key)) {
+        state.deferredExpenses = state.deferredExpenses ?? [];
+        state.deferredExpenses.push({
+          key,
+          name: label,
+          totalAmount: debitBal,
+          remainingAmount: debitBal,
+          termMonths: 12,
+          monthlyAmount: round2(debitBal / 12),
+          writeOffAccount: '26',
+          startMonth: (db1C.periodStart || '2026-01-01').slice(0, 7),
+          source: 'from_1c_base',
+          originDate: db1C.periodStart || '2026-01-01',
+          usages: [],
+        });
+      }
+    }
 
     if ((acc === '01.01' || acc === '01' || acc.startsWith('08.04')) && debitBal >= 0.01 && sub) {
       const key = `os:${normalizeSimpleEntityKey1C(sub)}`;
@@ -1484,12 +1562,41 @@ export function advanceVirtual1CStateWithOperation(
             return eSur.startsWith(bareSurnameStem);
           })
         : undefined);
+    const isHireRow =
+      op.category === 'hr_hire' ||
+      /принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу/iu.test(op.description);
+    const isDismissalRow =
+      Boolean(op.employeeTerminationDate) ||
+      /(?:^|[^\p{L}])(?:уволен\p{L}*|расторгнут\p{L}*\s+трудов\p{L}*\s+договор|прекращен\p{L}*\s+трудов\p{L}*)/iu.test(
+        op.description
+      );
+    const resolvedHireDate = isHireRow ? resolveEmployeeHireStartDate1C(op) : op.date;
+    const explicitEmpCostAcc =
+      op.category === 'hr_hire' &&
+      (op.costAccount === '20.01' || op.costAccount === '26' || op.costAccount === '44.01')
+        ? op.costAccount
+        : undefined;
+
     if (existingEmp) {
       if (effectiveSalary > 0) {
         existingEmp.monthlySalary = effectiveSalary;
       }
       if (op.employeePosition) {
         existingEmp.position = op.employeePosition;
+      }
+      if (op.employeePosition || explicitEmpCostAcc || !existingEmp.costAccount) {
+        existingEmp.costAccount = inferEmployeeCostAccount1C(
+          op.employeePosition || existingEmp.position,
+          op.description,
+          explicitEmpCostAcc
+        );
+      }
+      if (
+        existingEmp.costAccount === '20.01' &&
+        op.nomenclatureGroupName &&
+        op.nomenclatureGroupName !== 'Основная номенклатурная группа'
+      ) {
+        existingEmp.nomenclatureGroup = op.nomenclatureGroupName;
       }
       if (childCount !== undefined && childCount > 0) {
         existingEmp.childCount = childCount;
@@ -1503,23 +1610,38 @@ export function advanceVirtual1CStateWithOperation(
           ? `${op.date.slice(0, 7)}-01`
           : existingEmp.hireDate;
       }
-      if (op.category === 'hr_hire' && /принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу/iu.test(op.description)) {
+      if (isHireRow) {
         existingEmp.isStaffEmployee = true;
-        existingEmp.hireDate = op.date;
+        existingEmp.hireDate = resolvedHireDate;
+      }
+      if (isDismissalRow) {
+        existingEmp.terminationDate = op.employeeTerminationDate || op.date;
       }
       existingEmp.usages = addUsageRef(existingEmp.usages, usageRef);
     } else if (empKey) {
-      const isHireRow =
-        op.category === 'hr_hire' ||
-        /принят\p{L}*\s+на\s+работу|при[её]м\s+на\s+работу/iu.test(op.description);
       if (isHireRow || effectiveSalary > 0 || Boolean(propDeduction && propDeduction > 0)) {
+        const resolvedPos =
+          op.employeePosition || (empName === 'Главный бухгалтер' ? 'Главный бухгалтер' : 'Сотрудник штата');
+        const inferredCostAcc = inferEmployeeCostAccount1C(
+          resolvedPos,
+          op.description,
+          explicitEmpCostAcc
+        );
         state.employees.push({
           key: empKey,
           fullName: empName,
-          position: op.employeePosition || (empName === 'Главный бухгалтер' ? 'Главный бухгалтер' : 'Сотрудник штата'),
+          position: resolvedPos,
           monthlySalary: effectiveSalary,
-          subdivision: 'Основное подразделение',
-          hireDate: op.date,
+          costAccount: inferredCostAcc,
+          nomenclatureGroup:
+            inferredCostAcc === '20.01' &&
+            op.nomenclatureGroupName &&
+            op.nomenclatureGroupName !== 'Основная номенклатурная группа'
+              ? op.nomenclatureGroupName
+              : undefined,
+          subdivision: inferredCostAcc === '20.01' ? 'Производственное подразделение' : 'Администрация',
+          hireDate: resolvedHireDate,
+          terminationDate: isDismissalRow ? op.employeeTerminationDate || op.date : undefined,
           childCount: childCount && childCount > 0 ? childCount : undefined,
           isSingleParent: isSingleParent || undefined,
           propertyTaxDeduction: propDeduction && propDeduction > 0 ? propDeduction : undefined,
@@ -2215,6 +2337,83 @@ export function advanceVirtual1CStateWithOperation(
         const used = Math.min(s.remainingAmount, toPay);
         s.remainingAmount = round2(s.remainingAmount - used);
         toPay = round2(toPay - used);
+      }
+    }
+  }
+
+  // 9. Register & amortize Deferred Expenses (РБП on 97.21)
+  state.deferredExpenses = state.deferredExpenses ?? [];
+  const debit9721 = round2(
+    op.entries
+      .filter((e) => e.debit === '97.21' || e.debit === '97')
+      .reduce((sum, e) => sum + (e.amount || 0), 0)
+  );
+  if (debit9721 >= 0.01) {
+    const firstRpbEntry = op.entries.find((e) => e.debit === '97.21' || e.debit === '97');
+    const rpbLabel = (
+      firstRpbEntry?.debitSubconto ||
+      op.nomenclatureName ||
+      op.expenseItemName ||
+      op.counterpartyName ||
+      'Расходы будущих периодов'
+    ).trim();
+    const rpbKey = `rpb:${normalizeSimpleEntityKey1C(rpbLabel)}:${op.id}`;
+    const termMonths = Math.max(
+      1,
+      Math.min(
+        240,
+        op.rpbTermMonths && op.rpbTermMonths > 0
+          ? Math.round(op.rpbTermMonths)
+          : extractUsefulLifeMonths1C(op.description) || 12
+      )
+    );
+    const writeOffAcc: VirtualDeferredExpense1C['writeOffAccount'] =
+      op.costAccount === '20.01' || op.costAccount === '44.01' ? op.costAccount : '26';
+    const existingRpb = state.deferredExpenses.find((d) => d.key === rpbKey);
+    if (!existingRpb) {
+      state.deferredExpenses.push({
+        key: rpbKey,
+        name: rpbLabel,
+        totalAmount: debit9721,
+        remainingAmount: debit9721,
+        termMonths,
+        monthlyAmount: round2(debit9721 / termMonths),
+        writeOffAccount: writeOffAcc,
+        startMonth: (op.date || '2026-01-01').slice(0, 7),
+        settlementAccount: op.rpbSettlementAccount || (firstRpbEntry?.credit === '76.09' ? '76.09' : '60.01'),
+        source: 'created_in_operation',
+        originOpId: op.id,
+        originOpNumber: opNumber,
+        originDate: op.date || '2026-01-01',
+        usages: [usageRef],
+      });
+    }
+  }
+
+  for (const entry of op.entries) {
+    if ((entry.credit === '97.21' || entry.credit === '97') && entry.amount >= 0.01) {
+      let toWriteOff = entry.amount;
+      const crNorm = normalizeSimpleEntityKey1C(entry.creditSubconto || '');
+      for (const item of state.deferredExpenses) {
+        if (item.remainingAmount < 0.01 || toWriteOff < 0.01) continue;
+        const itemNorm = normalizeSimpleEntityKey1C(item.name);
+        if (crNorm && itemNorm && !crNorm.includes(itemNorm) && !itemNorm.includes(crNorm)) {
+          continue;
+        }
+        const used = Math.min(item.remainingAmount, toWriteOff);
+        item.remainingAmount = round2(item.remainingAmount - used);
+        item.usages = addUsageRef(item.usages, usageRef);
+        toWriteOff = round2(toWriteOff - used);
+      }
+      // Fallback FIFO across remaining active 97.21 items if subconto was generic
+      if (toWriteOff >= 0.01) {
+        for (const item of state.deferredExpenses) {
+          if (item.remainingAmount < 0.01 || toWriteOff < 0.01) continue;
+          const used = Math.min(item.remainingAmount, toWriteOff);
+          item.remainingAmount = round2(item.remainingAmount - used);
+          item.usages = addUsageRef(item.usages, usageRef);
+          toWriteOff = round2(toWriteOff - used);
+        }
       }
     }
   }

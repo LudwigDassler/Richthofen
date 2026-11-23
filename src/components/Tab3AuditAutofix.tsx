@@ -61,6 +61,8 @@ export function Tab3AuditAutofix() {
     bindOperationTo1CDirectoryItem,
     assignCounterpartyToOperation,
     resetNewCounterparty,
+    reparseOperationWithAI,
+    reparsingOpId,
     jumpToOperation,
     setActiveTab,
   } = useAccountant();
@@ -1165,14 +1167,31 @@ export function Tab3AuditAutofix() {
                         </>
                       )}
                       {issue.operationId && (
-                        <button
-                          type="button"
-                          onClick={() => jumpToOperation(issue.operationId!)}
-                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 whitespace-nowrap shrink-0 transition-colors"
-                        >
-                          К операции
-                          <ExternalLink className="w-3 h-3" strokeWidth={1.6} />
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            disabled={reparsingOpId === issue.operationId}
+                            onClick={() => void reparseOperationWithAI(issue.operationId!)}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 text-slate-700 dark:text-slate-300 text-xs font-medium whitespace-nowrap shrink-0 transition-colors"
+                          >
+                            {reparsingOpId === issue.operationId ? (
+                              <Loader2 className="w-3 h-3 animate-spin" strokeWidth={1.6} />
+                            ) : (
+                              <RotateCcw className="w-3 h-3" strokeWidth={1.6} />
+                            )}
+                            {reparsingOpId === issue.operationId
+                              ? 'Разбор ИИ...'
+                              : 'Переразобрать через ИИ'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => jumpToOperation(issue.operationId!)}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 whitespace-nowrap shrink-0 transition-colors"
+                          >
+                            К операции
+                            <ExternalLink className="w-3 h-3" strokeWidth={1.6} />
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>

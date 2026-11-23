@@ -76,8 +76,16 @@ import {
   normalizeOperationDateToReportingYear,
   parseFreeTextOrDelimitedOperations,
   parseRussianNumber,
-  processBatchFiles,
+  processBatchFilesAsync,
+  reparseSingleOperationWithAI,
 } from '@/lib/import1c';
+import {
+  AiBatchProgressState1C,
+  AiProviderStatus1C,
+  checkAiProviderStatus,
+  ParserMode1C,
+  PreferredLlmProvider1C,
+} from '@/lib/ai/aiBatchClient';
 
 export type SyncStatus = 'idle' | 'syncing' | 'connected' | 'disconnected' | 'error';
 
@@ -151,6 +159,14 @@ interface AccountantContextValue {
   egrulProgress: { checked: number; total: number } | null;
   exportMode: ExportMode1C;
   setExportMode: (mode: ExportMode1C) => void;
+  parserMode: ParserMode1C;
+  setParserMode: (mode: ParserMode1C) => void;
+  preferredLlmProvider: PreferredLlmProvider1C;
+  setPreferredLlmProvider: (provider: PreferredLlmProvider1C) => void;
+  aiProviderStatus: AiProviderStatus1C;
+  aiBatchProgress: AiBatchProgressState1C | null;
+  isProbingAi: boolean;
+  reparsingOpId: string | null;
   notice: NoticeBanner | null;
   dismissNotice: () => void;
 
@@ -158,7 +174,9 @@ interface AccountantContextValue {
   syncWith1CEndpoint: (silent?: boolean) => Promise<void>;
   load1CJsonFile: (file: File) => Promise<void>;
   importOperationFiles: (files: File[]) => Promise<BatchImportResult>;
-  importOperationsFromText: (text: string, sourceLabel?: string) => number;
+  importOperationsFromText: (text: string, sourceLabel?: string) => Promise<number>;
+  probeAiConnection: () => Promise<AiProviderStatus1C>;
+  reparseOperationWithAI: (operationId: string) => Promise<void>;
   addBlankOperation: () => void;
   updateOperation: (id: string, updater: (prev: QueuedOperation) => QueuedOperation) => void;
   changeOperationDocType1C: (id: string, docType1C: DocType1CBP30) => void;
@@ -249,7 +267,43 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     null
   );
   const [exportMode, setExportMode] = useState<ExportMode1C>('incremental');
+  const [parserMode, setParserModeState] = useState<ParserMode1C>('ai_json');
+  const [preferredLlmProvider, setPreferredLlmProviderState] =
+    useState<PreferredLlmProvider1C>('auto');
+  const [aiProviderStatus, setAiProviderStatus] = useState<AiProviderStatus1C>({
+    checked: false,
+    available: false,
+    provider: 'none',
+    model: 'gemini-4-hydrogen',
+    geminiConfigured: false,
+    openaiCompatibleConfigured: false,
+    message: 'Проверка серверного провайдера ИИ...',
+  });
+  const [aiBatchProgress, setAiBatchProgress] = useState<AiBatchProgressState1C | null>(null);
+  const [isProbingAi, setIsProbingAi] = useState<boolean>(false);
+  const [reparsingOpId, setReparsingOpId] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeBanner | null>(null);
+
+  const setParserMode = useCallback((mode: ParserMode1C) => {
+    setParserModeState(mode);
+    try {
+      window.localStorage.setItem('workbench_parser_mode_v1', mode);
+    } catch {
+      // Ignore storage errors
+    }
+  }, []);
+
+  const setPreferredLlmProvider = useCallback((provider: PreferredLlmProvider1C) => {
+    setPreferredLlmProviderState(provider);
+    try {
+      window.localStorage.setItem('workbench_llm_provider_v1', provider);
+    } catch {
+      // Ignore storage errors
+    }
+    void checkAiProviderStatus({ probe: false, preferredProvider: provider }).then((st) => {
+      setAiProviderStatus(st);
+    });
+  }, []);
 
   const setIncludeQueuedInOsv = useCallback((val: boolean) => {
     setIncludeQueuedInOsvState(val);
@@ -373,6 +427,29 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       }
     }
     setHydrated(true);
+
+    let initialProvider: PreferredLlmProvider1C = 'auto';
+    try {
+      const savedMode = window.localStorage.getItem('workbench_parser_mode_v1');
+      if (savedMode === 'ai_json' || savedMode === 'offline') {
+        setParserModeState(savedMode);
+      }
+      const savedProv = window.localStorage.getItem('workbench_llm_provider_v1');
+      if (
+        savedProv === 'auto' ||
+        savedProv === 'gemini' ||
+        savedProv === 'openai_compatible'
+      ) {
+        initialProvider = savedProv;
+        setPreferredLlmProviderState(savedProv);
+      }
+    } catch {
+      // Ignore storage access errors
+    }
+
+    void checkAiProviderStatus({ probe: false, preferredProvider: initialProvider }).then((st) => {
+      setAiProviderStatus(st);
+    });
 
     // Check live /api/1c-sync endpoint on startup
     (async () => {
@@ -869,6 +946,55 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     [db1C, reportingYear, pushNotice]
   );
 
+  const probeAiConnection = useCallback(async (): Promise<AiProviderStatus1C> => {
+    setIsProbingAi(true);
+    try {
+      const st = await checkAiProviderStatus({
+        probe: true,
+        preferredProvider: preferredLlmProvider,
+      });
+      setAiProviderStatus(st);
+      pushNotice(st.available ? 'success' : 'info', st.message);
+      return st;
+    } finally {
+      setIsProbingAi(false);
+    }
+  }, [preferredLlmProvider, pushNotice]);
+
+  const reparseOperationWithAI = useCallback(
+    async (operationId: string): Promise<void> => {
+      setReparsingOpId(operationId);
+      try {
+        const res = await reparseSingleOperationWithAI({
+          targetOpId: operationId,
+          operations,
+          db1C,
+          reportingYear,
+          preferredLlmProvider,
+        });
+        if (res.ok && res.intent) {
+          setOperations(res.operations);
+          pushNotice(
+            'success',
+            `Операция переразобрана через ИИ-главбуха: ${res.intent.docType1C}${
+              res.intent.counterparty?.canonicalName
+                ? ` · ${res.intent.counterparty.canonicalName}`
+                : ''
+            }`
+          );
+        } else {
+          pushNotice(
+            'info',
+            res.error || 'ИИ-главбух недоступен — проверьте настройки серверного API'
+          );
+        }
+      } finally {
+        setReparsingOpId(null);
+      }
+    },
+    [operations, db1C, reportingYear, preferredLlmProvider, pushNotice]
+  );
+
   const importOperationFiles = useCallback(
     async (files: File[]): Promise<BatchImportResult> => {
       const inputs = await Promise.all(
@@ -878,10 +1004,18 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
         }))
       );
 
-      const result = processBatchFiles(inputs, db1C, {
-        reportingYear,
-        priorOperations: operations,
-      });
+      let result: BatchImportResult;
+      try {
+        result = await processBatchFilesAsync(inputs, db1C, {
+          reportingYear,
+          priorOperations: operations,
+          parserMode,
+          preferredLlmProvider,
+          onAiBatchProgress: parserMode === 'ai_json' ? setAiBatchProgress : undefined,
+        });
+      } finally {
+        setAiBatchProgress(null);
+      }
 
       let mergedOps: QueuedOperation[] = operations;
 
@@ -934,6 +1068,11 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       const totalOps = result.operations.length;
       const totalPostings = result.completenessStats.generatedPostingsCount;
       const dupOps = result.operations.filter((o) => o.isDuplicateIn1C).length;
+      const modeSuffix = result.usedAiParser
+        ? ' · Слой 1: ИИ-главбух (JSON)'
+        : result.aiFallbackTriggered
+          ? ' · Офлайн-резерв 1С:БП 3.0'
+          : '';
 
       if (result.errors.length > 0) {
         pushNotice('error', result.errors.join('; '));
@@ -947,7 +1086,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
           'success',
           `Загружено файлов: ${result.completenessStats.filesUploaded} · Импортировано операций: ${totalOps} · Сформировано проводок: ${totalPostings}${
             dupOps > 0 ? ` (дубликатов в БД 1С: ${dupOps})` : ''
-          }`
+          }${modeSuffix}`
         );
       }
 
@@ -957,11 +1096,78 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
 
       return result;
     },
-    [db1C, reportingYear, operations, pushNotice, executeEgrulLookupInternal]
+    [
+      db1C,
+      reportingYear,
+      operations,
+      parserMode,
+      preferredLlmProvider,
+      pushNotice,
+      executeEgrulLookupInternal,
+    ]
   );
 
   const importOperationsFromText = useCallback(
-    (text: string, sourceLabel = 'Буфер обмена'): number => {
+    async (text: string, sourceLabel = 'Буфер обмена'): Promise<number> => {
+      if (parserMode === 'ai_json' && text.trim()) {
+        const encoded = new TextEncoder().encode(text);
+        const buf = encoded.buffer.slice(
+          encoded.byteOffset,
+          encoded.byteOffset + encoded.byteLength
+        ) as ArrayBuffer;
+        let aiBatchResult: BatchImportResult | null = null;
+        try {
+          aiBatchResult = await processBatchFilesAsync(
+            [{ name: `${sourceLabel}.txt`, buffer: buf }],
+            db1C,
+            {
+              reportingYear,
+              priorOperations: operations,
+              parserMode,
+              preferredLlmProvider,
+              onAiBatchProgress: setAiBatchProgress,
+            }
+          );
+        } finally {
+          setAiBatchProgress(null);
+        }
+
+        if (aiBatchResult && aiBatchResult.operations.length > 0) {
+          const nextOps = recalculateOperationsChronologically(
+            [...operations, ...aiBatchResult.operations],
+            db1C,
+            { reportingYear }
+          );
+          setOperations(nextOps);
+          const addedPostings = aiBatchResult.operations.reduce((s, o) => s + o.entries.length, 0);
+          setLastImportStats((prev) => {
+            const base = prev && operations.length > 0 ? prev : null;
+            return {
+              filesUploaded: (base?.filesUploaded ?? 0) + 1,
+              excelOperationRowsTotal:
+                (base?.excelOperationRowsTotal ?? 0) + aiBatchResult.operations.length,
+              importedOperationsCount:
+                (base?.importedOperationsCount ?? 0) + aiBatchResult.operations.length,
+              generatedPostingsCount: (base?.generatedPostingsCount ?? 0) + addedPostings,
+              skippedRowsCount: base?.skippedRowsCount ?? 0,
+              skippedReasons: base?.skippedReasons ?? [],
+              sheetDefaults: aiBatchResult.completenessStats.sheetDefaults,
+            };
+          });
+          const modeSuffix = aiBatchResult.usedAiParser
+            ? ' · Слой 1: ИИ-главбух (JSON)'
+            : aiBatchResult.aiFallbackTriggered
+              ? ' · Офлайн-резерв 1С:БП 3.0'
+              : '';
+          pushNotice(
+            'success',
+            `Из текста импортировано операций: ${aiBatchResult.operations.length} · Сформировано проводок: ${addedPostings}${modeSuffix}`
+          );
+          void executeEgrulLookupInternal(nextOps, undefined, false);
+          return aiBatchResult.operations.length;
+        }
+      }
+
       const drafts = parseFreeTextOrDelimitedOperations(text, sourceLabel, db1C, {
         reportingYear,
       });
@@ -1036,7 +1242,16 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       void executeEgrulLookupInternal(nextOps, undefined, false);
       return generated.length;
     },
-    [db1C, reportingYear, operations, lastImportStats, pushNotice, executeEgrulLookupInternal]
+    [
+      db1C,
+      reportingYear,
+      operations,
+      parserMode,
+      preferredLlmProvider,
+      lastImportStats,
+      pushNotice,
+      executeEgrulLookupInternal,
+    ]
   );
 
   const addBlankOperation = useCallback(() => {
@@ -2605,12 +2820,22 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       egrulProgress,
       exportMode,
       setExportMode,
+      parserMode,
+      setParserMode,
+      preferredLlmProvider,
+      setPreferredLlmProvider,
+      aiProviderStatus,
+      aiBatchProgress,
+      isProbingAi,
+      reparsingOpId,
       notice,
       dismissNotice,
       syncWith1CEndpoint,
       load1CJsonFile,
       importOperationFiles,
       importOperationsFromText,
+      probeAiConnection,
+      reparseOperationWithAI,
       addBlankOperation,
       updateOperation,
       changeOperationDocType1C,
@@ -2666,12 +2891,22 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       egrulProgress,
       exportMode,
       setExportMode,
+      parserMode,
+      setParserMode,
+      preferredLlmProvider,
+      setPreferredLlmProvider,
+      aiProviderStatus,
+      aiBatchProgress,
+      isProbingAi,
+      reparsingOpId,
       notice,
       dismissNotice,
       syncWith1CEndpoint,
       load1CJsonFile,
       importOperationFiles,
       importOperationsFromText,
+      probeAiConnection,
+      reparseOperationWithAI,
       addBlankOperation,
       updateOperation,
       changeOperationDocType1C,
