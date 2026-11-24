@@ -15,7 +15,7 @@ import {
 } from '@/lib/engine';
 import { formatDateRu, formatMoney } from '@/lib/formatters';
 import { Modal1CFormSavePatch } from '@/context/AccountantContext';
-import { FieldHintPopover1C } from '@/components/FieldHintPopover1C';
+import { FieldHintPopover1C } from './FieldHintPopover1C';
 import {
   PopoverPricesVat1C,
   PopoverSettlementAccounts1C,

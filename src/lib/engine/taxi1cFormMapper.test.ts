@@ -239,4 +239,19 @@ test('build1CWindowTitle, breadcrumbs, hints, walkthrough, based-on links, and r
   assert.ok(regs.some((r) => r.registerName.includes('НДС предъявленный')));
   assert.ok(regs.some((r) => r.registerName.includes('НДС Покупки')));
   assert.ok(regs.some((r) => r.registerName.includes('МПЗ')));
+
+  const tracedOp = {
+    ...ptu,
+    calculationProvenance: '200 шт × 500,00 ₽ + НДС 20% = 120 000,00 ₽',
+    resolverTrace: {
+      resolverLevel: 2 as const,
+      resolverLevelName: 'Количественно-ценовой расчёт из текста операции',
+      summaryFormula: '200 × 500 + 20%',
+      steps: ['База без НДС: 100 000,00 ₽', 'НДС 20%: 20 000,00 ₽'],
+      sourceLinks: [],
+    },
+  };
+  const tracedHints = buildFieldHints1C(tracedOp);
+  assert.ok(tracedHints.amount_vat.whereValueComesFrom.includes('200 шт × 500,00 ₽'));
+  assert.ok((tracedHints.amount_vat.provenanceSteps || []).length >= 2);
 });

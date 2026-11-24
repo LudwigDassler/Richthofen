@@ -32,6 +32,7 @@ export interface SmartFieldHint1C {
   key: string;
   label: string;
   whereValueComesFrom: string;
+  provenanceSteps?: string[];
   actionIn1C: string;
   commonMistake: string;
   copyValue?: string;
@@ -770,6 +771,25 @@ export function buildFieldHints1C(op: QueuedOperation): Record<string, SmartFiel
     op.resolverTrace?.summaryFormula ||
     `Из строки задания${op.sourceFileName ? ` (${op.sourceFileName})` : ''}: ${amountStr} ₽`;
 
+  const provenanceSteps: string[] = [];
+  if (op.resolverTrace?.resolverLevelName) {
+    const lvlName = op.resolverTrace.resolverLevelName;
+    provenanceSteps.push(
+      lvlName.startsWith('Уровень')
+        ? lvlName
+        : `Уровень расчёта ${op.resolverTrace.resolverLevel}: ${lvlName}`
+    );
+  }
+  if (op.resolverTrace?.steps && op.resolverTrace.steps.length > 0) {
+    for (const stepText of op.resolverTrace.steps.slice(0, 3)) {
+      if (stepText && stepText !== provenanceSummary) {
+        provenanceSteps.push(stepText);
+      }
+    }
+  } else if (op.stockSourceNote) {
+    provenanceSteps.push(op.stockSourceNote);
+  }
+
   const hints: Record<string, SmartFieldHint1C> = {
     header_date: {
       key: 'header_date',
@@ -807,6 +827,7 @@ export function buildFieldHints1C(op: QueuedOperation): Record<string, SmartFiel
       key: 'amount_vat',
       label: 'Сумма, цена и режим НДС',
       whereValueComesFrom: `${provenanceSummary}${op.vatRate > 0 ? ` · Ставка НДС ${op.vatRate}% (${op.vatRule === 'on_top' ? 'НДС сверху' : 'НДС в сумме'}), сумма НДС: ${vatStr} ₽.` : ' · Операция без НДС.'}`,
+      provenanceSteps: provenanceSteps.length > 0 ? provenanceSteps : undefined,
       actionIn1C:
         op.docType1C === 'РасходМатериалов'
           ? 'В документе «Расход материалов» укажите ТОЛЬКО количество и счёт затрат (20.01 / 26) — сумму себестоимости 1С рассчитает сама по ФИФО / средней при проведении!'

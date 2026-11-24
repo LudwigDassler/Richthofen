@@ -2,10 +2,11 @@
 
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, Copy, HelpCircle, X } from 'lucide-react';
-import { SmartFieldHint1C } from '@/lib/engine';
+import { Check, ChevronLeft, ChevronRight, Copy, HelpCircle, Play, X } from 'lucide-react';
+import { SmartFieldHint1C, WalkthroughStep1C } from '@/lib/engine';
+import { formatDateRu } from '@/lib/formatters';
 
-interface FieldHintPopover1CProps {
+export interface FieldHintPopover1CProps {
   hint?: SmartFieldHint1C;
   enabled: boolean;
   forceOpen?: boolean;
@@ -39,8 +40,8 @@ export function FieldHintPopover1C({
     const btn = triggerRef.current;
     if (!btn) return;
     const rect = btn.getBoundingClientRect();
-    const popWidth = 356;
-    const popEstHeight = popoverRef.current?.offsetHeight || 228;
+    const popWidth = 368;
+    const popEstHeight = popoverRef.current?.offsetHeight || 244;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
 
@@ -166,7 +167,7 @@ export function FieldHintPopover1C({
             onMouseEnter={cancelClose}
             onMouseLeave={scheduleClose}
             style={{ top: coords.top, left: coords.left }}
-            className="fixed z-[90] w-[356px] max-w-[calc(100vw-24px)] rounded-[4px] border border-[#D4B43B] bg-[#FFFDF4] text-[#1F1F1F] shadow-[0_8px_24px_rgba(15,23,42,0.18)] text-[11.5px] leading-snug"
+            className="fixed z-[90] w-[368px] max-w-[calc(100vw-24px)] rounded-[4px] border border-[#D4B43B] bg-[#FFFDF4] text-[#1F1F1F] shadow-[0_8px_24px_rgba(15,23,42,0.18)] text-[11.5px] leading-snug"
           >
             {/* Header bar */}
             <div className="flex items-center justify-between gap-2 px-3 py-1.5 bg-[#FFF4C2] border-b border-[#E8D06B] rounded-t-[3px]">
@@ -220,6 +221,13 @@ export function FieldHintPopover1C({
                 <div className="text-[#1F1F1F] tabular-nums mt-0.5">
                   {hint.whereValueComesFrom}
                 </div>
+                {hint.provenanceSteps && hint.provenanceSteps.length > 0 && (
+                  <ul className="mt-1 space-y-0.5 pl-3 list-disc text-[10.5px] text-[#52461D] tabular-nums">
+                    {hint.provenanceSteps.map((step, i) => (
+                      <li key={i}>{step}</li>
+                    ))}
+                  </ul>
+                )}
               </div>
 
               <div className="pt-1.5 border-t border-[#EFE3B0]">
@@ -240,5 +248,114 @@ export function FieldHintPopover1C({
           document.body
         )}
     </>
+  );
+}
+
+export interface DocumentWalkthroughBar1CProps {
+  steps: WalkthroughStep1C[];
+  walkthroughStep: number | null;
+  onChangeStep: (nextStep: number | null) => void;
+  sourceFileName?: string;
+  operationDate: string;
+}
+
+export function DocumentWalkthroughBar1C({
+  steps,
+  walkthroughStep,
+  onChangeStep,
+  sourceFileName,
+  operationDate,
+}: DocumentWalkthroughBar1CProps) {
+  const currentStepObj =
+    walkthroughStep !== null
+      ? steps.find((s) => s.stepNumber === walkthroughStep) || null
+      : null;
+
+  return (
+    <div className="px-3 py-2 bg-[#ECE9DF] border-t border-[#CFCBC0] text-[11.5px] space-y-1.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() =>
+              walkthroughStep === null ? onChangeStep(1) : onChangeStep(null)
+            }
+            className={`inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[3px] border font-medium whitespace-nowrap transition-colors ${
+              walkthroughStep !== null
+                ? 'border-[#C9A310] bg-[#FFDC33] text-[#1F1F1F] font-semibold'
+                : 'border-[#C4C4C4] bg-white hover:bg-[#FFF8DC] text-[#1F1F1F]'
+            }`}
+          >
+            <Play className="w-3 h-3" strokeWidth={2} />
+            {walkthroughStep !== null ? 'Обход включён' : 'Провести по шагам'}
+          </button>
+
+          {walkthroughStep !== null && (
+            <div className="inline-flex items-center gap-1">
+              <button
+                type="button"
+                disabled={walkthroughStep <= 1}
+                onClick={() => onChangeStep(walkthroughStep - 1)}
+                aria-label="Предыдущий шаг"
+                className="inline-flex items-center gap-0.5 h-[26px] px-2 rounded-[3px] border border-[#C4C4C4] bg-white hover:bg-[#F5F5F5] disabled:opacity-45 text-[#1F1F1F]"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" strokeWidth={1.8} />
+                Назад
+              </button>
+              <button
+                type="button"
+                disabled={walkthroughStep >= steps.length}
+                onClick={() => onChangeStep(walkthroughStep + 1)}
+                aria-label="Следующий шаг"
+                className="inline-flex items-center gap-0.5 h-[26px] px-2 rounded-[3px] border border-[#C4C4C4] bg-white hover:bg-[#F5F5F5] disabled:opacity-45 text-[#1F1F1F]"
+              >
+                Далее
+                <ChevronRight className="w-3.5 h-3.5" strokeWidth={1.8} />
+              </button>
+            </div>
+          )}
+
+          <div className="hidden md:flex flex-wrap items-center gap-1 pl-1">
+            {steps.map((s) => {
+              const active = walkthroughStep === s.stepNumber;
+              return (
+                <button
+                  key={s.stepNumber}
+                  type="button"
+                  onClick={() => onChangeStep(s.stepNumber)}
+                  className={`h-[24px] px-2 rounded-[2px] border text-[11px] whitespace-nowrap transition-colors ${
+                    active
+                      ? 'border-[#B89514] bg-[#FFF2B2] text-[#1F1F1F] font-semibold'
+                      : 'border-transparent hover:border-[#CCC8BC] hover:bg-white/70 text-[#555]'
+                  }`}
+                >
+                  {s.shortTitle}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="text-[11px] text-[#666] tabular-nums truncate max-w-md">
+          Исходник: {sourceFileName || 'Журнал'} · {formatDateRu(operationDate)}
+        </div>
+      </div>
+
+      {currentStepObj && (
+        <div className="px-2.5 py-1.5 rounded-[2px] border border-[#DFCE8B] bg-[#FFFDF2] text-[#2A2410] flex items-center justify-between gap-2">
+          <div>
+            <strong className="font-semibold">{currentStepObj.shortTitle}: </strong>
+            <span>{currentStepObj.instructionSummary}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => onChangeStep(null)}
+            className="text-[11px] text-[#6E5C1E] hover:underline shrink-0"
+          >
+            Завершить обход
+          </button>
+        </div>
+      )}
+    </div>
   );
 }

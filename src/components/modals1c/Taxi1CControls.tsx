@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, SquareStack } from 'lucide-react';
 import { ReferenceEntityKind1C, SmartFieldHint1C } from '@/lib/engine';
 import { formatMoney } from '@/lib/formatters';
-import { FieldHintPopover1C } from '@/components/FieldHintPopover1C';
+import { FieldHintPopover1C } from './FieldHintPopover1C';
 
 export interface ReferencePickerOption1C {
   value: string;

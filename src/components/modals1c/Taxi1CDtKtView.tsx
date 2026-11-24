@@ -6,7 +6,7 @@ import { CHART_OF_ACCOUNTS } from '@/data/chartOfAccounts';
 import { QueuedOperation } from '@/types/accounting';
 import { build1CRegistersImpact, SmartFieldHint1C } from '@/lib/engine';
 import { formatMoney } from '@/lib/formatters';
-import { FieldHintPopover1C } from '@/components/FieldHintPopover1C';
+import { FieldHintPopover1C } from './FieldHintPopover1C';
 
 interface CustomPostingDraftRow {
   debit: string;

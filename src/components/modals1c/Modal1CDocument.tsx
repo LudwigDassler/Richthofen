@@ -4,13 +4,10 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   Copy,
   FileCheck2,
   FileText,
   HelpCircle,
-  Play,
   Printer,
   RefreshCcw,
   Sparkles,
@@ -26,10 +23,11 @@ import {
   ReferenceEntityKind1C,
   resolveTaxi1CLayoutKind,
 } from '@/lib/engine';
-import { formatDateRu, formatMoney } from '@/lib/formatters';
-import { Modal1CReferenceCard } from '@/components/Modal1CReferenceCard';
-import { Taxi1CDtKtView } from '@/components/taxi1c/Taxi1CDtKtView';
-import { Taxi1CLayouts } from '@/components/taxi1c/Taxi1CLayouts';
+import { formatMoney } from '@/lib/formatters';
+import { DocumentWalkthroughBar1C } from './FieldHintPopover1C';
+import { Modal1CReferenceCard } from './Modal1CReferenceCard';
+import { Taxi1CDtKtView } from './Taxi1CDtKtView';
+import { Taxi1CLayouts } from './Taxi1CLayouts';
 
 export function Modal1CDocument() {
   const {
@@ -94,7 +92,7 @@ export function Modal1CDocument() {
   }, [openMenu]);
 
   // Escape closes nested reference card first (handled in capture phase inside Modal1CReferenceCard),
-  // then closes open dropdowns/walkthrough, then closes Modal1CDocument.
+  // then closes open dropdowns, then closes Modal1CDocument.
   useEffect(() => {
     if (!op) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -127,10 +125,6 @@ export function Modal1CDocument() {
   const steps = buildWalkthroughSteps1C(op);
 
   const isEditable = mode === 'trainer';
-  const currentStepObj =
-    walkthroughStep !== null
-      ? steps.find((s) => s.stepNumber === walkthroughStep) || null
-      : null;
 
   const triggerCopiedToast = (val: string) => {
     const trimmed = val.trim();
@@ -229,7 +223,6 @@ export function Modal1CDocument() {
         {/* 1. Authentic 1C:Enterprise 8.3 Window Title Bar */}
         <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-[#EAE7DE] border-b border-[#CFCBC0] select-none">
           <div className="flex items-center gap-2 min-w-0">
-            {/* 1C Document Posted Icon (sheet + green check) */}
             <span
               title={op.includeInProcessing ? 'Документ проведён' : 'Документ записан (не проведён)'}
               className="relative inline-flex items-center justify-center w-5 h-5 rounded-[2px] bg-white border border-[#B8B4A8] shrink-0"
@@ -246,7 +239,7 @@ export function Modal1CDocument() {
             </h2>
           </div>
 
-          {/* Right Controls: Hints On/Off + Mode Sample/Trainer + Close */}
+          {/* Right Controls: Hints On/Off + Mode Sample/Edit + Close */}
           <div className="flex flex-wrap items-center gap-1.5 shrink-0">
             <button
               type="button"
@@ -286,7 +279,7 @@ export function Modal1CDocument() {
                     : 'text-[#555] hover:text-[#1F1F1F]'
                 }`}
               >
-                Тренажёр (правка)
+                Редактировать
               </button>
             </div>
 
@@ -318,7 +311,7 @@ export function Modal1CDocument() {
               <span>Режим «Образец»: клик по любому полю копирует значение для 1С</span>
             ) : (
               <span className="font-medium text-[#7A5900]">
-                Режим «Тренажёр»: изменения пересчитывают проводки и ОСВ
+                Режим «Редактировать»: изменения пересчитывают проводки и ОСВ
               </span>
             )}
           </div>
@@ -607,96 +600,16 @@ export function Modal1CDocument() {
         </div>
 
         {/* 5. Bottom Step-by-Step Walkthrough Strip («Провести по шагам») */}
-        <div className="px-3 py-2 bg-[#ECE9DF] border-t border-[#CFCBC0] text-[11.5px] space-y-1.5">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() =>
-                  walkthroughStep === null
-                    ? applyWalkthroughStep(1)
-                    : applyWalkthroughStep(null)
-                }
-                className={`inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[3px] border font-medium whitespace-nowrap transition-colors ${
-                  walkthroughStep !== null
-                    ? 'border-[#C9A310] bg-[#FFDC33] text-[#1F1F1F] font-semibold'
-                    : 'border-[#C4C4C4] bg-white hover:bg-[#FFF8DC] text-[#1F1F1F]'
-                }`}
-              >
-                <Play className="w-3 h-3" strokeWidth={2} />
-                {walkthroughStep !== null ? 'Обход включён' : 'Провести по шагам'}
-              </button>
-
-              {walkthroughStep !== null && (
-                <div className="inline-flex items-center gap-1">
-                  <button
-                    type="button"
-                    disabled={walkthroughStep <= 1}
-                    onClick={() => applyWalkthroughStep(walkthroughStep - 1)}
-                    aria-label="Предыдущий шаг"
-                    className="inline-flex items-center gap-0.5 h-[26px] px-2 rounded-[3px] border border-[#C4C4C4] bg-white hover:bg-[#F5F5F5] disabled:opacity-45 text-[#1F1F1F]"
-                  >
-                    <ChevronLeft className="w-3.5 h-3.5" strokeWidth={1.8} />
-                    Назад
-                  </button>
-                  <button
-                    type="button"
-                    disabled={walkthroughStep >= steps.length}
-                    onClick={() => applyWalkthroughStep(walkthroughStep + 1)}
-                    aria-label="Следующий шаг"
-                    className="inline-flex items-center gap-0.5 h-[26px] px-2 rounded-[3px] border border-[#C4C4C4] bg-white hover:bg-[#F5F5F5] disabled:opacity-45 text-[#1F1F1F]"
-                  >
-                    Далее
-                    <ChevronRight className="w-3.5 h-3.5" strokeWidth={1.8} />
-                  </button>
-                </div>
-              )}
-
-              <div className="hidden md:flex flex-wrap items-center gap-1 pl-1">
-                {steps.map((s) => {
-                  const active = walkthroughStep === s.stepNumber;
-                  return (
-                    <button
-                      key={s.stepNumber}
-                      type="button"
-                      onClick={() => applyWalkthroughStep(s.stepNumber)}
-                      className={`h-[24px] px-2 rounded-[2px] border text-[11px] whitespace-nowrap transition-colors ${
-                        active
-                          ? 'border-[#B89514] bg-[#FFF2B2] text-[#1F1F1F] font-semibold'
-                          : 'border-transparent hover:border-[#CCC8BC] hover:bg-white/70 text-[#555]'
-                      }`}
-                    >
-                      {s.shortTitle}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="text-[11px] text-[#666] tabular-nums truncate max-w-md">
-              Исходник: {op.sourceFileName || 'Журнал'} · {formatDateRu(op.date)}
-            </div>
-          </div>
-
-          {currentStepObj && (
-            <div className="px-2.5 py-1.5 rounded-[2px] border border-[#DFCE8B] bg-[#FFFDF2] text-[#2A2410] flex items-center justify-between gap-2">
-              <div>
-                <strong className="font-semibold">{currentStepObj.shortTitle}: </strong>
-                <span>{currentStepObj.instructionSummary}</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => applyWalkthroughStep(null)}
-                className="text-[11px] text-[#6E5C1E] hover:underline shrink-0"
-              >
-                Завершить обход
-              </button>
-            </div>
-          )}
-        </div>
+        <DocumentWalkthroughBar1C
+          steps={steps}
+          walkthroughStep={walkthroughStep}
+          onChangeStep={applyWalkthroughStep}
+          sourceFileName={op.sourceFileName}
+          operationDate={op.date}
+        />
       </div>
 
-      {/* 6. Nested 1C Directory Reference Card (❐) */}
+      {/* 6. Nested 1C Directory Reference Card */}
       {openReferenceKind !== null && (
         <Modal1CReferenceCard
           entityKind={openReferenceKind}

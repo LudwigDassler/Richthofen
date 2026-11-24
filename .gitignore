@@ -1,37 +1,47 @@
 # dependencies
 /node_modules
+node_modules/
 /.pnp
 .pnp.js
 
-# next.js
+# next.js & build outputs
 /.next/
+.next/
 /out/
-
-# production
 /build
+/coverage
+
+# local environment variables (never commit secrets)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env*.local
 
 # local 1c sync cache
 .cache/
 
-# misc
-.DS_Store
-*.pem
-
-# debug
+# logs & debug output
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-
-# local env files
-.env*.local
-.env
+pnpm-debug.log*
 
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-node_modules/
-.backup_src/
 
-# browser verification & platform temp files
+# temporary verification scripts, archives & browser captures
+scripts/verify_*.ts
+scripts/tmp_*.ts
+.backup_src/
 .playwright-cli/
 .aistudio/
+project_dump.txt
+*.zip
+
+# OS misc
+.DS_Store
+*.pem
