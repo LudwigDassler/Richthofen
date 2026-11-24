@@ -9,3 +9,4 @@ export * from './postingEngine';
 export * from './auditAndAutofix';
 export * from './productionCalendar2026';
 export * from './semanticIntentAdapter';
+export * from './taxi1cFormMapper';

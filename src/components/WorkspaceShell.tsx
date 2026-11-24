@@ -4,6 +4,7 @@ import React from 'react';
 import { AlertCircle, CheckCircle2, Info, X } from 'lucide-react';
 import { useAccountant } from '@/context/AccountantContext';
 import { Header } from '@/components/Header';
+import { Modal1CDocument } from '@/components/Modal1CDocument';
 import { Tab1DatabaseOsv } from '@/components/Tab1DatabaseOsv';
 import { Tab2ImportPostings } from '@/components/Tab2ImportPostings';
 import { Tab3AuditAutofix } from '@/components/Tab3AuditAutofix';
@@ -63,6 +64,8 @@ export function WorkspaceShell() {
         {activeTab === 'audit_autofix' && <Tab3AuditAutofix />}
         {activeTab === 'export_1c' && <Tab4Export1C />}
       </main>
+
+      <Modal1CDocument />
     </div>
   );
 }

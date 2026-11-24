@@ -24,7 +24,7 @@ function importTextAsOperations(rawText: string, fileName = 'journal.txt') {
 
 test('1 & 2. Writ of execution (76.41) + Payroll alimony deduction + Alimony payout with recipient INN', () => {
   const rawText = [
-    '10.01.2025\tПринят на работу Валеев В.В. на должность инженера с окладом 100 000 руб.',
+    '09.01.2025\tПринят на работу Валеев В.В. на должность инженера с окладом 100 000 руб.',
     '12.01.2025\tПоступил исполнительный лист о взыскании алиментов с Валеева В.В в пользу Валеевой (1/4 дохода)',
     '31.01.2025\tНачислена заработная плата за январь',
     '05.02.2025\tПеречислена задолженность по алиментам Супруге Валеева (ИНН 7816171168)',
@@ -166,8 +166,14 @@ test('5. Promissory notes / financial investment sums multiple principals on 58.
   assert.equal(noteOp.amount, 820000);
   assert.equal(noteOp.vatRule, 'none');
   assert.equal(noteOp.vatAmount, 0);
-  assert.equal(noteOp.entries[0].debit, '58.02');
-  assert.equal(noteOp.entries[0].amount, 820000);
+  assert.equal(noteOp.entries.length, 2);
+  assert.ok(noteOp.entries.every((e) => e.debit === '58.02'));
+  assert.equal(noteOp.entries[0].amount, 280000);
+  assert.equal(noteOp.entries[1].amount, 540000);
+  assert.equal(
+    noteOp.entries.reduce((s, e) => s + e.amount, 0),
+    820000
+  );
 });
 
 test('6. Repeated fuel & lubricants ("смазка для автомобилей") maps to 10.03 and transitions Step 00 from create_new to already_exists', () => {

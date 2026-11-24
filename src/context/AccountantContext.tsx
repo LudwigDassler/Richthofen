@@ -25,6 +25,7 @@ import {
   EgrulCandidate,
   ExportMode1C,
   InlineFieldTarget,
+  OperationCategory,
   OsvReport,
   OsvSourceMode,
   QueuedOperation,
@@ -54,6 +55,8 @@ import {
   buildVirtual1CStateTimeline,
   calculateOsvReport,
   computePendingNewCounterparties,
+  CreateBasedOnOption1C,
+  CreateDocumentPreset1C,
   doesOperationRequireCounterparty,
   generatePeriodClosingOperations,
   get1CCounterpartyAndIndividualOptions,
@@ -100,6 +103,58 @@ interface EgrulBatchResultItem {
   query: string;
   candidates: EgrulCandidate[];
   error?: string;
+}
+
+export interface Modal1CFormSavePatch {
+  date?: string;
+  docNumber?: string;
+  incomingDocNumber?: string;
+  incomingDocDate?: string;
+  description?: string;
+  docType1C?: DocType1CBP30;
+  category?: OperationCategory;
+  documentSubKind1C?: string;
+  counterpartyName?: string;
+  counterpartyKind?: 'ЮридическоеЛицо' | 'ИндивидуальныйПредприниматель' | 'ФизическоеЛицо';
+  counterpartyInn?: string;
+  counterpartyKpp?: string;
+  counterpartyBik?: string;
+  counterpartyBankName?: string;
+  counterpartyBankAccount?: string;
+  contractName?: string;
+  contractNumber?: string;
+  contractDate?: string;
+  warehouseName?: string;
+  nomenclatureName?: string;
+  nomenclatureGroupName?: string;
+  employeeName?: string;
+  employeePosition?: string;
+  employeeChildCount?: number;
+  monthlySalary?: number;
+  quantity?: number;
+  unitPrice?: number;
+  amount?: number;
+  vatRate?: number;
+  vatRule?: 'included' | 'on_top' | 'none';
+  hasInvoiceSF?: boolean;
+  costAccount?: string;
+  materialAccount?: string;
+  expenseItemName?: string;
+  cashFlowItemName?: string;
+  usefulLifeMonths?: number;
+  rpbWriteOffMethod?: 'calendar_days' | 'monthly';
+  rpbTermMonths?: number;
+  rpbStartDate?: string;
+  rpbEndDate?: string;
+  bankConfirmed?: boolean;
+  customPostings?: Array<{
+    debit: string;
+    credit: string;
+    amount?: number;
+    debitSubconto?: string;
+    creditSubconto?: string;
+    description?: string;
+  }>;
 }
 
 function buildDefaultPeriodForYear(
@@ -229,6 +284,19 @@ interface AccountantContextValue {
   ) => void;
   resetNewCounterparty: (counterpartyNameOrKey: string) => number;
   resetWorkbench: () => Promise<void>;
+
+  // 1С:Предприятие 8.3 («Такси») modal state & actions
+  active1CModalOpId: string | null;
+  initial1CModalMode: 'sample' | 'trainer';
+  open1CModalForOperation: (opId: string, mode?: 'sample' | 'trainer') => void;
+  close1CModal: () => void;
+  create1CDocumentFromPreset: (preset: CreateDocumentPreset1C) => string;
+  create1CDocumentBasedOn: (sourceOpId: string, option: CreateBasedOnOption1C) => string;
+  save1CModalFormChanges: (
+    operationId: string,
+    patch: Modal1CFormSavePatch,
+    action: 'save_only' | 'post' | 'post_and_close'
+  ) => void;
 }
 
 let contextSeqCounter = 0;
@@ -283,6 +351,8 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
   const [isProbingAi, setIsProbingAi] = useState<boolean>(false);
   const [reparsingOpId, setReparsingOpId] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeBanner | null>(null);
+  const [active1CModalOpId, setActive1CModalOpId] = useState<string | null>(null);
+  const [initial1CModalMode, setInitial1CModalMode] = useState<'sample' | 'trainer'>('sample');
 
   const setParserMode = useCallback((mode: ParserMode1C) => {
     setParserModeState(mode);
@@ -2782,6 +2852,436 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     pushNotice('info', 'Все локальные данные и кэш выгрузки 1С очищены.');
   }, [reportingYear, pushNotice]);
 
+  const open1CModalForOperation = useCallback(
+    (opId: string, mode: 'sample' | 'trainer' = 'sample') => {
+      setInitial1CModalMode(mode);
+      setActive1CModalOpId(opId);
+    },
+    []
+  );
+
+  const close1CModal = useCallback(() => {
+    setActive1CModalOpId(null);
+  }, []);
+
+  const create1CDocumentFromPreset = useCallback(
+    (preset: CreateDocumentPreset1C): string => {
+      const newId = nextContextSeqId('op1c');
+      const activeDates = operations
+        .filter((o) => o.date && o.date.startsWith(`${reportingYear}-`))
+        .map((o) => o.date)
+        .sort();
+      const defaultDate =
+        activeDates[activeDates.length - 1] ||
+        (periodFilter.dateFrom.startsWith(`${reportingYear}-`)
+          ? periodFilter.dateFrom
+          : `${reportingYear}-01-15`);
+
+      const defaultBik =
+        lastImportStats?.sheetDefaults.defaultBik ||
+        db1C?.organization.bik ||
+        DEFAULT_SBERBANK_BIK;
+      const defaultBankName =
+        lastImportStats?.sheetDefaults.defaultBankName ||
+        db1C?.organization.bankName ||
+        DEFAULT_SBERBANK_NAME;
+
+      const docNum = String(operations.length + 1);
+
+      setOperations((prev) => {
+        if (preset.docType1C === 'ЗакрытиеМесяца' || preset.category === 'closing') {
+          const [, mStr] = defaultDate.split('-');
+          const month = Number(mStr) || 3;
+          const lastDay = new Date(Date.UTC(reportingYear, month, 0)).getUTCDate();
+          const monthEnd = `${reportingYear}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+          const currentOsv = calculateOsvReport({
+            db1C,
+            operations: prev,
+            dateFrom: `${reportingYear}-01-01`,
+            dateTo: monthEnd,
+            reportingYear,
+            balanceAnchorOverride,
+            includeQueuedOperations: true,
+          });
+          const closingRes = generatePeriodClosingOperations({
+            db1C,
+            operations: prev,
+            osv: currentOsv,
+            periodEndDate: monthEnd,
+          });
+          if (closingRes.newOperations.length > 0) {
+            const existingIds = new Set(prev.map((o) => o.id));
+            const merged = [
+              ...prev,
+              ...closingRes.newOperations.filter((co) => !existingIds.has(co.id)),
+            ];
+            const recalc = recalculateOperationsChronologically(merged, db1C, {
+              reportingYear,
+              defaultBik,
+            });
+            const targetClosing =
+              recalc.find(
+                (o) => o.docType1C === 'ЗакрытиеМесяца' || o.category === 'closing'
+              ) || closingRes.newOperations[0];
+            setTimeout(() => {
+              setFocusedOperationId(targetClosing.id);
+              setInitial1CModalMode('sample');
+              setActive1CModalOpId(targetClosing.id);
+            }, 0);
+            return recalc;
+          }
+        }
+
+        const created = bindAndGenerateOperation(
+          {
+            sourceFileName: 'Форма 1С:БП 3.0 (тренажёр)',
+            date: defaultDate,
+            docNumber: docNum,
+            incomingDocNumber: docNum,
+            incomingDocDate: defaultDate,
+            description: preset.defaultDescription,
+            amount: 0,
+            vatRate: preset.defaultVatRate,
+            vatRule: preset.defaultVatRule,
+            hasInvoiceSF: preset.defaultHasInvoiceSF,
+            quantity: 1,
+            unitPrice: 0,
+            materialAccountHint: preset.defaultMaterialAccount,
+            costAccountHint: preset.defaultCostAccount,
+            docTypeHint: preset.docType1C,
+            categoryHint: preset.category,
+          },
+          db1C,
+          newId,
+          {
+            priorOperations: prev.filter((o) => o.includeInProcessing),
+            reportingYear,
+            defaultBik,
+            defaultBankName,
+          }
+        );
+
+        const patched: QueuedOperation = {
+          ...created,
+          docType1C: preset.docType1C,
+          category: preset.category,
+          documentSubKind1C: preset.defaultSubKind1C,
+          hasInvoiceSF: preset.defaultHasInvoiceSF,
+          vatRate: preset.defaultVatRate,
+          vatRule: preset.defaultVatRule,
+        };
+
+        return recalculateOperationsChronologically([...prev, patched], db1C, {
+          reportingYear,
+          defaultBik,
+        });
+      });
+
+      if (preset.docType1C !== 'ЗакрытиеМесяца' && preset.category !== 'closing') {
+        setFocusedOperationId(newId);
+        setInitial1CModalMode('trainer');
+        setActive1CModalOpId(newId);
+      }
+      return newId;
+    },
+    [
+      operations,
+      reportingYear,
+      periodFilter.dateFrom,
+      lastImportStats,
+      db1C,
+      balanceAnchorOverride,
+    ]
+  );
+
+  const create1CDocumentBasedOn = useCallback(
+    (sourceOpId: string, option: CreateBasedOnOption1C): string => {
+      if (option.existingLinkedOpId) {
+        setFocusedOperationId(option.existingLinkedOpId);
+        setInitial1CModalMode('sample');
+        setActive1CModalOpId(option.existingLinkedOpId);
+        return option.existingLinkedOpId;
+      }
+
+      const sourceOp = operations.find((o) => o.id === sourceOpId);
+      if (!sourceOp) return sourceOpId;
+
+      const newId = nextContextSeqId('op1c-based');
+      const defaultBik =
+        lastImportStats?.sheetDefaults.defaultBik ||
+        db1C?.organization.bik ||
+        DEFAULT_SBERBANK_BIK;
+      const defaultBankName =
+        lastImportStats?.sheetDefaults.defaultBankName ||
+        db1C?.organization.bankName ||
+        DEFAULT_SBERBANK_NAME;
+
+      const docNum = String(operations.length + 1);
+      const targetAmount =
+        option.targetCategory === 'os_commissioning' || option.targetCategory === 'materials_writeoff'
+          ? sourceOp.vatRate > 0 && sourceOp.vatAmount
+            ? Math.max(0, Math.round((sourceOp.amount - sourceOp.vatAmount) * 100) / 100)
+            : sourceOp.amount
+          : sourceOp.amount;
+
+      setOperations((prev) => {
+        const created = bindAndGenerateOperation(
+          {
+            sourceFileName: `На основании #${sourceOp.docNumber || 'б/н'}`,
+            date: sourceOp.date,
+            docNumber: docNum,
+            incomingDocNumber: docNum,
+            incomingDocDate: sourceOp.date,
+            description: `${option.label} (на основании док. № ${sourceOp.docNumber || 'б/н'} от ${sourceOp.date})`,
+            amount: targetAmount,
+            rawExcelAmount: targetAmount,
+            vatRate:
+              option.targetCategory === 'os_commissioning' ||
+              option.targetCategory === 'materials_writeoff' ||
+              option.targetCategory === 'payroll_accrual' ||
+              option.targetCategory === 'payroll_payout'
+                ? 0
+                : sourceOp.vatRate,
+            vatRule:
+              option.targetCategory === 'os_commissioning' ||
+              option.targetCategory === 'materials_writeoff' ||
+              option.targetCategory === 'payroll_accrual' ||
+              option.targetCategory === 'payroll_payout'
+                ? 'none'
+                : sourceOp.vatRule,
+            hasInvoiceSF:
+              option.targetDocType1C === 'РеализацияТоваровУслуг' ||
+              option.targetDocType1C === 'ПоступлениеТоваровУслуг' ||
+              option.targetDocType1C === 'СчетФактураВыданный' ||
+              option.targetDocType1C === 'АвансовыйОтчет',
+            counterpartyName: sourceOp.counterpartyName,
+            counterpartyInn: sourceOp.counterpartyInn,
+            counterpartyKpp: sourceOp.counterpartyKpp,
+            contractName: sourceOp.contractName,
+            warehouseName: sourceOp.warehouseName,
+            nomenclatureName: sourceOp.nomenclatureName,
+            employeeName: sourceOp.employeeName,
+            employeePosition: sourceOp.employeePosition,
+            monthlySalary: sourceOp.monthlySalary,
+            quantity: sourceOp.quantity || 1,
+            docTypeHint: option.targetDocType1C,
+            categoryHint: option.targetCategory,
+          },
+          db1C,
+          newId,
+          {
+            priorOperations: prev.filter((o) => o.includeInProcessing),
+            reportingYear,
+            defaultBik,
+            defaultBankName,
+          }
+        );
+
+        const patched: QueuedOperation = {
+          ...created,
+          docType1C: option.targetDocType1C,
+          category: option.targetCategory,
+          linkedSourceOpIds: [sourceOp.id],
+        };
+
+        return recalculateOperationsChronologically([...prev, patched], db1C, {
+          reportingYear,
+          defaultBik,
+        });
+      });
+
+      setFocusedOperationId(newId);
+      setInitial1CModalMode('trainer');
+      setActive1CModalOpId(newId);
+      pushNotice('info', `Создан документ 1С «${option.label}» на основании выбранной операции.`);
+      return newId;
+    },
+    [operations, lastImportStats, db1C, reportingYear, pushNotice]
+  );
+
+  const save1CModalFormChanges = useCallback(
+    (
+      operationId: string,
+      patch: Modal1CFormSavePatch,
+      action: 'save_only' | 'post' | 'post_and_close'
+    ) => {
+      const defaultBik =
+        lastImportStats?.sheetDefaults.defaultBik ||
+        db1C?.organization.bik ||
+        DEFAULT_SBERBANK_BIK;
+      const defaultBankName =
+        lastImportStats?.sheetDefaults.defaultBankName ||
+        db1C?.organization.bankName ||
+        DEFAULT_SBERBANK_NAME;
+
+      setOperations((prev) => {
+        const idx = prev.findIndex((o) => o.id === operationId);
+        if (idx === -1) return prev;
+        const op = prev[idx];
+
+        const nextDocType = patch.docType1C ?? op.docType1C;
+        const nextCategory = patch.category ?? op.category;
+
+        if (nextDocType === 'ЗакрытиеМесяца' || nextCategory === 'closing') {
+          const updatedClosing: QueuedOperation = {
+            ...op,
+            date: patch.date ?? op.date,
+            description: patch.description ?? op.description,
+          };
+          const list = prev.map((item, i) => (i === idx ? updatedClosing : item));
+          return recalculateOperationsChronologically(list, db1C, {
+            reportingYear,
+            defaultBik,
+          });
+        }
+
+        const nextDate = patch.date ?? op.date;
+        const nextQty = patch.quantity !== undefined ? patch.quantity : op.quantity ?? 1;
+        const nextVatRate = patch.vatRate !== undefined ? patch.vatRate : op.vatRate;
+        const rawRule = patch.vatRule ?? op.vatRule;
+        const nextVatRule: 'included' | 'on_top' | 'none' =
+          nextVatRate <= 0 ? 'none' : rawRule;
+
+        let nextAmount = patch.amount !== undefined ? patch.amount : op.amount;
+        const nextUnitPrice =
+          patch.unitPrice !== undefined ? patch.unitPrice : op.unitPrice;
+
+        if (
+          patch.amount === undefined &&
+          (patch.quantity !== undefined ||
+            patch.unitPrice !== undefined ||
+            patch.vatRule !== undefined ||
+            patch.vatRate !== undefined) &&
+          nextUnitPrice !== undefined &&
+          nextUnitPrice > 0 &&
+          nextQty > 0
+        ) {
+          const lineBase = Math.round(nextQty * nextUnitPrice * 100) / 100;
+          nextAmount =
+            nextVatRate > 0 && nextVatRule === 'on_top'
+              ? Math.round(lineBase * (1 + nextVatRate / 100) * 100) / 100
+              : lineBase;
+        }
+
+        const isHireOrder =
+          nextCategory === 'hr_hire' || nextDocType === 'ПриемНаРаботу';
+        const nextSalary =
+          patch.monthlySalary !== undefined ? patch.monthlySalary : op.monthlySalary;
+
+        const priorOps = prev.filter(
+          (o, i) =>
+            o.id !== operationId &&
+            o.includeInProcessing &&
+            (i < idx || (Boolean(nextDate && o.date) && o.date <= nextDate))
+        );
+
+        const rebuilt = bindAndGenerateOperation(
+          {
+            rowKey: op.rowKey,
+            sourceFileName: op.sourceFileName,
+            date: nextDate,
+            docNumber: patch.docNumber ?? op.docNumber,
+            incomingDocNumber: patch.incomingDocNumber ?? op.incomingDocNumber,
+            incomingDocDate: patch.incomingDocDate ?? op.incomingDocDate,
+            description:
+              patch.description ??
+              (patch.nomenclatureName && op.description === 'Бухгалтерская операция, введенная вручную'
+                ? patch.nomenclatureName
+                : op.description),
+            amount: isHireOrder ? 0 : nextAmount,
+            rawExcelAmount: isHireOrder
+              ? nextSalary ?? op.rawExcelAmount
+              : nextAmount > 0
+                ? nextAmount
+                : op.rawExcelAmount,
+            vatRate: nextVatRate,
+            vatRule: nextVatRule,
+            hasInvoiceSF:
+              patch.hasInvoiceSF !== undefined ? patch.hasInvoiceSF : op.hasInvoiceSF,
+            quantity: nextQty,
+            unitPrice: nextUnitPrice,
+            counterpartyName: patch.counterpartyName ?? op.counterpartyName,
+            counterpartyKindHint: patch.counterpartyKind ?? op.counterpartyKind,
+            counterpartyInn: patch.counterpartyInn ?? op.counterpartyInn,
+            counterpartyKpp: patch.counterpartyKpp ?? op.counterpartyKpp,
+            counterpartyBik: patch.counterpartyBik ?? op.counterpartyBik,
+            counterpartyBankName: patch.counterpartyBankName ?? op.counterpartyBankName,
+            counterpartyBankAccount:
+              patch.counterpartyBankAccount ?? op.counterpartyBankAccount,
+            contractName: patch.contractName ?? op.contractName,
+            contractNumber: patch.contractNumber ?? op.contractNumber,
+            contractDate: patch.contractDate ?? op.contractDate,
+            warehouseName: patch.warehouseName ?? op.warehouseName,
+            nomenclatureName: patch.nomenclatureName ?? op.nomenclatureName,
+            nomenclatureGroupHint:
+              patch.nomenclatureGroupName ?? op.nomenclatureGroupName,
+            expenseItemName: patch.expenseItemName ?? op.expenseItemName,
+            cashFlowItemName: patch.cashFlowItemName ?? op.cashFlowItemName,
+            employeeName: patch.employeeName ?? op.employeeName,
+            employeePosition: patch.employeePosition ?? op.employeePosition,
+            employeeChildCount:
+              patch.employeeChildCount !== undefined
+                ? patch.employeeChildCount
+                : op.employeeChildCount,
+            monthlySalary: nextSalary,
+            injuryInsuranceRate: op.injuryInsuranceRate,
+            usefulLifeMonths: patch.usefulLifeMonths ?? op.usefulLifeMonths,
+            depreciationBaseAmount: op.depreciationBaseAmount,
+            rpbWriteOffMethod: patch.rpbWriteOffMethod ?? op.rpbWriteOffMethod,
+            rpbTermMonths: patch.rpbTermMonths ?? op.rpbTermMonths,
+            rpbStartDate: patch.rpbStartDate ?? op.rpbStartDate,
+            rpbEndDate: patch.rpbEndDate ?? op.rpbEndDate,
+            costAccountHint: patch.costAccount ?? op.costAccount,
+            materialAccountHint: patch.materialAccount ?? op.materialAccount,
+            docTypeHint: nextDocType,
+            categoryHint: nextCategory,
+            customPostings: patch.customPostings,
+          },
+          db1C,
+          op.id,
+          {
+            priorOperations: priorOps,
+            reportingYear,
+            defaultBik,
+            defaultBankName,
+          }
+        );
+
+        const nextInclude =
+          patch.bankConfirmed !== undefined
+            ? patch.bankConfirmed
+            : action === 'save_only'
+              ? op.includeInProcessing
+              : true;
+
+        const finalized: QueuedOperation = {
+          ...rebuilt,
+          docType1C: nextDocType,
+          category: nextCategory,
+          documentSubKind1C: patch.documentSubKind1C ?? rebuilt.documentSubKind1C,
+          includeInProcessing: nextInclude,
+          entries: nextInclude ? rebuilt.entries : [],
+        };
+
+        const updatedList = prev.map((item, i) => (i === idx ? finalized : item));
+        return recalculateOperationsChronologically(updatedList, db1C, {
+          reportingYear,
+          defaultBik,
+        });
+      });
+
+      if (action === 'post_and_close') {
+        setActive1CModalOpId(null);
+        pushNotice('success', 'Документ 1С проведён и закрыт · ОСВ и проводки обновлены.');
+      } else if (action === 'post') {
+        pushNotice('success', 'Документ 1С проведён · движения Дт/Кт и ОСВ пересчитаны.');
+      } else {
+        pushNotice('info', 'Документ 1С записан.');
+      }
+    },
+    [db1C, reportingYear, lastImportStats, pushNotice]
+  );
+
   const value = useMemo<AccountantContextValue>(
     () => ({
       hydrated,
@@ -2857,6 +3357,13 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       assignCounterpartyToOperation,
       resetNewCounterparty,
       resetWorkbench,
+      active1CModalOpId,
+      initial1CModalMode,
+      open1CModalForOperation,
+      close1CModal,
+      create1CDocumentFromPreset,
+      create1CDocumentBasedOn,
+      save1CModalFormChanges,
     }),
     [
       hydrated,
@@ -2928,6 +3435,13 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       assignCounterpartyToOperation,
       resetNewCounterparty,
       resetWorkbench,
+      active1CModalOpId,
+      initial1CModalMode,
+      open1CModalForOperation,
+      close1CModal,
+      create1CDocumentFromPreset,
+      create1CDocumentBasedOn,
+      save1CModalFormChanges,
     ]
   );
 
