@@ -1206,7 +1206,7 @@ export function extractRequisitesFromFreeText(
       employeeHint = normalizeEmployeeOrFounderName1C(debtorMatch[1], { obliqueContext: true });
     }
     const benefitMatch = text.match(
-      /в\s+пользу\s+([А-Яа-яЁё][А-Яа-яЁё.\s-]{2,45}?)(?=\s*(?:[,;()]|\.{2,}|$|\s+в\s+размер|\s+в\s+тверд|\s+ежемесячн|\s+на\s+содержан|\s+по\s+|\s+от\s+|\s+инн|\s+\d))/iu
+      /в\s+пользу\s+([А-Яа-яЁё][А-Яа-яЁё.\s-]{2,45}?)(?=\s*(?:[,;()]|\.{2,}|$|\s+в\s+период|\s+с\s+\d|\s+в\s+размер|\s+в\s+тверд|\s+ежемесячн|\s+на\s+содержан|\s+по\s+|\s+от\s+|\s+инн|\s+\d))/iu
     );
     if (benefitMatch && benefitMatch[1]) {
       const cleanedRec = benefitMatch[1].replace(/\.+$/, '').trim();
@@ -1831,7 +1831,10 @@ function mapTabularRowToDraft(params: {
     }
   }
   const effectiveHireStartDate = extracted.hireStartDateHint || actionSeqHireStartDate;
-  const cleanedNomFinal = cleanNomenclatureName1C(nomCell || extracted.nomenclatureHint || '');
+  const cleanedNomFinal = cleanNomenclatureName1C(
+    nomCell || extracted.nomenclatureHint || '',
+    description
+  );
 
   return {
     draft: {

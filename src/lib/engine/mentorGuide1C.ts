@@ -87,6 +87,9 @@ export function getOperationStatusBadgeText(
   if (op.category === 'policy_event') {
     return 'Учётная политика / лимит 1С';
   }
+  if (op.category === 'wip_inventory' || op.docType1C === 'ИнвентаризацияНЗП') {
+    return 'Инвентаризация НЗП 20.01';
+  }
   if (op.category === 'manual' && op.readinessStatus === 'needs_clarification') {
     return 'Уточните счёт Дт/Кт';
   }
@@ -179,6 +182,8 @@ export function mapDocTypeToDefaultCategory(
       return 'os_disposal';
     case 'ИнвентаризацияТоваров':
       return 'inventory_result';
+    case 'ИнвентаризацияНЗП':
+      return 'wip_inventory';
     case 'ОперацияПоПлатежнойКарте':
       return 'acquiring_receipt';
     case 'ВыпускПродукции':

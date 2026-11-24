@@ -1051,6 +1051,13 @@ function OperationEditorCard({
     op.category === 'writ_of_execution' || op.docType1C === 'ИсполнительныйЛист';
   const isContractEvent = op.category === 'contract_event';
   const isPolicyEvent = op.category === 'policy_event';
+  const isWipInventory = op.category === 'wip_inventory' || op.docType1C === 'ИнвентаризацияНЗП';
+  const isManualUserDoc = Boolean(
+    op.isManuallyCreated ||
+      op.sourceFileName === 'Ручной ввод' ||
+      op.sourceFileName === 'Форма 1С:БП 3.0 (тренажёр)' ||
+      op.sourceFileName?.startsWith('На основании #')
+  );
   const isPayrollAccrual =
     op.category === 'payroll_accrual' ||
     op.category === 'insurance_accrual' ||
@@ -1065,6 +1072,7 @@ function OperationEditorCard({
     !isWritOfExecution &&
     !isContractEvent &&
     !isPolicyEvent &&
+    !isWipInventory &&
     !isPayrollAccrual &&
     (op.amountMode === 'required_missing' ||
       (Boolean(op.needsAmount) && op.amountMode !== 'calculated_by_1c'));
@@ -1285,6 +1293,12 @@ function OperationEditorCard({
             {op.docType1C}
           </span>
 
+          {isManualUserDoc && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded-md border border-amber-300/80 dark:border-amber-700/70 bg-amber-50/90 dark:bg-amber-950/40 text-[10.5px] font-medium text-amber-800 dark:text-amber-200 whitespace-nowrap shrink-0">
+              Создан вручную
+            </span>
+          )}
+
           <span className="text-slate-900 dark:text-slate-100 truncate min-w-0">
             {entityDisplaySummary}
           </span>
@@ -1313,16 +1327,20 @@ function OperationEditorCard({
               : isWritOfExecution
                 ? op.alimonyShareLabel || `${op.alimonyRatePercent ?? 25}%`
                 : isContractEvent
-                  ? op.periodicPaymentAmount
+                  ? op.periodicPaymentAmount && op.isRecurringMonthly !== false
                     ? `${formatMoney(op.periodicPaymentAmount, true)} ₽/пер`
                     : 'договор'
-                  : isPolicyEvent
-                    ? 'без проводок'
-                    : op.amount >= 0.01
+                  : isWipInventory
+                    ? op.amount >= 0.01
                       ? `${formatMoney(op.amount, true)} ₽`
-                      : op.amountMode === 'calculated_by_1c'
-                        ? 'авто 1С'
-                        : '0,00 ₽'}
+                      : 'НЗП 20.01'
+                    : isPolicyEvent
+                      ? 'без проводок'
+                      : op.amount >= 0.01
+                        ? `${formatMoney(op.amount, true)} ₽`
+                        : op.amountMode === 'calculated_by_1c'
+                          ? 'авто 1С'
+                          : '0,00 ₽'}
           </span>
 
           {/* Soft rounded-full status pill */}
@@ -1358,6 +1376,19 @@ function OperationEditorCard({
           >
             Форма 1С
           </button>
+
+          {isManualUserDoc && (
+            <button
+              type="button"
+              onClick={onRemove}
+              aria-label={`Удалить документ операции ${index}`}
+              title="Удалить созданный вручную документ и мгновенно пересчитать ОСВ"
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl border border-rose-200 dark:border-rose-800/80 bg-rose-50/70 dark:bg-rose-950/30 hover:bg-rose-100 dark:hover:bg-rose-950/60 text-[11px] font-medium text-rose-700 dark:text-rose-300 whitespace-nowrap transition-colors"
+            >
+              <Trash2 className="w-3 h-3 shrink-0" strokeWidth={1.7} />
+              Удалить документ
+            </button>
+          )}
 
           {(hasAuditIssue || status === 'critical_error' || status === 'needs_clarification') && (
             <button

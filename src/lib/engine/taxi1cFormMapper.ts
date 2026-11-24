@@ -453,9 +453,11 @@ export function resolveTaxi1CLayoutKind(op: QueuedOperation): Taxi1CLayoutKind {
     dt === 'ВыпускПродукции' ||
     dt === 'СчетФактураВыданный' ||
     dt === 'СчетФактураПолученный' ||
+    dt === 'ИнвентаризацияНЗП' ||
     cat === 'customer_invoice' ||
     cat === 'supplier_invoice' ||
     cat === 'production_output' ||
+    cat === 'wip_inventory' ||
     cat === 'advance_vat' ||
     cat === 'vat_deduction'
   ) {
@@ -497,6 +499,7 @@ export function build1CWindowTitle(op: QueuedOperation): {
     ВыпускПродукции: 'Отчет производства за смену',
     ПеремещениеТоваров: 'Перемещение товаров',
     ИнвентаризацияТоваров: 'Инвентаризация товаров',
+    ИнвентаризацияНЗП: 'Инвентаризация НЗП',
     ОперацияПоПлатежнойКарте: 'Операция по платежной карте',
     СчетПокупателю: 'Счет покупателю',
     СчетОтПоставщика: 'Счет от поставщика',
@@ -521,7 +524,8 @@ export function build1CWindowTitle(op: QueuedOperation): {
     op.docType1C === 'СчетПокупателю' ||
     op.docType1C === 'СчетОтПоставщика' ||
     op.docType1C === 'ПриемНаРаботу' ||
-    op.docType1C === 'ИсполнительныйЛист';
+    op.docType1C === 'ИсполнительныйЛист' ||
+    op.docType1C === 'ИнвентаризацияНЗП';
 
   const statusLabel = !op.includeInProcessing
     ? '(помечен / не проведен)'

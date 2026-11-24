@@ -13,6 +13,7 @@ import {
   OperationAmountMode,
   OperationCategory,
   OperationReadinessStatus,
+  OperationWriteoffItem1C,
   ParsedFinancialNoteItem1C,
   QueuedOperation,
   Step01CalculationBreakdown1C,
@@ -32,8 +33,11 @@ import {
   extractCounterpartyFromText1C,
   extractEmployeeTaxDeductions1C,
   extractExplicitCorrespondencesFromText1C,
+  extractMultipleWriteoffItemsFromText1C,
   extractPersonFioFromText1C,
+  extractRpbTermAndDates1C,
   extractUsefulLifeMonths1C,
+  isGenericPlaceholderNomenclature1C,
   normalizeEmployeeOrFounderName1C,
   normalizeLegalEntityName1C,
 } from '@/lib/engine/entityNormalizer1C';
@@ -183,6 +187,7 @@ export function extractAccountableFioFromDescription(text: string): string {
   const cleaned = text.replace(/[«»"'„“”()]/g, ' ').replace(/\s+/g, ' ').trim();
   const patterns = [
     /через\s+([А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)/u,
+    /доверенност\p{L}*\s+(?:сотрудник\p{L}*\s+|работник\p{L}*\s+)?([А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)/u,
     /(?:выдан\p{L}*|перечислен\p{L}*|возвращ\p{L}*|внесен\p{L}*|авансов\p{L}*\s+отч[её]т|отчитал(?:ся|ась))\s+(?:из\s+касс\p{L}*\s+|с\s+р\/с\s+|на\s+карт\p{L}*\s+|подотч[её]т\s+|под\s+отч[её]т\s+|остат\p{L}*\s+подотч[её]тн\p{L}*\s+сумм\s+|сотрудник\p{L}*\s+|работник\p{L}*\s+|каменщик\p{L}*\s+)*([А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)/u,
     /([А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)\s+(?:подотч[её]т|под\s+отч[её]т|на\s+хоз|на\s+командиров)/u,
     /(?:подотч[её]т|под\s+отч[её]т)\s+(?:сотрудник\p{L}*\s+|работник\p{L}*\s+)?([А-ЯЁ][а-яё]{2,}(?:\s+(?:[А-ЯЁ]\.\s*[А-ЯЁ]\.?|[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)))/u,
@@ -619,6 +624,9 @@ export interface RawDraftOperationInput {
   financialNotesList?: ParsedFinancialNoteItem1C[];
   disposedFinancialNoteId?: string;
   periodicPaymentAmount?: number;
+  isRecurringMonthly?: boolean;
+  isManuallyCreated?: boolean;
+  items?: OperationWriteoffItem1C[];
   interestRatePercent?: number;
   counterpartyKindHint?: 'ЮридическоеЛицо' | 'ИндивидуальныйПредприниматель' | 'ФизическоеЛицо';
   costAccountHint?: string;
@@ -947,10 +955,25 @@ export function detectOperationClassification(
     .toLowerCase()
     .replace(/ё/g, 'е');
 
-  // 0a. Organizational / Accounting Policy / WIP Note / Tax Deduction Notice / Reporting Instruction (0 postings)
+  const actionHintLow = (draft.actionSequenceHint ?? '').toLowerCase().replace(/ё/g, 'е');
+
+  // 0a-wip. Work-in-Progress Inventory (Инвентаризация НЗП — 0 postings, fixes 20.01 WIP at month-end closing)
+  if (
+    /(?:отрази|отраж[её]н|зафиксир)\p{L}*\s+незавер[шщ][её]нн\p{L}*\s+производств|(?:^|[^\p{L}])инвентаризаци\p{L}*\s+нзп/iu.test(
+      `${itemAndDescText} ${actionHintLow}`
+    )
+  ) {
+    return {
+      category: 'wip_inventory',
+      docType1C: 'ИнвентаризацияНЗП',
+      documentSubKind1C: 'Инвентаризация незавершённого производства (счёт 20.01)',
+    };
+  }
+
+  // 0a. Organizational / Accounting Policy / Tax Deduction Notice / Reporting Instruction (0 postings)
   if (
     /уведомлени\p{L}*.*(?:имущественн\p{L}*|налогов\p{L}*)\s+вычет/iu.test(itemAndDescText) ||
-    /(?:утвержден|принят|установлен|издан)\p{L}*.*(?:учетн\p{L}*\s+политик|лимит\s+(?:остатка\s+)?касс|штатн\p{L}*\s+расписан|приказ\s+об\s+учетн)|(?:отрази|отраж[её]н)\p{L}*\s+незавер[шщ][её]нн\p{L}*\s+производств|инвентаризаци\p{L}*\s+нзп/iu.test(
+    /(?:утвержден|принят|установлен|издан)\p{L}*.*(?:учетн\p{L}*\s+политик|лимит\s+(?:остатка\s+)?касс|штатн\p{L}*\s+расписан|приказ\s+об\s+учетн)/iu.test(
       itemAndDescText
     ) ||
     (/(?:сформировать|сформирован\p{L}*)\s+(?:осв|оборотно-сальдов|бухгалтерск\p{L}*\s+отчетност)|закрыть\s+период/iu.test(
@@ -2352,6 +2375,17 @@ export function bindAndGenerateOperation(
 
   let contractName = (draft.contractName ?? '').trim();
   let contractNumber = (draft.contractNumber ?? '').trim();
+  if (!contractNumber) {
+    const ctrNumMatch = draft.description.match(
+      /дог(?:овор\p{L}*)?(?:\s+с\s+[^№\n,]{2,50}?)?\s*№\s*([А-Яа-яA-Za-z0-9/-]+)/iu
+    );
+    if (ctrNumMatch?.[1]) {
+      contractNumber = ctrNumMatch[1].trim();
+    }
+  }
+  if (!contractName && contractNumber) {
+    contractName = `Договор № ${contractNumber}`;
+  }
   let contractDate = (draft.contractDate ?? '').trim();
   let nomName = cleanNomenclatureName1C((draft.nomenclatureName ?? '').trim(), draft.description);
   let warehouseName = (draft.warehouseName ?? '').trim();
@@ -2368,7 +2402,19 @@ export function bindAndGenerateOperation(
   const resolvedEmployeePropertyDeduction =
     draft.employeePropertyDeduction ?? parsedDeductionHints.propertyTaxDeduction;
 
-  let resolvedAlimonyRecipientName = (draft.alimonyRecipientName ?? '').trim();
+  let resolvedAlimonyRecipientName = (draft.alimonyRecipientName ?? '')
+    .replace(/\s+(?:в\s+период|с\s+\d|в\s+размере|ежемесячн|по\s+\d).*$/iu, '')
+    .trim();
+  if (resolvedAlimonyRecipientName) {
+    const surToken = resolvedAlimonyRecipientName.split(/\s+/)[0] || '';
+    const surStem = surToken.replace(/а$/iu, '');
+    const hasMascGenitiveInDesc =
+      surStem.length >= 3 &&
+      new RegExp(`в\\s+пользу\\s+${surStem}а(?=$|[^\\p{L}])`, 'iu').test(draft.description);
+    resolvedAlimonyRecipientName = normalizeEmployeeOrFounderName1C(resolvedAlimonyRecipientName, {
+      obliqueContext: hasMascGenitiveInDesc,
+    });
+  }
   let resolvedAlimonyRecipientInn = (draft.alimonyRecipientInn ?? '').replace(/\D/g, '');
   let resolvedAlimonyRatePercent = draft.alimonyRatePercent;
   let resolvedAlimonyShareLabel = draft.alimonyShareLabel;
@@ -2452,8 +2498,18 @@ export function bindAndGenerateOperation(
         )
     );
 
+  const isPowerOfAttorneyOp = /доверенност/iu.test(
+    `${draft.description} ${draft.actionSequenceHint ?? ''}`
+  );
+  if (isPowerOfAttorneyOp && !employeeName) {
+    const poaEmp = extractAccountableFioFromDescription(draft.description);
+    if (poaEmp) employeeName = poaEmp;
+  }
+
   const isStrictlyInternalNoCpOp =
-    !doesSpecAcceptCounterpartySubconto(preClassification.category) && !hasManualSettlementAccounts;
+    !doesSpecAcceptCounterpartySubconto(preClassification.category) &&
+    !hasManualSettlementAccounts &&
+    !isPowerOfAttorneyOp;
 
   // For strictly internal or employee alimony/accountable operations, never pollute commercial counterparty
   if (isStrictlyInternalNoCpOp) {
@@ -2471,7 +2527,8 @@ export function bindAndGenerateOperation(
         'expense_report',
         'accountable_return',
         'employee_settlement_73',
-      ].includes(preClassification.category)
+      ].includes(preClassification.category) &&
+      preClassification.category !== 'writ_of_execution'
     ) {
       employeeName = normalizeEmployeeOrFounderName1C(cpName);
     }
@@ -3584,10 +3641,22 @@ export function bindAndGenerateOperation(
     amountCalculationNote = calculationProvenance;
   }
 
-  // 6a-0a. Management Contract Event ('contract_event') & Accounting Policy Event ('policy_event'): 0 postings on signing
+  // 6a-0a. Management Contract Event ('contract_event'), Accounting Policy ('policy_event'), WIP Inventory ('wip_inventory'): 0 postings
+  if (draft.isRecurringMonthly === false) {
+    resolvedPeriodicPaymentAmount = undefined;
+  }
+
   if (category === 'contract_event') {
-    const terms = extractRecurringContractTerms1C(draft.description);
-    if (!resolvedPeriodicPaymentAmount && terms?.periodicAmount && terms.periodicAmount >= 0.01) {
+    const terms =
+      draft.isRecurringMonthly !== false
+        ? extractRecurringContractTerms1C(draft.description)
+        : null;
+    if (
+      draft.isRecurringMonthly !== false &&
+      !resolvedPeriodicPaymentAmount &&
+      terms?.periodicAmount &&
+      terms.periodicAmount >= 0.01
+    ) {
       resolvedPeriodicPaymentAmount = terms.periodicAmount;
     }
     if (terms?.vatRule && inheritedVatRule === undefined) {
@@ -3608,7 +3677,7 @@ export function bindAndGenerateOperation(
     const perStr = resolvedPeriodicPaymentAmount
       ? ` (ставка ${resolvedPeriodicPaymentAmount.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽/период)`
       : '';
-    calculationProvenance = `Управленческое событие: заключение договора${cpName ? ` с «${cpName}»` : ''}${perStr} — сохранено в карточке «Договоры контрагентов» для последующих актов и оплат (0 проводок при подписании)`;
+    calculationProvenance = `Управленческое событие: заключение договора / регистрация доверенности${cpName ? ` с «${cpName}»` : ''}${perStr} — сохранено в карточке «Договоры контрагентов» для последующих актов и оплат (0 проводок при подписании)`;
     amountCalculationNote = calculationProvenance;
   }
 
@@ -3619,9 +3688,27 @@ export function bindAndGenerateOperation(
     amountCalculationNote = calculationProvenance;
   }
 
+  if (category === 'wip_inventory') {
+    amountMode = effectiveDraftAmount >= 0.01 ? 'explicit' : 'calculated_by_1c';
+    const wipRubLabel =
+      effectiveDraftAmount >= 0.01
+        ? ` на сумму ${effectiveDraftAmount.toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽`
+        : ' в полном объёме накопленных затрат по незавершённому объекту';
+    calculationProvenance = `Инвентаризация НЗП (счёт 20.01): фиксирует остаток незавершённого производства${wipRubLabel} при закрытии месяца (самостоятельных проводок не формирует)`;
+    amountCalculationNote = calculationProvenance;
+  }
+
   if (category === 'customer_invoice' || category === 'supplier_invoice') {
-    const terms = extractRecurringContractTerms1C(draft.description, effectiveDraftAmount);
-    if (!resolvedPeriodicPaymentAmount && terms?.periodicAmount && terms.periodicAmount >= 0.01) {
+    const terms =
+      draft.isRecurringMonthly !== false
+        ? extractRecurringContractTerms1C(draft.description, effectiveDraftAmount)
+        : null;
+    if (
+      draft.isRecurringMonthly !== false &&
+      !resolvedPeriodicPaymentAmount &&
+      terms?.periodicAmount &&
+      terms.periodicAmount >= 0.01
+    ) {
       resolvedPeriodicPaymentAmount = terms.periodicAmount;
     }
     if (terms?.vatRule && inheritedVatRule === undefined) {
@@ -4383,15 +4470,42 @@ export function bindAndGenerateOperation(
     }
   }
 
+  // Resolve multi-item list on materials_writeoff / purchases so concrete cards are preserved
+  const resolvedItems: OperationWriteoffItem1C[] | undefined =
+    draft.items && draft.items.length > 0
+      ? draft.items
+          .map((it) => ({
+            ...it,
+            cleanName: cleanNomenclatureName1C(it.cleanName),
+          }))
+          .filter((it) => it.cleanName && !isGenericPlaceholderNomenclature1C(it.cleanName))
+      : category === 'materials_writeoff'
+        ? (() => {
+            const parsedMulti = extractMultipleWriteoffItemsFromText1C(draft.description);
+            return parsedMulti.length > 0 ? parsedMulti : undefined;
+          })()
+        : undefined;
+
+  if (
+    resolvedItems &&
+    resolvedItems.length > 0 &&
+    (!nomName || isGenericPlaceholderNomenclature1C(nomName))
+  ) {
+    nomName = resolvedItems.map((it) => it.cleanName).join(', ');
+  } else if (nomName && isGenericPlaceholderNomenclature1C(nomName)) {
+    nomName = '';
+  }
+
   // 6e. Internal Stock, Fixed Assets Commissioning & Depreciation Resolution
   if (
     effectiveDraftAmount < 0.01 &&
     ['materials_writeoff', 'workwear_issue', 'warehouse_transfer'].includes(category)
   ) {
     const stockRes = resolveStockBatchCost({
-      itemText: /\([^()]*[,;][^()]*\)/u.test(draft.description)
-        ? draft.description
-        : nomName || draft.description,
+      itemText:
+        (resolvedItems && resolvedItems.length > 1) || /\([^()]*[,;][^()]*\)/u.test(draft.description)
+          ? draft.description
+          : nomName || draft.description,
       preferredAccount: resolvedMaterialAccount,
       accountPrefixFilter: ['10', '41'],
       requestedQty: effectiveQty,
@@ -6737,10 +6851,34 @@ export function bindAndGenerateOperation(
         // Check deterministic COGS strictly from 1C stock balances/receipts (43 for finished goods, 41.01 for goods)
         const isFinishedGoods =
           matchedNomKind === 'Продукция' ||
+          draft.materialAccountHint === '43' ||
           /(?:поставлен|отгружен|реализован|прода)\p{L}*\s+(?:готов\p{L}*\s+|собственн\p{L}*\s+)?продукц|готов\p{L}*\s+продукц|издели/iu.test(
             descLower
           ) ||
           /отчет\p{L}*\s+производств|д\s*43\s*к\s*20/iu.test(draft.actionSequenceHint ?? '');
+        if (isFinishedGoods) {
+          resolvedMaterialAccount = '43';
+          if (!nomName || isGenericPlaceholderNomenclature1C(nomName)) {
+            const knownProdCard =
+              priorVirtualState.nomenclature.find(
+                (n) =>
+                  (n.defaultAccount === '43' || n.itemKind === 'Продукция') &&
+                  !isGenericPlaceholderNomenclature1C(n.name)
+              ) ||
+              (() => {
+                const pProd = priorOps.find(
+                  (p) =>
+                    p.nomenclatureName &&
+                    !isGenericPlaceholderNomenclature1C(p.nomenclatureName) &&
+                    (p.category === 'production_output' || p.materialAccount === '43')
+                );
+                return pProd ? { name: pProd.nomenclatureName } : undefined;
+              })();
+            if (knownProdCard?.name) {
+              nomName = knownProdCard.name;
+            }
+          }
+        }
         const preferredSaleStockAcc = isFinishedGoods ? '43' : matchedNomAccount || '41.01';
         const batchCogs = resolveStockBatchCost({
           itemText: nomName || draft.description,
@@ -7564,38 +7702,44 @@ export function bindAndGenerateOperation(
         }
 
         const completedGroupsInMonth = new Set<string>();
-        const explicitWipGroupsInMonth = new Set<string>();
-        let explicitAllWipInMonth = false;
-        let monthHasProductOrWorkHandover = false;
+        const wipDocsInMonth: Array<{
+          targetGroupKey?: string;
+          explicitRetainAmount?: number;
+        }> = [];
 
         for (const pOp of priorOps) {
           if (!pOp.includeInProcessing || pOp.isDuplicateIn1C) continue;
           if (closeMonthPrefix && !(pOp.date ?? '').startsWith(closeMonthPrefix)) continue;
 
-          if (/незавер[шщ][её]нн\p{L}*\s+производств|(?:^|[^\p{L}])инвентаризаци\p{L}*\s+нзп/iu.test(pOp.description)) {
+          const isWipDoc =
+            pOp.category === 'wip_inventory' ||
+            pOp.docType1C === 'ИнвентаризацияНЗП' ||
+            /незавер[шщ][её]нн\p{L}*\s+производств|(?:^|[^\p{L}])инвентаризаци\p{L}*\s+нзп/iu.test(
+              `${pOp.description} ${pOp.actionSequenceHint ?? ''}`
+            );
+          if (isWipDoc) {
             const wipProj =
               extractCanonicalProjectNomGroup1C(pOp.description) ||
               (pOp.nomenclatureGroupName &&
               !GENERIC_20_SUBCONTOS.has(normalizeGroupKey(pOp.nomenclatureGroupName))
                 ? pOp.nomenclatureGroupName
                 : undefined);
-            if (wipProj) {
-              explicitWipGroupsInMonth.add(normalizeGroupKey(wipProj));
-            } else {
-              explicitAllWipInMonth = true;
-            }
+            const explicitWipRub =
+              pOp.amount && pOp.amount >= 0.01
+                ? round2(pOp.amount)
+                : pOp.rawExcelAmount && pOp.rawExcelAmount >= 0.01
+                  ? round2(pOp.rawExcelAmount)
+                  : undefined;
+            wipDocsInMonth.push({
+              targetGroupKey: wipProj ? normalizeGroupKey(wipProj) : undefined,
+              explicitRetainAmount: explicitWipRub,
+            });
           }
 
           const has9001Or43 = pOp.entries.some(
             (e) => e.credit === '90.01.1' || e.debit === '43' || e.debit === '40'
           );
           if (has9001Or43) {
-            const isPureRent =
-              /аренд\p{L}*\s+(?:лесов|помещен|оборудован)/iu.test(pOp.description) &&
-              !extractCanonicalProjectNomGroup1C(pOp.description);
-            if (!isPureRent) {
-              monthHasProductOrWorkHandover = true;
-            }
             if (pOp.nomenclatureGroupName) {
               completedGroupsInMonth.add(normalizeGroupKey(pOp.nomenclatureGroupName));
             }
@@ -7610,15 +7754,6 @@ export function bindAndGenerateOperation(
               }
             }
           }
-        }
-        // If no month-scoped priorOps exist (e.g. closing against db1C balances directly), check runningOsv 90.01.1
-        if (
-          !monthHasProductOrWorkHandover &&
-          !explicitAllWipInMonth &&
-          priorOps.filter((p) => closeMonthPrefix && (p.date ?? '').startsWith(closeMonthPrefix)).length === 0
-        ) {
-          const rev9001 = runningOsv.leafRows.find((r) => r.code === '90.01.1')?.endCredit ?? 0;
-          if (rev9001 > 0.01) monthHasProductOrWorkHandover = true;
         }
 
         const matchesCompletedGroupByStems = (groupKey: string): boolean => {
@@ -7635,21 +7770,11 @@ export function bindAndGenerateOperation(
           return false;
         };
 
-        const shouldClose20Group = (rawSubcontoLabel: string): boolean => {
+        const resolveEffective20Key = (rawSubcontoLabel: string): string => {
           const head = (rawSubcontoLabel || '').split(' / ')[0].trim();
           const normHead = normalizeGroupKey(head);
           const canonicalHead = extractCanonicalProjectNomGroup1C(head);
-          const effectiveKey = canonicalHead ? normalizeGroupKey(canonicalHead) : normHead;
-
-          if (!GENERIC_20_SUBCONTOS.has(effectiveKey)) {
-            if (matchesCompletedGroupByStems(effectiveKey)) return true;
-            return false; // Named project without handover in this month stays as WIP (НЗП) on 20.01!
-          }
-          // Generic 20.01 subconto: stays open if explicit blanket WIP instruction is present and no work/product handover occurred
-          if (explicitAllWipInMonth && !monthHasProductOrWorkHandover) {
-            return false;
-          }
-          return monthHasProductOrWorkHandover || (!explicitAllWipInMonth && explicitWipGroupsInMonth.size === 0);
+          return canonicalHead ? normalizeGroupKey(canonicalHead) : normHead;
         };
 
         const leafEnd20 = runningOsv.leafRows.find((r) => r.code === '20.01')?.endDebit ?? 0;
@@ -7657,14 +7782,113 @@ export function bindAndGenerateOperation(
           Array.from(extraFrom25ByGroup.values()).reduce((a, b) => a + b, 0)
         );
         const bal20 = round2(leafEnd20 + extraDepr20 + totalExtra25);
+
         if (bal20 > 0.01) {
           const subs20 = (runningOsv.subcontoRowsByAccount?.['20.01'] ?? []).filter(
             (s) => s.endDebit >= 0.01
           );
           const sumSubs20 = round2(subs20.reduce((acc, s) => acc + s.endDebit, 0));
+
+          // Build authentic 1С:БП 3.0 WIP retention map:
+          // - Generic 20.01 subcontos ("Основная номенклатурная группа", etc.) ALWAYS close 100% into 90.02.1 unless an explicit `wip_inventory` targets generic production.
+          // - Explicit `wip_inventory` (`Инвентаризация НЗП`) docs retain exact ruble WIP amount (closing excess into 90.02.1) or 100% of the targeted uncompleted project.
+          // - Explicit named project subcontos without revenue in this month also stay in WIP when no `wip_inventory` overrides them.
+          const activeUncompletedNamedKeys = new Set<string>();
+          for (const s20 of subs20) {
+            const effKey = resolveEffective20Key(s20.subcontoLabel);
+            if (!GENERIC_20_SUBCONTOS.has(effKey) && !matchesCompletedGroupByStems(effKey)) {
+              activeUncompletedNamedKeys.add(effKey);
+            }
+          }
+          for (const g25 of extraFrom25ByGroup.keys()) {
+            const effKey = resolveEffective20Key(g25);
+            if (!GENERIC_20_SUBCONTOS.has(effKey) && !matchesCompletedGroupByStems(effKey)) {
+              activeUncompletedNamedKeys.add(effKey);
+            }
+          }
+
+          const wipHoldByKey = new Map<string, { holdAll: boolean; retainAmount?: number }>();
+          if (wipDocsInMonth.length > 0) {
+            for (const wipDoc of wipDocsInMonth) {
+              if (wipDoc.targetGroupKey) {
+                wipHoldByKey.set(wipDoc.targetGroupKey, {
+                  holdAll: wipDoc.explicitRetainAmount === undefined,
+                  retainAmount: wipDoc.explicitRetainAmount,
+                });
+              } else if (activeUncompletedNamedKeys.size > 0) {
+                // "Отразить НЗП по объекту" binds strictly to the active uncompleted named project(s),
+                // NEVER leaving a false tail on "Основная номенклатурная группа"!
+                for (const namedKey of activeUncompletedNamedKeys) {
+                  wipHoldByKey.set(namedKey, {
+                    holdAll: wipDoc.explicitRetainAmount === undefined,
+                    retainAmount: wipDoc.explicitRetainAmount,
+                  });
+                }
+              } else {
+                const genericKey = resolveEffective20Key(nomGroup);
+                wipHoldByKey.set(genericKey, {
+                  holdAll: wipDoc.explicitRetainAmount === undefined,
+                  retainAmount: wipDoc.explicitRetainAmount,
+                });
+              }
+            }
+          } else {
+            for (const namedKey of activeUncompletedNamedKeys) {
+              wipHoldByKey.set(namedKey, { holdAll: true });
+            }
+          }
+
+          const remainingRetainBudgetByKey = new Map<string, number>();
+          for (const [k, rule] of wipHoldByKey.entries()) {
+            if (!rule.holdAll && rule.retainAmount !== undefined) {
+              remainingRetainBudgetByKey.set(k, rule.retainAmount);
+            }
+          }
+
+          const findMatchingWipKey = (effectiveKey: string): string | undefined => {
+            if (wipHoldByKey.has(effectiveKey)) return effectiveKey;
+            if (GENERIC_20_SUBCONTOS.has(effectiveKey)) {
+              for (const k of wipHoldByKey.keys()) {
+                if (GENERIC_20_SUBCONTOS.has(k)) return k;
+              }
+              return undefined;
+            }
+            const gStems = extractKeywordStems1C(effectiveKey);
+            if (gStems.length === 0) return undefined;
+            for (const k of wipHoldByKey.keys()) {
+              if (GENERIC_20_SUBCONTOS.has(k)) continue;
+              const kStems = extractKeywordStems1C(k);
+              if (kStems.length > 0 && gStems.every((gs) => kStems.some((ks) => stemsMatch1C(gs, ks)))) {
+                return k;
+              }
+            }
+            return undefined;
+          };
+
+          const computeCloseAmountFor20Slice = (
+            rawSubcontoLabel: string,
+            sliceAmount: number
+          ): number => {
+            if (sliceAmount < 0.01) return 0;
+            const effKey = resolveEffective20Key(rawSubcontoLabel);
+            const matchedWipKey = findMatchingWipKey(effKey);
+            if (!matchedWipKey) {
+              return round2(sliceAmount);
+            }
+            const rule = wipHoldByKey.get(matchedWipKey)!;
+            if (rule.holdAll) {
+              return 0;
+            }
+            const budget = remainingRetainBudgetByKey.get(matchedWipKey) ?? 0;
+            const retainedHere = round2(Math.min(sliceAmount, budget));
+            remainingRetainBudgetByKey.set(matchedWipKey, round2(budget - retainedHere));
+            return round2(Math.max(0, sliceAmount - retainedHere));
+          };
+
           if (subs20.length > 0 && Math.abs(sumSubs20 - leafEnd20) < 0.02) {
             for (const s20 of subs20) {
-              if (!shouldClose20Group(s20.subcontoLabel)) continue;
+              const toClose = computeCloseAmountFor20Slice(s20.subcontoLabel, s20.endDebit);
+              if (toClose < 0.01) continue;
               const s20Head = s20.subcontoLabel.split(' / ')[0].trim();
               const targetNomGroup =
                 extractCanonicalProjectNomGroup1C(s20Head) ||
@@ -7672,47 +7896,54 @@ export function bindAndGenerateOperation(
               pushEntry(
                 '90.02.1',
                 '20.01',
-                s20.endDebit,
+                toClose,
                 targetNomGroup,
                 s20.subcontoLabel === 'Без аналитики (субконто)' ? '' : s20.subcontoLabel,
                 `Закрытие счёта 20.01 в себестоимость продаж (${s20.subcontoLabel})`
               );
-              added9002 = round2(added9002 + s20.endDebit);
+              added9002 = round2(added9002 + toClose);
             }
             for (const [g25, amt25] of extraFrom25ByGroup.entries()) {
-              if (amt25 > 0.01 && shouldClose20Group(g25)) {
+              const toClose25 = computeCloseAmountFor20Slice(g25, amt25);
+              if (toClose25 >= 0.01) {
                 pushEntry(
                   '90.02.1',
                   '20.01',
-                  amt25,
+                  toClose25,
                   g25,
                   g25,
                   `Закрытие распределённых ОПР (сч. 25 → 20.01) в себестоимость продаж (${g25})`
                 );
-                added9002 = round2(added9002 + amt25);
+                added9002 = round2(added9002 + toClose25);
               }
             }
-            if (extraDepr20 > 0.01 && shouldClose20Group(nomGroup)) {
+            if (extraDepr20 > 0.01) {
+              const toCloseDepr = computeCloseAmountFor20Slice(nomGroup, extraDepr20);
+              if (toCloseDepr >= 0.01) {
+                pushEntry(
+                  '90.02.1',
+                  '20.01',
+                  toCloseDepr,
+                  nomGroup,
+                  [nomGroup, 'Амортизация'].filter(Boolean).join(' / '),
+                  'Закрытие регламентных расходов 20.01 в себестоимость продаж'
+                );
+                added9002 = round2(added9002 + toCloseDepr);
+              }
+            }
+          } else {
+            const toCloseTotal = computeCloseAmountFor20Slice(nomGroup, bal20);
+            if (toCloseTotal >= 0.01) {
               pushEntry(
                 '90.02.1',
                 '20.01',
-                extraDepr20,
+                toCloseTotal,
                 nomGroup,
-                [nomGroup, 'Амортизация'].filter(Boolean).join(' / '),
-                'Закрытие регламентных расходов 20.01 в себестоимость продаж'
+                nomGroup,
+                'Закрытие счёта 20.01 в себестоимость продаж'
               );
-              added9002 = round2(added9002 + extraDepr20);
+              added9002 = round2(added9002 + toCloseTotal);
             }
-          } else if (shouldClose20Group(nomGroup)) {
-            pushEntry(
-              '90.02.1',
-              '20.01',
-              bal20,
-              nomGroup,
-              nomGroup,
-              'Закрытие счёта 20.01 в себестоимость продаж'
-            );
-            added9002 = round2(added9002 + bal20);
           }
         }
 
@@ -9098,13 +9329,26 @@ export function bindAndGenerateOperation(
     usefulLifeMonths: resolvedUsefulLifeMonths,
     depreciationBaseAmount: resolvedDeprBaseAmount,
     isOsModernization: draft.isOsModernization,
-    rpbTermMonths:
-      category === 'deferred_expense_97'
-        ? draft.rpbTermMonths || resolvedUsefulLifeMonths || 12
-        : draft.rpbTermMonths,
-    rpbWriteOffMethod: draft.rpbWriteOffMethod,
-    rpbStartDate: draft.rpbStartDate,
-    rpbEndDate: draft.rpbEndDate,
+    ...(() => {
+      if (category !== 'deferred_expense_97') {
+        return {
+          rpbTermMonths: draft.rpbTermMonths,
+          rpbWriteOffMethod: draft.rpbWriteOffMethod,
+          rpbStartDate: draft.rpbStartDate,
+          rpbEndDate: draft.rpbEndDate,
+        };
+      }
+      const parsedRpb = extractRpbTermAndDates1C(draft.description, draft.actionSequenceHint);
+      return {
+        rpbTermMonths:
+          draft.rpbTermMonths || parsedRpb.termMonths || resolvedUsefulLifeMonths || 12,
+        rpbWriteOffMethod:
+          draft.rpbWriteOffMethod ||
+          (draft.rpbStartDate && draft.rpbEndDate ? 'calendar_days' : parsedRpb.writeOffMethod),
+        rpbStartDate: draft.rpbStartDate || parsedRpb.startDate,
+        rpbEndDate: draft.rpbEndDate || parsedRpb.endDate,
+      };
+    })(),
     rpbSettlementAccount: draft.rpbSettlementAccount,
     paidImmediatelyVia: draft.paidImmediatelyVia,
     customPostings: draft.customPostings,
@@ -9120,6 +9364,9 @@ export function bindAndGenerateOperation(
     financialNotesList: resolvedFinancialNotesList,
     disposedFinancialNoteId: resolvedDisposedNoteId,
     periodicPaymentAmount: resolvedPeriodicPaymentAmount,
+    isRecurringMonthly: draft.isRecurringMonthly,
+    isManuallyCreated: draft.isManuallyCreated,
+    items: resolvedItems,
     interestRatePercent: resolvedInterestRatePercent,
     actionSequenceHint: draft.actionSequenceHint,
     explicitCorrespondences: inlineCorr.length > 0 ? inlineCorr : undefined,
@@ -9155,6 +9402,7 @@ export function bindAndGenerateOperation(
     contractNumber,
     contractDate,
     nomenclatureName: nomName,
+    items: resolvedItems,
     warehouseName,
     warehouseToName: warehouseToName || undefined,
     expenseItemName,
@@ -9183,17 +9431,22 @@ export function bindAndGenerateOperation(
           (/вступительн\p{L}*\s+взнос.*(?:сро|саморегулируем)/iu.test(descLower) ? '26' : resolvedCostAccount || '26')
         : resolvedCostAccount
       : undefined,
-    materialAccount: [
-      'purchase_materials',
-      'purchase_equipment',
-      'materials_writeoff',
-      'workwear_issue',
-      'os_commissioning',
-      'warehouse_transfer',
-      'inventory_result',
-    ].includes(category)
-      ? resolvedMaterialAccount
-      : undefined,
+    materialAccount:
+      category === 'production_output'
+        ? '43'
+        : category === 'sale_goods' && resolvedMaterialAccount === '43'
+          ? '43'
+          : [
+              'purchase_materials',
+              'purchase_equipment',
+              'materials_writeoff',
+              'workwear_issue',
+              'os_commissioning',
+              'warehouse_transfer',
+              'inventory_result',
+            ].includes(category)
+            ? resolvedMaterialAccount
+            : undefined,
     offBalanceAccount: resolvedOffBalanceAccount,
     isDuplicateIn1C: dupCheck.isDuplicate,
     includeInProcessing: !dupCheck.isDuplicate,
@@ -9339,9 +9592,14 @@ export function recalculateOperationsChronologically(
           usefulLifeMonths: op.usefulLifeMonths,
           depreciationBaseAmount:
             op.amountMode === 'explicit' ? op.depreciationBaseAmount : undefined,
+          isOsModernization: op.isOsModernization,
           rpbTermMonths: op.rpbTermMonths,
+          rpbWriteOffMethod: op.rpbWriteOffMethod,
+          rpbStartDate: op.rpbStartDate,
+          rpbEndDate: op.rpbEndDate,
           rpbSettlementAccount: op.rpbSettlementAccount,
           paidImmediatelyVia: op.paidImmediatelyVia,
+          customPostings: op.customPostings,
           semanticIntent: op.semanticIntent,
           studentExplanation: op.studentExplanation,
           alimonyRecipientName: op.alimonyRecipientName,
@@ -9354,6 +9612,9 @@ export function recalculateOperationsChronologically(
           financialNotesList: op.financialNotesList,
           disposedFinancialNoteId: op.disposedFinancialNoteId,
           periodicPaymentAmount: op.periodicPaymentAmount,
+          isRecurringMonthly: op.isRecurringMonthly,
+          isManuallyCreated: op.isManuallyCreated,
+          items: op.items,
           interestRatePercent: op.interestRatePercent,
           actionSequenceHint: op.actionSequenceHint,
           explicitCorrespondences: op.explicitCorrespondences,
@@ -9522,6 +9783,7 @@ export function isMisclassifiedLegacyOperation(op: QueuedOperation): boolean {
         'deferred_expense_97',
         'reserve_doubtful_63',
         'off_balance_op',
+        'wip_inventory',
       ].includes(natural.category)
     ) {
       return true;
@@ -9578,9 +9840,14 @@ export function rebindOperationsAgainst1CDb(
         injuryInsuranceRate: op.injuryInsuranceRate,
         usefulLifeMonths: op.usefulLifeMonths,
         depreciationBaseAmount: op.depreciationBaseAmount,
+        isOsModernization: op.isOsModernization,
         rpbTermMonths: op.rpbTermMonths,
+        rpbWriteOffMethod: op.rpbWriteOffMethod,
+        rpbStartDate: op.rpbStartDate,
+        rpbEndDate: op.rpbEndDate,
         rpbSettlementAccount: op.rpbSettlementAccount,
         paidImmediatelyVia: op.paidImmediatelyVia,
+        customPostings: op.customPostings,
         semanticIntent: op.semanticIntent,
         studentExplanation: op.studentExplanation,
         alimonyRecipientName: op.alimonyRecipientName,
@@ -9593,6 +9860,9 @@ export function rebindOperationsAgainst1CDb(
         financialNotesList: op.financialNotesList,
         disposedFinancialNoteId: op.disposedFinancialNoteId,
         periodicPaymentAmount: op.periodicPaymentAmount,
+        isRecurringMonthly: op.isRecurringMonthly,
+        isManuallyCreated: op.isManuallyCreated,
+        items: op.items,
         interestRatePercent: op.interestRatePercent,
         actionSequenceHint: op.actionSequenceHint,
         explicitCorrespondences: op.explicitCorrespondences,

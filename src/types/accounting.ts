@@ -255,6 +255,7 @@ export type DocType1CBP30 =
   | 'ВыпускПродукции'
   | 'ПеремещениеТоваров'
   | 'ИнвентаризацияТоваров'
+  | 'ИнвентаризацияНЗП'
   | 'ОперацияПоПлатежнойКарте'
   | 'СчетФактураПолученный'
   | 'СчетФактураВыданный'
@@ -297,6 +298,7 @@ export type OperationCategory =
   | 'production_output'
   | 'warehouse_transfer'
   | 'inventory_result'
+  | 'wip_inventory'
   | 'cash_bank_internal'
   | 'acquiring_receipt'
   | 'special_bank_55'
@@ -561,9 +563,18 @@ export interface FounderShareItem1C {
   amount: number;
 }
 
+export interface OperationWriteoffItem1C {
+  cleanName: string;
+  quantity?: number;
+  unit?: string;
+  unitPrice?: number;
+  account?: string;
+}
+
 export interface QueuedOperation {
   id: string;
   rowKey?: string;
+  isManuallyCreated?: boolean;
   createdAt: string;
   sourceFileName: string;
   date: string;
@@ -619,6 +630,7 @@ export interface QueuedOperation {
   financialNotesList?: ParsedFinancialNoteItem1C[];
   disposedFinancialNoteId?: string;
   periodicPaymentAmount?: number;
+  isRecurringMonthly?: boolean;
   interestRatePercent?: number;
   resolverTrace?: Step01CalculationBreakdown1C;
   linkedSourceOpIds?: string[];
@@ -665,6 +677,7 @@ export interface QueuedOperation {
   contractNumber: string;
   contractDate: string;
   nomenclatureName: string;
+  items?: OperationWriteoffItem1C[];
   warehouseName: string;
   warehouseToName?: string;
   costAccount?: string;
@@ -908,6 +921,7 @@ export interface VirtualDeferredExpense1C {
   totalAmount: number;
   remainingAmount: number;
   termMonths: number;
+  remainingMonths?: number;
   monthlyAmount: number;
   writeOffMethod?: 'calendar_days' | 'monthly';
   startDate?: string;

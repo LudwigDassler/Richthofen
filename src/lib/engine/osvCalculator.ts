@@ -773,11 +773,11 @@ export function calculateOsvReport(params: {
   }
 
   // 3. Unclosed cost & financial result accounts (20.01, 25, 26, 44.01, 90, 91)
-  const effectiveEndYm = (
-    dateTo ||
-    queuedMovements.reduce((mx, m) => (m.date > mx ? m.date : mx), '') ||
-    dbMovements.reduce((mx, m) => (m.date > mx ? m.date : mx), '')
-  ).slice(0, 7);
+  const maxActiveDateInWindow = [
+    ...queuedMovements.map((m) => m.date),
+    ...dbMovements.map((m) => m.date),
+  ].reduce((mx, d) => (d > mx ? d : mx), '');
+  const effectiveEndYm = (maxActiveDateInWindow || dateTo || '').slice(0, 7);
   const hasClosingInEndMonth =
     Boolean(effectiveEndYm) &&
     operations.some(
@@ -801,7 +801,11 @@ export function calculateOsvReport(params: {
         o.includeInProcessing &&
         !o.isDuplicateIn1C &&
         (!dateTo || o.date <= dateTo) &&
-        /незавершенн\p{L}*\s+производств|(?:^|[^\p{L}])нзп(?=$|[^\p{L}])/iu.test(o.description || '')
+        (o.category === 'wip_inventory' ||
+          o.docType1C === 'ИнвентаризацияНЗП' ||
+          /незавер[шщ][её]нн\p{L}*\s+производств|(?:^|[^\p{L}])нзп(?=$|[^\p{L}])/iu.test(
+            o.description || ''
+          ))
     );
     return hasNamedProjectSub || hasExplicitWipPolicy;
   })();

@@ -22,7 +22,9 @@ import {
   cleanNomenclatureName1C,
   extractCharterCapitalInfo1C,
   extractEmployeeTaxDeductions1C,
+  extractRpbTermAndDates1C,
   extractUsefulLifeMonths1C,
+  isGenericPlaceholderNomenclature1C,
   normalizeEmployeeOrFounderName1C,
   normalizeLegalEntityName1C,
   normalizeRussianFioToNominative1C,
@@ -425,19 +427,28 @@ export function extractRecurringContractTerms1C(
   vatRate: number;
 } | null {
   const clean = (text ?? '').replace(/\u00A0/g, ' ');
+  // Never confuse equipment/construction installment terms ("расчет будет производиться в течение 10 мес") with a recurring fee
+  if (/расч[её]т\p{L}*\s+.*в\s+течени\p{L}*\s+\d+\s*мес|рассрочк/iu.test(clean)) {
+    return null;
+  }
+
   const m = clean.match(
-    /(?:ежемесячн\p{L}*|абонентск\p{L}*|арендн\p{L}*\s+плат\p{L}*|в\s+месяц|ежеквартальн\p{L}*)[^0-9]{0,35}?((?:\d{1,3}(?:[\s\u202F]\d{3})+|\d{3,})(?:[.,]\d{1,2})?)\s*(?:руб\.?|₽|р\.?)?/iu
+    /(?:ежемесячн\p{L}*|абонентск\p{L}*|арендн\p{L}*\s+плат\p{L}*|в\s+месяц|\/\s*мес\.?|ежеквартальн\p{L}*|в\s+квартал)[^0-9]{0,35}?((?:\d{1,3}(?:[\s\u202F]\d{3})+|\d{3,})(?:[.,]\d{1,2})?)\s*(?:руб\.?|₽|р\.?)?/iu
   );
-  const fallbackM = !m
-    ? clean.match(
-        /(?:плат\p{L}*|сумм\p{L}*|стоимост\p{L}*)[^0-9]{0,25}?((?:\d{1,3}(?:[\s\u202F]\d{3})+|\d{4,})(?:[.,]\d{1,2})?)\s*(?:руб\.?|₽|р\.?)/iu
-      )
-    : null;
-  const chosen = m || fallbackM;
-  let amt = chosen ? parseFlexRuNumber(chosen[1]) : round2(explicitAmount ?? 0);
+
+  const isExplicitRecurringServiceMultiMonth =
+    !m &&
+    /(?:аренд|субаренд|связ|интернет|телефон|обслуживан|охрана|коммунальн|подписк)/iu.test(clean) &&
+    /(?:на|за)\s+\d{1,2}\s*мес\p{L}*/iu.test(clean);
+
+  if (!m && !isExplicitRecurringServiceMultiMonth) {
+    return null;
+  }
+
+  let amt = m ? parseFlexRuNumber(m[1]) : round2(explicitAmount ?? 0);
   if (amt < 100) return null;
 
-  // If invoice/contract states total for N months ("на 2 месяца", "за 3 мес"), divide into monthly rate
+  // If recurring service invoice/contract states total for N months ("на 2 месяца", "за 3 мес"), divide into monthly rate
   const monthsSpanM = !m ? clean.match(/(?:на|за)\s+(\d{1,2})\s*мес\p{L}*/iu) : null;
   if (monthsSpanM) {
     const months = Number(monthsSpanM[1]);
@@ -546,7 +557,11 @@ export function inferNomenclatureCatalogMeta1C(
     };
   }
 
-  if (category === 'production_output' || explicitMaterialAccount === '43') {
+  if (
+    category === 'production_output' ||
+    explicitMaterialAccount === '43' ||
+    /панел\p{L}*\s+из\s+пвх\s+и\s+мдф|готов\p{L}*\s+продукци/iu.test(lower)
+  ) {
     return {
       itemKind: 'Продукция',
       defaultAccount: '43',
@@ -604,7 +619,7 @@ export function inferNomenclatureCatalogMeta1C(
     category === 'purchase_materials' ||
     category === 'materials_writeoff' ||
     explicitMaterialAccount?.startsWith('10') ||
-    /сырь|материал|запчаст|детал|краск|лак|гвозд|саморез|электрод|проволок|бумаг|картридж|канцтовар/iu.test(
+    /сырь|материал|заготовк|плит[аыу]?\s+пвх|кле[йяю](?=$|[^\p{L}])|фурнитур|запчаст|детал|краск|лак|гвозд|саморез|электрод|проволок|бумаг|картридж|канцтовар/iu.test(
       lower
     )
   ) {
@@ -1293,7 +1308,9 @@ export function advanceVirtual1CStateWithOperation(
   } else if (
     op.counterpartyName &&
     op.counterpartyName.trim() &&
-    op.category !== 'charter_capital'
+    op.category !== 'charter_capital' &&
+    op.category !== 'writ_of_execution' &&
+    op.category !== 'wip_inventory'
   ) {
     const cpParts = op.counterpartyName
       .split(';')
@@ -1304,10 +1321,14 @@ export function advanceVirtual1CStateWithOperation(
         return !(ownOrgKey && k === ownOrgKey);
       });
     const isMultiCp = cpParts.length > 1;
+    const isPoaSupplier =
+      op.category === 'policy_event' &&
+      /доверенност\p{L}*|получени\p{L}*\s+.*в\s+(?:ООО|АО|ПАО|ЗАО|ИП)/iu.test(op.description);
     const roleHint =
       op.category.startsWith('purchase_') ||
       op.category === 'bank_out' ||
-      op.category === 'supplier_invoice'
+      op.category === 'supplier_invoice' ||
+      isPoaSupplier
         ? 'Поставщик / подрядчик'
         : op.category.startsWith('sale_') ||
             op.category === 'bank_in' ||
@@ -1404,38 +1425,33 @@ export function advanceVirtual1CStateWithOperation(
             : op.category.startsWith('purchase_') ||
                 op.category === 'bank_out' ||
                 op.category === 'supplier_invoice' ||
-                op.category === 'contract_event'
+                op.category === 'contract_event' ||
+                isPoaSupplier
               ? 'СПоставщиком'
               : 'Прочее';
         const ctrName = (op.contractName || 'Основной договор').trim();
         const ctrKey = `ctr:${cpNorm}:${ctrKind}:${normalizeSimpleEntityKey1C(ctrName)}`;
+        const allowRecurring = op.isRecurringMonthly !== false;
         const recurring =
-          op.category === 'contract_event' ||
-          op.category === 'customer_invoice' ||
-          op.category === 'supplier_invoice' ||
-          op.periodicPaymentAmount
+          allowRecurring &&
+          (op.category === 'contract_event' ||
+            op.category === 'customer_invoice' ||
+            op.category === 'supplier_invoice' ||
+            Boolean(op.periodicPaymentAmount))
             ? extractRecurringContractTerms1C(op.description, op.amount)
             : null;
-        const multiMonthsMatch =
-          (op.category === 'customer_invoice' ||
-            op.category === 'supplier_invoice' ||
-            op.category === 'contract_event') &&
-          op.amount >= 0.01
-            ? op.description.match(/\bна\s+(\d{1,2})\s*мес/iu)
-            : null;
-        const derivedMonthlyFromInvoice =
-          multiMonthsMatch && Number(multiMonthsMatch[1]) >= 2
-            ? round2(op.amount / Number(multiMonthsMatch[1]))
-            : undefined;
-        const periodicAmt =
-          op.periodicPaymentAmount || recurring?.periodicAmount || derivedMonthlyFromInvoice;
+        const periodicAmt = allowRecurring
+          ? (op.isRecurringMonthly === true && op.periodicPaymentAmount
+              ? op.periodicPaymentAmount
+              : recurring?.periodicAmount || op.periodicPaymentAmount)
+          : undefined;
         const existingCtr = state.contracts.find((c) => c.key === ctrKey);
         if (existingCtr) {
           if (op.contractNumber && !existingCtr.number) existingCtr.number = op.contractNumber;
           if (periodicAmt && periodicAmt > 0) existingCtr.periodicAmount = periodicAmt;
           if (recurring?.periodicity) {
             existingCtr.periodicity = recurring.periodicity;
-          } else if (derivedMonthlyFromInvoice) {
+          } else if (periodicAmt && periodicAmt > 0 && !existingCtr.periodicity) {
             existingCtr.periodicity = 'monthly';
           }
           if (recurring?.vatRule) existingCtr.vatRule = recurring.vatRule;
@@ -1450,7 +1466,8 @@ export function advanceVirtual1CStateWithOperation(
             counterpartyName: cpName,
             contractKind: ctrKind,
             periodicAmount: periodicAmt && periodicAmt > 0 ? periodicAmt : undefined,
-            periodicity: recurring?.periodicity,
+            periodicity:
+              recurring?.periodicity ?? (periodicAmt && periodicAmt > 0 ? 'monthly' : undefined),
             subjectSummary: op.description,
             keywordStems: extractKeywordStems1C(op.description),
             vatRule: recurring?.vatRule ?? op.vatRule,
@@ -1466,10 +1483,12 @@ export function advanceVirtual1CStateWithOperation(
     }
   }
 
-  // 3. Register / update Nomenclature
+  // 3. Register / update Nomenclature (supports multi-item `op.items` and blocks generic placeholders & pure bank orders)
+  const isCombinedInvoiceBankOp =
+    (op.category === 'bank_in' || op.category === 'bank_out') &&
+    /выставлен\p{L}*\s+сч[её]т|выписан\p{L}*\s+сч[её]т|по\s+сч[её]ту\s+за/iu.test(op.description);
   if (
-    op.nomenclatureName &&
-    op.nomenclatureName.trim() &&
+    isCombinedInvoiceBankOp ||
     ![
       'hr_hire',
       'payroll_accrual',
@@ -1479,37 +1498,67 @@ export function advanceVirtual1CStateWithOperation(
       'financial_investment',
       'tax_payment',
       'bank_fee',
+      'bank_in',
+      'bank_out',
       'cash_bank_internal',
       'closing',
       'depreciation_accrual',
       'insurance_accrual',
+      'wip_inventory',
     ].includes(op.category)
   ) {
-    const nomName = op.nomenclatureName.trim();
-    const nomKey = `nom:${normalizeSimpleEntityKey1C(nomName)}`;
-    const meta = inferNomenclatureCatalogMeta1C(nomName, op.category, op.materialAccount);
-    const existingNom = state.nomenclature.find(
-      (n) =>
-        n.key === nomKey ||
-        (nomName.length >= 5 &&
-          normalizeSimpleEntityKey1C(n.name) === normalizeSimpleEntityKey1C(nomName))
-    );
-    if (existingNom) {
-      existingNom.usages = addUsageRef(existingNom.usages, usageRef);
-    } else {
-      state.nomenclature.push({
-        key: nomKey,
-        name: nomName,
-        itemKind: meta.itemKind,
-        unit: meta.unit,
-        defaultAccount: meta.defaultAccount,
-        vatRateLabel: op.vatRule === 'none' || op.vatRate === 0 ? 'Без НДС' : `${op.vatRate}%`,
-        source: 'created_in_operation',
-        firstSeenOpId: op.id,
-        firstSeenOpNumber: opNumber,
-        firstSeenDate: op.date,
-        usages: [usageRef],
-      });
+    const candidateItems: Array<{ name: string; account?: string; unit?: string }> =
+      op.items && op.items.length > 0
+        ? op.items
+            .map((it) => ({
+              name: cleanNomenclatureName1C(it.cleanName),
+              account: it.account || op.materialAccount,
+              unit: it.unit,
+            }))
+            .filter((it) => it.name && !isGenericPlaceholderNomenclature1C(it.name))
+        : op.nomenclatureName &&
+            op.nomenclatureName.trim() &&
+            !isGenericPlaceholderNomenclature1C(op.nomenclatureName)
+          ? [{ name: op.nomenclatureName.trim(), account: op.materialAccount }]
+          : [];
+
+    for (const cand of candidateItems) {
+      const nomName = cand.name.trim();
+      const nomKey = `nom:${normalizeSimpleEntityKey1C(nomName)}`;
+      const meta = inferNomenclatureCatalogMeta1C(nomName, op.category, cand.account);
+      const existingNom = state.nomenclature.find(
+        (n) =>
+          n.key === nomKey ||
+          (nomName.length >= 4 &&
+            normalizeSimpleEntityKey1C(n.name) === normalizeSimpleEntityKey1C(nomName))
+      );
+      if (existingNom) {
+        if (
+          existingNom.defaultAccount === '41.01' &&
+          meta.defaultAccount !== '41.01' &&
+          (meta.defaultAccount.startsWith('10') ||
+            meta.defaultAccount === '43' ||
+            meta.defaultAccount.startsWith('08.04'))
+        ) {
+          existingNom.defaultAccount = meta.defaultAccount;
+          existingNom.itemKind = meta.itemKind;
+        }
+        existingNom.usages = addUsageRef(existingNom.usages, usageRef);
+      } else {
+        state.nomenclature.push({
+          key: nomKey,
+          name: nomName,
+          itemKind: meta.itemKind,
+          unit: cand.unit || meta.unit,
+          defaultAccount: meta.defaultAccount,
+          vatRateLabel: op.vatRule === 'none' || op.vatRate === 0 ? 'Без НДС' : `${op.vatRate}%`,
+          source: 'created_in_operation',
+          firstSeenOpId: op.id,
+          firstSeenOpNumber: opNumber,
+          firstSeenDate: op.date,
+          usages: [usageRef],
+        });
+      }
     }
   }
 
@@ -2453,41 +2502,28 @@ export function advanceVirtual1CStateWithOperation(
       'Расходы будущих периодов'
     ).trim();
     const rpbKey = `rpb:${normalizeSimpleEntityKey1C(rpbLabel)}:${op.id}`;
+    const parsedRpbMeta = extractRpbTermAndDates1C(op.description, op.actionSequenceHint);
     const termMonths = Math.max(
       1,
       Math.min(
         240,
         op.rpbTermMonths && op.rpbTermMonths > 0
           ? Math.round(op.rpbTermMonths)
-          : extractUsefulLifeMonths1C(op.description) || 12
+          : parsedRpbMeta.termMonths || extractUsefulLifeMonths1C(op.description) || 12
       )
     );
     const writeOffAcc: VirtualDeferredExpense1C['writeOffAccount'] =
       op.costAccount === '20.01' || op.costAccount === '44.01' ? op.costAccount : '26';
     const existingRpb = state.deferredExpenses.find((d) => d.key === rpbKey);
     if (!existingRpb) {
-      const explicitPeriodMatch = (op.description || '').match(
-        /(?:с|на\s+период\s+с)\s*(\d{2})[./](\d{2})[./](\d{4})\s*(?:по|до|-|—)\s*(\d{2})[./](\d{2})[./](\d{4})/iu
-      );
-      const parsedStartIso = explicitPeriodMatch
-        ? `${explicitPeriodMatch[3]}-${explicitPeriodMatch[2]}-${explicitPeriodMatch[1]}`
-        : undefined;
-      const parsedEndIso = explicitPeriodMatch
-        ? `${explicitPeriodMatch[6]}-${explicitPeriodMatch[5]}-${explicitPeriodMatch[4]}`
-        : undefined;
+      const parsedStartIso = parsedRpbMeta.startDate;
+      const parsedEndIso = parsedRpbMeta.endDate;
 
-      const hasExplicitEqualMonthlyText =
-        /равными\s+долями|по\s+месяцам|ежемесячно\s+равн|срок\s+списани\p{L}*\s+\d+\s*мес/iu.test(
-          op.description || ''
-        );
-      const hasExplicitCalDaysText = /календарн\p{L}*\s+дн/iu.test(op.description || '');
       const resolvedMethod: 'calendar_days' | 'monthly' =
         op.rpbWriteOffMethod ||
-        (hasExplicitCalDaysText || Boolean(op.rpbEndDate || parsedEndIso)
+        (Boolean(op.rpbStartDate && op.rpbEndDate)
           ? 'calendar_days'
-          : hasExplicitEqualMonthlyText
-            ? 'monthly'
-            : 'calendar_days');
+          : parsedRpbMeta.writeOffMethod);
 
       const startIso = (op.rpbStartDate || parsedStartIso || op.date || '2026-01-01').slice(0, 10);
       const endIso = (
@@ -2503,6 +2539,7 @@ export function advanceVirtual1CStateWithOperation(
         totalAmount: debit9721,
         remainingAmount: debit9721,
         termMonths,
+        remainingMonths: termMonths,
         monthlyAmount: round2(debit9721 / termMonths),
         writeOffMethod: resolvedMethod,
         startDate: startIso,
@@ -2533,6 +2570,10 @@ export function advanceVirtual1CStateWithOperation(
         }
         const used = Math.min(item.remainingAmount, toWriteOff);
         item.remainingAmount = round2(item.remainingAmount - used);
+        item.remainingMonths =
+          item.remainingAmount < 0.01
+            ? 0
+            : Math.max(0, (item.remainingMonths ?? item.termMonths) - 1);
         item.usages = addUsageRef(item.usages, usageRef);
         toWriteOff = round2(toWriteOff - used);
       }
@@ -2542,6 +2583,10 @@ export function advanceVirtual1CStateWithOperation(
           if (item.remainingAmount < 0.01 || toWriteOff < 0.01) continue;
           const used = Math.min(item.remainingAmount, toWriteOff);
           item.remainingAmount = round2(item.remainingAmount - used);
+          item.remainingMonths =
+            item.remainingAmount < 0.01
+              ? 0
+              : Math.max(0, (item.remainingMonths ?? item.termMonths) - 1);
           item.usages = addUsageRef(item.usages, usageRef);
           toWriteOff = round2(toWriteOff - used);
         }
@@ -2587,9 +2632,10 @@ export function computeRpbEndDateFromTermMonths1C(startIso: string, termMonths: 
 
 /**
  * Universal 1С:БП 3.0 monthly RPB (account 97.21) write-off calculator:
+ * - `monthly` (default when term is specified in months/years without calendar date bounds): equal monthly shares
+ *   (`round2(totalAmount / termMonths)`), writing off exact `remainingAmount` in the final month.
  * - `calendar_days`: proportional to active calendar days in `closeDateIso`'s month (`totalAmount * activeDays / totalCalendarDays`),
  *   writing off exact `remainingAmount` to `0.00` in the final month of the RPB period.
- * - `monthly`: equal monthly shares (`totalAmount / termMonths`), writing off exact `remainingAmount` in the final month.
  */
 export function computeMonthlyRpbWriteOff1C(
   rpb: VirtualDeferredExpense1C,
@@ -2608,7 +2654,7 @@ export function computeMonthlyRpbWriteOff1C(
   const monthStartIso = `${closeYm}-01`;
   const monthEndIso = `${closeYm}-${String(daysInCloseMonth).padStart(2, '0')}`;
 
-  const method = rpb.writeOffMethod ?? 'calendar_days';
+  const method = rpb.writeOffMethod ?? 'monthly';
   if (method === 'calendar_days') {
     const startIso = (rpb.startDate || rpb.originDate || `${rpb.startMonth || closeYm}-01`).slice(0, 10);
     const endIso = (
@@ -2641,6 +2687,7 @@ export function computeMonthlyRpbWriteOff1C(
   const elapsedMonthsIdx = closeTotalM - startTotalM;
   if (elapsedMonthsIdx < 0) return 0;
   if (
+    (rpb.remainingMonths !== undefined && rpb.remainingMonths <= 1) ||
     elapsedMonthsIdx >= Math.max(1, rpb.termMonths) - 1 ||
     rpb.remainingAmount <= round2(rpb.monthlyAmount + 0.05)
   ) {
@@ -2851,14 +2898,20 @@ export function buildStep00DirectoryPrepSteps(
         'cash_bank_internal',
       ].includes(op.category)
     ) {
+      const isPoaStepSupplier =
+        op.category === 'policy_event' &&
+        /доверенност\p{L}*|получени\p{L}*\s+.*в\s+(?:ООО|АО|ПАО|ЗАО|ИП)/iu.test(op.description);
       const ctrKind: VirtualContract1C['contractKind'] =
         op.category.startsWith('sale_') ||
         op.category === 'bank_in' ||
+        op.category === 'customer_invoice' ||
         (op.category === 'contract_event' && /покупател|заказчик/iu.test(op.description))
           ? 'СПокупателем'
           : op.category.startsWith('purchase_') ||
               op.category === 'bank_out' ||
-              op.category === 'contract_event'
+              op.category === 'supplier_invoice' ||
+              op.category === 'contract_event' ||
+              isPoaStepSupplier
             ? 'СПоставщиком'
             : 'Прочее';
       const ctrName = (op.contractName || 'Основной договор').trim();
@@ -2895,7 +2948,9 @@ export function buildStep00DirectoryPrepSteps(
           },
           { field: 'Наименование / №', value: ctrName },
           { field: 'Дата договора', value: formatRuDateShort(op.contractDate || op.date) },
-          ...(op.periodicPaymentAmount && op.periodicPaymentAmount > 0
+          ...(op.isRecurringMonthly !== false &&
+          op.periodicPaymentAmount &&
+          op.periodicPaymentAmount > 0
             ? [
                 {
                   field: 'Периодический платёж по договору',
@@ -2908,59 +2963,83 @@ export function buildStep00DirectoryPrepSteps(
     }
   }
 
-  // 3. Nomenclature (Materials, Fuel 10.03, Goods, Equipment, Workwear, Products)
+  // 3. Nomenclature (Materials, Fuel 10.03, Goods, Equipment, Workwear, Products) — supports multi-item `op.items`
+  const isCombinedInvoiceBankStep =
+    (op.category === 'bank_in' || op.category === 'bank_out') &&
+    /выставлен\p{L}*\s+сч[её]т|выписан\p{L}*\s+сч[её]т|по\s+сч[её]ту\s+за/iu.test(op.description);
   if (
-    op.nomenclatureName &&
-    op.nomenclatureName.trim() &&
+    isCombinedInvoiceBankStep ||
     ![
       'hr_hire',
       'payroll_accrual',
       'payroll_payout',
+      'writ_of_execution',
+      'alimony_payout',
       'financial_investment',
       'tax_payment',
       'bank_fee',
+      'bank_in',
+      'bank_out',
       'cash_bank_internal',
       'closing',
       'depreciation_accrual',
       'insurance_accrual',
+      'wip_inventory',
     ].includes(op.category)
   ) {
-    const nomName = op.nomenclatureName.trim();
-    const nomKey = `nom:${normalizeSimpleEntityKey1C(nomName)}`;
-    const meta = inferNomenclatureCatalogMeta1C(nomName, op.category, op.materialAccount);
-    const existingNom = stateBefore.nomenclature.find(
-      (n) =>
-        n.key === nomKey ||
-        normalizeSimpleEntityKey1C(n.name) === normalizeSimpleEntityKey1C(nomName)
-    );
+    const prepNomCandidates: Array<{ name: string; account?: string; unit?: string }> =
+      op.items && op.items.length > 0
+        ? op.items
+            .map((it) => ({
+              name: cleanNomenclatureName1C(it.cleanName),
+              account: it.account || op.materialAccount,
+              unit: it.unit,
+            }))
+            .filter((it) => it.name && !isGenericPlaceholderNomenclature1C(it.name))
+        : op.nomenclatureName &&
+            op.nomenclatureName.trim() &&
+            !isGenericPlaceholderNomenclature1C(op.nomenclatureName)
+          ? [{ name: op.nomenclatureName.trim(), account: op.materialAccount }]
+          : [];
 
-    steps.push({
-      id: `prep-nom-${op.id}`,
-      entityKind: 'nomenclature',
-      entityLabel: 'Номенклатура',
-      entityName: nomName,
-      status: existingNom ? 'already_exists' : 'create_new',
-      originSummary: existingNom
-        ? formatOrigin(existingNom.source, existingNom.firstSeenOpNumber, existingNom.firstSeenDate)
-        : `Новая позиция — создайте в справочнике «Номенклатура» перед добавлением строки в документ`,
-      firstSeenOpNumber: existingNom?.firstSeenOpNumber,
-      firstSeenOpId: existingNom?.firstSeenOpId,
-      firstSeenDate: existingNom?.firstSeenDate,
-      menuPath1C:
-        'Раздел «Справочники» → «Товары и услуги» → «Номенклатура» → кнопка «Создать»',
-      fieldsToFill: [
-        { field: 'Вид номенклатуры', value: meta.itemKind },
-        { field: 'Наименование', value: nomName },
-        { field: 'Единица измерения', value: meta.unit },
-        {
-          field: 'Счёт учёта в 1С',
-          value: `${existingNom?.defaultAccount || meta.defaultAccount}`,
-        },
-        {
-          field: '% НДС по умолчанию',
-          value: op.vatRule === 'none' || op.vatRate === 0 ? 'Без НДС' : `${op.vatRate}%`,
-        },
-      ],
+    prepNomCandidates.forEach((cand, idx) => {
+      const nomName = cand.name.trim();
+      const nomKey = `nom:${normalizeSimpleEntityKey1C(nomName)}`;
+      const meta = inferNomenclatureCatalogMeta1C(nomName, op.category, cand.account);
+      const existingNom = stateBefore.nomenclature.find(
+        (n) =>
+          n.key === nomKey ||
+          normalizeSimpleEntityKey1C(n.name) === normalizeSimpleEntityKey1C(nomName)
+      );
+
+      steps.push({
+        id: prepNomCandidates.length > 1 ? `prep-nom-${op.id}-${idx}` : `prep-nom-${op.id}`,
+        entityKind: 'nomenclature',
+        entityLabel: 'Номенклатура',
+        entityName: nomName,
+        status: existingNom ? 'already_exists' : 'create_new',
+        originSummary: existingNom
+          ? formatOrigin(existingNom.source, existingNom.firstSeenOpNumber, existingNom.firstSeenDate)
+          : `Новая позиция — создайте в справочнике «Номенклатура» перед добавлением строки в документ`,
+        firstSeenOpNumber: existingNom?.firstSeenOpNumber,
+        firstSeenOpId: existingNom?.firstSeenOpId,
+        firstSeenDate: existingNom?.firstSeenDate,
+        menuPath1C:
+          'Раздел «Справочники» → «Товары и услуги» → «Номенклатура» → кнопка «Создать»',
+        fieldsToFill: [
+          { field: 'Вид номенклатуры', value: existingNom?.itemKind || meta.itemKind },
+          { field: 'Наименование', value: nomName },
+          { field: 'Единица измерения', value: cand.unit || existingNom?.unit || meta.unit },
+          {
+            field: 'Счёт учёта в 1С',
+            value: `${existingNom?.defaultAccount || meta.defaultAccount}`,
+          },
+          {
+            field: '% НДС по умолчанию',
+            value: op.vatRule === 'none' || op.vatRate === 0 ? 'Без НДС' : `${op.vatRate}%`,
+          },
+        ],
+      });
     });
   }
 

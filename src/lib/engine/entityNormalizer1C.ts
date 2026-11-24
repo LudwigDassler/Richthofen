@@ -750,9 +750,19 @@ export function extractEmployeeTaxDeductions1C(text: string): ExtractedEmployeeT
   return res;
 }
 
+const BANNED_GENERIC_NOMENCLATURE_RE =
+  /^(?:материал[ыа]?|материл[ыа]?|сырь[её](?:\s+и\s+материалы)?|товар[ыа]?|продукци[яюи]|готов\p{L}*\s+продукци[яюи]|услуг[иа]|работ[ыа]|тмц|мпз|номенклатур[аы]|объект\s+ос|основн(?:ое|ые)\s+средств[оа]|оборудовани[ея]|инвентарь|(?:предоплат|аванс|доплат|оплат|плат[её]ж|перечислен)\p{L}*(?:\s+.*)?)$/iu;
+
+export function isGenericPlaceholderNomenclature1C(rawName?: string): boolean {
+  const s = (rawName ?? '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!s) return true;
+  return BANNED_GENERIC_NOMENCLATURE_RE.test(s);
+}
+
 /**
  * Cleans nomenclature names extracted from operation descriptions so person names,
- * quantities, prices, and prepositional tails never leak into `Справочник.Номенклатура`.
+ * quantities, prices, prepositional tails, and generic placeholders ("Материлы", "Продукция", "Товары")
+ * never leak into `Справочник.Номенклатура`.
  */
 export function cleanNomenclatureName1C(rawName: string, descriptionContext?: string): string {
   let s = (rawName ?? '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
@@ -762,10 +772,14 @@ export function cleanNomenclatureName1C(rawName: string, descriptionContext?: st
     s = '';
   }
 
-  // Strip leading passive verbs FIRST ("Получены от ООО ...", "и оплачен экскаватор-погрузчик", "приобретен принтер")
+  // Strip leading passive verbs FIRST ("Получены от ООО ...", "и оплачен экскаватор-погрузчик", "приобретен принтер", "поставлена продукция 284 шт")
   s = s
     .replace(
-      /^(?:и\s+)?(?:оплачен|оплатил|приобретен|приобрел|получен|получил|поступил|введен|передан|купил|закуплен)\p{L}*(?:\s+и\s+(?:оплачен|оплатил|приобретен|приобрел|получен|получил|поступил)\p{L}*)?\s+/iu,
+      /^(?:и\s+)?(?:оплачен|оплатил|приобретен|приобрел|получен|получил|поступил|введен|передан|поставлен|отгружен|реализован|купил|закуплен)\p{L}*(?:\s+и\s+(?:оплачен|оплатил|приобретен|приобрел|получен|получил|поступил)\p{L}*)?\s+/iu,
+      ''
+    )
+    .replace(
+      /^(?:готов\p{L}*\s+|собственн\p{L}*\s+)?продукци[яюи]\s+(?:в\s+(?:кол-ве|количестве)\s+)?(?:\d+(?:[.,]\d+)?\s*(?:шт|штук|ед|кг|т|м2|м3|п\.?\s*м|компл)\.?\s+)?/iu,
       ''
     )
     .trim();
@@ -786,25 +800,46 @@ export function cleanNomenclatureName1C(rawName: string, descriptionContext?: st
     s = '';
   }
 
-  // If rawName is empty or generic placeholder ("Материалы", "Основное средство"), try extracting specific item from descriptionContext
-  if (
-    descriptionContext &&
-    (!s || /^(?:материалы|товары|основн(?:ое|ые)\s+средств[оа]|оборудование|объект\s+ос|инвентарь)$/iu.test(s))
-  ) {
+  // If rawName is empty or generic placeholder ("Материалы", "Материлы", "Продукция", "Товары", etc.), try extracting concrete item from descriptionContext
+  if (descriptionContext && (!s || isGenericPlaceholderNomenclature1C(s))) {
     const ctx = descriptionContext.replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
-    if (/плит[аыу]\s+пвх/iu.test(ctx) && !/панел/iu.test(ctx)) s = 'Плита ПВХ';
-    else if (/заготовк[ауи]\s+мдф/iu.test(ctx) && !/панел/iu.test(ctx)) s = 'Заготовка МДФ';
-    else if (/оконн(?:ый|ые|ого|ых)\s+блок/iu.test(ctx)) s = 'Оконный блок';
-    else if (/потолочн\p{L}*\s+плит/iu.test(ctx)) s = 'Потолочные плиты';
-    else if (/строительн\p{L}*\s+материал|(?:(?:^|[^\p{L}])обои(?=$|[^\p{L}]).*краск)/iu.test(ctx)) s = 'Строительные материалы';
-    else if (/экскаватор[ау]?-погрузчик/iu.test(ctx)) s = 'Экскаватор-погрузчик';
-    else if (/вагон-бытовк|вагон\s+бытовк/iu.test(ctx)) s = 'Вагон-бытовка';
-    else if (/спецодежд|рабоч\p{L}*\s+одежд/iu.test(ctx)) s = 'Спецодежда';
-    else if (/(?:^|[^\p{L}])кирпич[ау]?(?=$|[^\p{L}])/iu.test(ctx) && !/строительн\p{L}*\s+раствор/iu.test(ctx)) s = 'Кирпич';
-    else if (/(?:^|[^\p{L}])цемент[ау]?(?=$|[^\p{L}])/iu.test(ctx)) s = 'Цемент';
-    else if (/(?:^|[^\p{L}])принтер[ау]?(?=$|[^\p{L}])/iu.test(ctx)) s = 'Принтер';
-    else if (/(?:^|[^\p{L}])плоттер[ау]?(?=$|[^\p{L}])/iu.test(ctx)) s = 'Плоттер';
-    else if (/(?:^|[^\p{L}])минитрактор[ау]?(?=$|[^\p{L}])/iu.test(ctx)) s = 'Минитрактор';
+    const isMaterialWriteoffCtx = /передан\p{L}*\s+матери[а]?л\p{L}*\s+в\s+производств/iu.test(ctx);
+    if (!isMaterialWriteoffCtx && /панел\p{L}*\s+из\s+пвх\s+и\s+мдф/iu.test(ctx)) {
+      s = 'Панель из ПВХ и МДФ';
+    } else if (/плит[аыу]?\s+пвх/iu.test(ctx) && !/панел/iu.test(ctx)) {
+      s = 'Плита ПВХ';
+    } else if (/(?:заготовк[ауи]?|заготовок)\s+мдф/iu.test(ctx) && !/панел/iu.test(ctx)) {
+      s = 'Заготовка МДФ';
+    } else if (/оконн(?:ый|ые|ого|ых)\s+блок/iu.test(ctx)) {
+      s = 'Оконный блок';
+    } else if (/потолочн\p{L}*\s+плит/iu.test(ctx)) {
+      s = 'Потолочные плиты';
+    } else if (/строительн\p{L}*\s+материал|(?:(?:^|[^\p{L}])обои(?=$|[^\p{L}]).*краск)/iu.test(ctx)) {
+      s = 'Строительные материалы';
+    } else if (/экскаватор[ау]?-погрузчик/iu.test(ctx)) {
+      s = 'Экскаватор-погрузчик';
+    } else if (/вагон-бытовк|вагон\s+бытовк/iu.test(ctx)) {
+      s = 'Вагон-бытовка';
+    } else if (/спецодежд|рабоч\p{L}*\s+одежд/iu.test(ctx)) {
+      s = 'Спецодежда';
+    } else if (/(?:^|[^\p{L}])кирпич[ау]?(?=$|[^\p{L}])/iu.test(ctx) && !/строительн\p{L}*\s+раствор/iu.test(ctx)) {
+      s = 'Кирпич';
+    } else if (/(?:^|[^\p{L}])цемент[ау]?(?=$|[^\p{L}])/iu.test(ctx) && !/доставк\p{L}*\s+цемент/iu.test(ctx)) {
+      s = 'Цемент';
+    } else if (/(?:^|[^\p{L}])принтер[ау]?(?=$|[^\p{L}])/iu.test(ctx) && !/плат[её]ж\s+за\s+принтер/iu.test(ctx)) {
+      s = 'Принтер';
+    } else if (/(?:^|[^\p{L}])плоттер[ау]?(?=$|[^\p{L}])/iu.test(ctx)) {
+      s = 'Плоттер';
+    } else if (/(?:^|[^\p{L}])минитрактор[ау]?(?=$|[^\p{L}])/iu.test(ctx)) {
+      s = 'Минитрактор';
+    } else {
+      const prodAfterMatch = ctx.match(
+        /продукци[яюи]\s+(?:в\s+(?:кол-ве|количестве)\s+)?(?:\d+(?:[.,]\d+)?\s*(?:шт|штук|ед)\.?\s+)?([А-ЯЁ][А-ЯЁа-яё0-9\s-]{3,50}?)(?=\s+(?:по\s+цене|вкл\.?\s*ндс|с\s+ндс|без\s+ндс|в\s+кол-ве|в\s+количестве)|[.,;]|$)/u
+      );
+      if (prodAfterMatch?.[1] && !isGenericPlaceholderNomenclature1C(prodAfterMatch[1])) {
+        s = prodAfterMatch[1].trim();
+      }
+    }
   }
 
   if (!s) return '';
@@ -817,7 +852,7 @@ export function cleanNomenclatureName1C(rawName: string, descriptionContext?: st
     .replace(/\s+на\s+основани\p{L}*\s+(?:счет|накладн|акт|упд|договор).*$/iu, '')
     .replace(/\s+в\s+(?:количеств[еа]|кол-ве)\s+\d+.*$/iu, '')
     .replace(/\s+\d+(?:[.,]\d+)?\s*(?:шт|штук|ед|кг|т|тонн|м2|м3|п\.?\s*м|компл)\.?(?=$|[^\p{L}]).*$/iu, '')
-    .replace(/\s+по\s+(?:цене\s+)?\d+.*$/iu, '')
+    .replace(/\s+по\s+(?:цене\s+)?(?:\d+|вкл\.?\s*ндс|с\s+ндс|без\s+ндс).*$/iu, '')
     .replace(/\s+(?:в|у|от|для)\s+(?:ООО|АО|ПАО|ЗАО|ОАО|ИП)(?=$|[^\p{L}]).*$/iu, '')
     .replace(/\s+для\s+(?:производств|бухгалтери|офис|каменщик|сотрудник|работник|сдач)\p{L}*.*$/iu, '')
     .replace(/\s+(?:с\s+ндс|в\s+т\.?\s*ч\.?\s*ндс|вкл\.?\s*ндс|без\s+ндс).*$/iu, '')
@@ -829,15 +864,15 @@ export function cleanNomenclatureName1C(rawName: string, descriptionContext?: st
     return '';
   }
 
-  if (!s) return '';
+  if (!s || isGenericPlaceholderNomenclature1C(s)) return '';
 
   // Canonical singular/nominative forms for common inflected Russian nouns in coursework descriptions
-  const lower = s.toLowerCase();
-  if (/^заготовк[ауи]\s+мдф$/iu.test(s)) return 'Заготовка МДФ';
-  if (/^плит[аыу]\s+пвх$/iu.test(s)) return 'Плита ПВХ';
+  if (/^(?:заготовк[ауи]?|заготовок)\s+мдф$/iu.test(s)) return 'Заготовка МДФ';
+  if (/^плит[аыу]?\s+пвх$/iu.test(s)) return 'Плита ПВХ';
+  if (/^кле[йяю]$/iu.test(s)) return 'Клей';
   if (/^потолочн\p{L}*\s+плит[аыу]?$/iu.test(s)) return 'Потолочные плиты';
   if (/^строительн\p{L}*\s+материал\p{L}*$/iu.test(s)) return 'Строительные материалы';
-  if (/^панел[ьи]\s+из\s+пвх\s+и\s+мдф$/iu.test(s)) return 'Панель из ПВХ и МДФ';
+  if (/^панел[ьией]?\s+из\s+пвх\s+и\s+мдф$/iu.test(s)) return 'Панель из ПВХ и МДФ';
   if (/^оконн(?:ый|ые|ого|ых)\s+блок[аи]?$/iu.test(s)) return 'Оконный блок';
   if (/^(?:\d+\s+)?вагон-бытовк[аиу]|вагон-бытовок$/iu.test(s)) return 'Вагон-бытовка';
   if (/^экскаватор[ау]?-погрузчик[ау]?$/iu.test(s)) return 'Экскаватор-погрузчик';
@@ -851,12 +886,220 @@ export function cleanNomenclatureName1C(rawName: string, descriptionContext?: st
   if (/^лес[ао]\s+строительн\p{L}*$/iu.test(s)) return 'Леса строительные';
   if (/^доск[аиу]$/iu.test(s)) return 'Доски';
   if (/^керамогранитн(?:ые|ая)\s+плит[аыу]$/iu.test(s)) return 'Керамогранитные плиты';
-  if (lower === 'материалы' || lower === 'товары' || lower === 'продукция') {
-    return s.charAt(0).toUpperCase() + s.slice(1);
-  }
 
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
+
+/**
+ * Extracts concrete multi-item material lists from parenthesized or colon-delimited enumerations,
+ * e.g. `(плита ПВХ 284 шт, заготовка МДФ 284 шт, клей 284 шт.)` ->
+ * `[{ cleanName: 'Плита ПВХ', quantity: 284, unit: 'шт', account: '10.01' }, ...]`.
+ */
+export function extractMultipleWriteoffItemsFromText1C(
+  rawText?: string
+): Array<{
+  cleanName: string;
+  quantity?: number;
+  unit?: string;
+  unitPrice?: number;
+  account: '10.01' | '10.03' | '10.08' | '10.09' | '10.10';
+}> {
+  const t = (rawText ?? '').replace(/\u00A0/g, ' ').trim();
+  if (!t) return [];
+
+  const parenBlocks = [...t.matchAll(/\(([^()]{8,400})\)/g)].map((m) => m[1]);
+  const colonIdx = t.indexOf(':');
+  const candidateSources =
+    parenBlocks.length > 0
+      ? parenBlocks
+      : colonIdx >= 0 && colonIdx < t.length - 8
+        ? [t.slice(colonIdx + 1)]
+        : [];
+
+  for (const block of candidateSources) {
+    if (!block.includes(',') && !block.includes(';')) continue;
+    const parts = block
+      .split(/[,;]+/)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    if (parts.length < 2) continue;
+
+    const parsedItems: Array<{
+      cleanName: string;
+      quantity?: number;
+      unit?: string;
+      unitPrice?: number;
+      account: '10.01' | '10.03' | '10.08' | '10.09' | '10.10';
+    }> = [];
+    const seen = new Set<string>();
+
+    for (const part of parts) {
+      if (/\d\s*%|инн|кпп|бик|оклад|детей|алимент/iu.test(part)) continue;
+      const qtyUnitM = part.match(
+        /(\d+(?:[.,]\d+)?)\s*(шт|штук|ед|кг|т|тонн|л|м2|м3|кв\.?\s*м|куб\.?\s*м|п\.?\s*м|м|рулон\p{L}*|уп\p{L}*|компл\p{L}*)\.?(?=$|[^\p{L}])/iu
+      );
+      const priceM = part.match(
+        /по\s+(?:цене\s+)?(\d+(?:[\s]\d{3})*(?:[.,]\d{1,2})?)\s*(?:₽|руб|р\.?)?/iu
+      );
+      const rawItemHead = qtyUnitM ? part.slice(0, qtyUnitM.index).trim() : part;
+      const cleaned = cleanNomenclatureName1C(rawItemHead);
+      if (!cleaned || isGenericPlaceholderNomenclature1C(cleaned)) continue;
+
+      const key = cleaned.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const qty = qtyUnitM ? Number(qtyUnitM[1].replace(',', '.')) : undefined;
+      const unitRaw = qtyUnitM?.[2]?.toLowerCase() ?? 'шт';
+      const unit = unitRaw.startsWith('штук') ? 'шт' : unitRaw;
+      const unitPrice = priceM
+        ? Number(priceM[1].replace(/\s+/g, '').replace(',', '.'))
+        : undefined;
+
+      const lowName = cleaned.toLowerCase();
+      const account: '10.01' | '10.03' | '10.08' | '10.09' | '10.10' =
+        /спецодежд|каск|перчатк/iu.test(lowName)
+          ? '10.10'
+          : /принтер|бумаг|канц|инвентар/iu.test(lowName)
+            ? '10.09'
+            : /бензин|дизель|гсм|топлив/iu.test(lowName)
+              ? '10.03'
+              : /кирпич|цемент|бетон|щебн|песок|арматур|обои|краск|плитк|шпаклев|штукатур|сух\p{L}*\s+смес/iu.test(
+                    lowName
+                  )
+                ? '10.08'
+                : '10.01';
+
+      parsedItems.push({
+        cleanName: cleaned,
+        quantity: qty && Number.isFinite(qty) && qty > 0 ? qty : undefined,
+        unit,
+        unitPrice: unitPrice && Number.isFinite(unitPrice) && unitPrice > 0 ? unitPrice : undefined,
+        account,
+      });
+    }
+
+    if (parsedItems.length >= 2) {
+      return parsedItems;
+    }
+  }
+
+  return [];
+}
+
+export interface ExtractedRpbScheduleTerms1C {
+  termMonths: number;
+  hasExplicitTerm: boolean;
+  writeOffMethod: 'monthly' | 'calendar_days';
+  startDate?: string;
+  endDate?: string;
+}
+
+/**
+ * Extracts exact RPB (`97.21`) term and write-off method from BOTH `description` and `actionSequenceHint`:
+ * - Exact date range `с ДД.ММ.ГГГГ по ДД.ММ.ГГГГ` or explicit «по календарным дням» -> `writeOffMethod: 'calendar_days'`
+ * - Otherwise (`32 мес.`, `24 мес.`, `2 года 8 мес.`, or default term) -> `writeOffMethod: 'monthly'` (equal monthly shares)
+ * - Default term when not explicitly stated: `32` months for SRO entrance fee (`вступительный взнос в СРО`), `12` months for other RPB.
+ */
+export function extractRpbTermAndDates1C(
+  description?: string,
+  actionSequenceHint?: string
+): ExtractedRpbScheduleTerms1C {
+  const combined = `${description ?? ''} ${actionSequenceHint ?? ''}`
+    .replace(/\u00A0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const dateRangeMatch = combined.match(
+    /(?:^|[^\p{L}])(?:с|на\s+период\s+с)\s*(\d{2})[./](\d{2})[./](\d{4})\s*(?:по|до|-|—)\s*(\d{2})[./](\d{2})[./](\d{4})/iu
+  );
+  const startDate = dateRangeMatch
+    ? `${dateRangeMatch[3]}-${dateRangeMatch[2]}-${dateRangeMatch[1]}`
+    : undefined;
+  const endDate = dateRangeMatch
+    ? `${dateRangeMatch[6]}-${dateRangeMatch[5]}-${dateRangeMatch[4]}`
+    : undefined;
+
+  const hasCalendarDaysPhrase = /календарн\p{L}*\s+дн/iu.test(combined);
+  const hasEqualMonthlyPhrase =
+    /равными\s+долями|по\s+месяцам|ежемесячно\s+равн/iu.test(combined);
+
+  let explicitMonths: number | undefined;
+
+  // 1) Combined years + optional months: "2 года 8 мес.", "2 г. и 8 месяцев", "на 3 года"
+  const ymCombo = combined.match(
+    /(?:срок\p{L}*|на\s+срок|на|в\s+течение|период\p{L}*\s+списани\p{L}*|=|\()\s*(\d{1,2})\s*(?:год[ао]?|лет|г\.)(?:\s*(?:и\s*)?(\d{1,2})\s*(?:мес\p{L}*|м\.))?/iu
+  );
+  if (ymCombo) {
+    const yrs = Number(ymCombo[1]) || 0;
+    const mos = ymCombo[2] ? Number(ymCombo[2]) || 0 : 0;
+    const total = yrs * 12 + mos;
+    if (total >= 1 && total <= 240) {
+      explicitMonths = total;
+    }
+  }
+
+  // 2) Direct months count: "32 мес.", "на 24 месяца", "в течение 32 месяцев", "срок списания 18 мес"
+  if (!explicitMonths) {
+    const mMatch = combined.match(
+      /(?:срок\p{L}*(?:\s+списани\p{L}*|\s+полезн\p{L}*)?|на|в\s+течение|период\p{L}*|=|\(|—|-)\s*(\d{1,3})\s*(?:мес(?:яц\p{L}*|\.)?)(?=$|[^\p{L}])/iu
+    ) || combined.match(/(?:^|[^\d])(\d{1,3})\s*(?:мес(?:яц\p{L}*|\.)?)(?=$|[^\p{L}])/iu);
+    if (mMatch) {
+      const mVal = Number(mMatch[1]);
+      if (mVal >= 1 && mVal <= 240) {
+        explicitMonths = mVal;
+      }
+    }
+  }
+
+  // 3) Month range "с 03.2026 по 10.2028"
+  if (!explicitMonths && !dateRangeMatch) {
+    const monthSpanM = combined.match(
+      /(?:с|на\s+период\s+с)\s*(\d{2})[./](\d{4})\s*(?:по|до|-|—)\s*(\d{2})[./](\d{4})/iu
+    );
+    if (monthSpanM) {
+      const m1 = Number(monthSpanM[1]);
+      const y1 = Number(monthSpanM[2]);
+      const m2 = Number(monthSpanM[3]);
+      const y2 = Number(monthSpanM[4]);
+      const span = (y2 - y1) * 12 + (m2 - m1) + 1;
+      if (span >= 1 && span <= 240) {
+        explicitMonths = span;
+      }
+    }
+  }
+
+  // 4) Derive approximate months from explicit DD.MM.YYYY..DD.MM.YYYY range if no month count stated
+  if (!explicitMonths && startDate && endDate) {
+    const sy = Number(startDate.slice(0, 4));
+    const sm = Number(startDate.slice(5, 7));
+    const ey = Number(endDate.slice(0, 4));
+    const em = Number(endDate.slice(5, 7));
+    const approxM = Math.max(1, (ey - sy) * 12 + (em - sm) + (endDate.slice(8, 10) >= startDate.slice(8, 10) ? 1 : 0));
+    if (approxM >= 1 && approxM <= 240) {
+      explicitMonths = approxM;
+    }
+  }
+
+  const isSroEntrance = /вступительн\p{L}*\s+взнос.*(?:сро|саморегулируем)/iu.test(combined);
+  const defaultMonths = isSroEntrance ? 32 : 12;
+  const termMonths = explicitMonths ?? defaultMonths;
+
+  const writeOffMethod: 'monthly' | 'calendar_days' = hasEqualMonthlyPhrase
+    ? 'monthly'
+    : hasCalendarDaysPhrase || Boolean(startDate && endDate)
+      ? 'calendar_days'
+      : 'monthly';
+
+  return {
+    termMonths,
+    hasExplicitTerm: explicitMonths !== undefined,
+    writeOffMethod,
+    startDate,
+    endDate,
+  };
+}
+
 
 
 function parseOptionalCorrespondenceAmount(fragment: string): number | undefined {

@@ -11,6 +11,7 @@ import {
   Printer,
   RefreshCcw,
   Sparkles,
+  Trash2,
   X,
 } from 'lucide-react';
 import { Modal1CFormSavePatch, useAccountant } from '@/context/AccountantContext';
@@ -39,6 +40,7 @@ export function Modal1CDocument() {
     close1CModal,
     save1CModalFormChanges,
     create1CDocumentBasedOn,
+    removeOperation,
     runSingleOperationAutoFix,
     rebuildSingleOperationPostings,
     jumpToOperation,
@@ -237,6 +239,15 @@ export function Modal1CDocument() {
             <h2 className="text-[13px] font-semibold text-[#1F1F1F] truncate">
               {titleInfo.fullTitle}
             </h2>
+
+            {(op.isManuallyCreated ||
+              op.sourceFileName === 'Ручной ввод' ||
+              op.sourceFileName === 'Форма 1С:БП 3.0 (тренажёр)' ||
+              op.sourceFileName?.startsWith('На основании #')) && (
+              <span className="inline-flex items-center h-[20px] px-2 rounded-[3px] border border-[#C9A82C] bg-[#FFF4C2] text-[11px] font-medium text-[#523E00] whitespace-nowrap shrink-0">
+                Создан вручную
+              </span>
+            )}
           </div>
 
           {/* Right Controls: Hints On/Off + Mode Sample/Edit + Close */}
@@ -349,6 +360,21 @@ export function Modal1CDocument() {
             >
               Провести
             </button>
+
+            {(op.isManuallyCreated ||
+              op.sourceFileName === 'Ручной ввод' ||
+              op.sourceFileName === 'Форма 1С:БП 3.0 (тренажёр)' ||
+              op.sourceFileName?.startsWith('На основании #')) && (
+              <button
+                type="button"
+                onClick={() => removeOperation(op.id)}
+                title="Удалить созданный вручную документ и мгновенно пересчитать ОСВ"
+                className="inline-flex items-center gap-1 h-[28px] px-2.5 rounded-[3px] border border-[#D89A98] bg-[#FFF2F2] hover:bg-[#FFE3E3] text-[12px] font-medium text-[#9F2420] whitespace-nowrap transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5 shrink-0" strokeWidth={1.8} />
+                Удалить документ
+              </button>
+            )}
 
             {/* Дт/Кт Toggle Button */}
             <button

@@ -11,6 +11,9 @@ import {
 } from '@/lib/engine/documentSpecs1C';
 import {
   cleanNomenclatureName1C,
+  extractMultipleWriteoffItemsFromText1C,
+  extractRpbTermAndDates1C,
+  isGenericPlaceholderNomenclature1C,
   normalizeEmployeeOrFounderName1C,
   normalizeLegalEntityName1C,
 } from '@/lib/engine/entityNormalizer1C';
@@ -115,11 +118,21 @@ export interface ParsedOperationIntent {
     nomenclatureGroup?: string;
   };
 
+  // Многострочный подбор конкретных материалов / ТМЦ (например: Плита ПВХ, Заготовка МДФ, Клей)
+  items?: Array<{
+    cleanName: string;
+    quantity?: number;
+    unit?: string;
+    unitPrice?: number;
+    account: SemanticNomenclatureAccount;
+  }>;
+
   // Намерение по сумме (БЕЗ вычисления сложных остатков самой LLM!)
   amountIntent: {
     mode: SemanticAmountMode;
     advancePercent?: number;
     orderTotalAmount?: number;
+    isRecurringMonthly?: boolean;
   };
 
   // Намерение по НДС
@@ -257,7 +270,7 @@ export const ParsedOperationIntentSchema = z.object({
 
   nomenclature: z
     .object({
-      canonicalName: z.string().min(1),
+      canonicalName: z.string(),
       quantity: z.number().nonnegative().optional(),
       unit: z.string().optional(),
       unitPrice: z.number().nonnegative().optional(),
@@ -266,10 +279,23 @@ export const ParsedOperationIntentSchema = z.object({
     })
     .optional(),
 
+  items: z
+    .array(
+      z.object({
+        cleanName: z.string().min(1),
+        quantity: z.number().nonnegative().optional(),
+        unit: z.string().optional(),
+        unitPrice: z.number().nonnegative().optional(),
+        account: z.enum(SEMANTIC_NOMENCLATURE_ACCOUNTS),
+      })
+    )
+    .optional(),
+
   amountIntent: z.object({
     mode: z.enum(SEMANTIC_AMOUNT_MODES),
     advancePercent: z.number().min(0).max(100).optional(),
     orderTotalAmount: z.number().nonnegative().optional(),
+    isRecurringMonthly: z.boolean().optional(),
   }),
 
   vatIntent: z.object({
@@ -411,6 +437,8 @@ export interface RollingAccountingContext1C {
     totalAmount: number;
     remainingAmount: number;
     termMonths: number;
+    remainingMonths?: number;
+    writeOffMethod?: 'calendar_days' | 'monthly';
   }>;
   stockItems: string[];
 }
@@ -480,6 +508,8 @@ export function buildRollingContextFromVirtualState(
       totalAmount: d.totalAmount,
       remainingAmount: d.remainingAmount,
       termMonths: d.termMonths,
+      remainingMonths: d.remainingMonths,
+      writeOffMethod: d.writeOffMethod,
     })),
     stockItems: state.nomenclature
       .filter((n) => n.itemKind !== 'Услуги')
@@ -638,10 +668,17 @@ export function sanitizeAndValidateOperationIntent(
     intent.docType1C = spec.docType;
   }
 
-  intent.isNonPostingEvent = Boolean(spec.allowsZeroPostings && intent.amountIntent.mode === 'non_posting') ||
-    ['hr_hire', 'writ_of_execution', 'contract_event', 'policy_event', 'customer_invoice', 'supplier_invoice'].includes(
-      intent.category
-    );
+  intent.isNonPostingEvent =
+    Boolean(spec.allowsZeroPostings && intent.amountIntent.mode === 'non_posting') ||
+    [
+      'hr_hire',
+      'writ_of_execution',
+      'contract_event',
+      'policy_event',
+      'wip_inventory',
+      'customer_invoice',
+      'supplier_invoice',
+    ].includes(intent.category);
 
   // 2. Numeric Sanity Guard against 9+ digit INN/KPP/BIK/OGRN/bank account numbers
   if (
@@ -816,10 +853,105 @@ export function sanitizeAndValidateOperationIntent(
     }));
   }
 
-  // 5. Normalize nomenclature
+  // 5. Normalize nomenclature, multi-item lists, RPB schedule, and recurring contract flag
+  const rowCombinedText = `${row.description || ''} ${row.actionSequenceHint || ''}`;
+
+  if (intent.items && intent.items.length > 0) {
+    const cleanedItems: NonNullable<ParsedOperationIntent['items']> = [];
+    for (const rawIt of intent.items) {
+      const cleanedItemName = cleanNomenclatureName1C(rawIt.cleanName);
+      if (!cleanedItemName || isGenericPlaceholderNomenclature1C(cleanedItemName)) {
+        warnings.push(`Stripped generic placeholder "${rawIt.cleanName}" from items[]`);
+        continue;
+      }
+      const safePrice = isSuspiciousRequisiteAsMoney(
+        rawIt.unitPrice,
+        forbiddenNumbers,
+        row.rawExcelAmount
+      )
+        ? undefined
+        : rawIt.unitPrice;
+      cleanedItems.push({
+        ...rawIt,
+        cleanName: cleanedItemName,
+        unitPrice: safePrice,
+      });
+    }
+    intent.items = cleanedItems.length > 0 ? cleanedItems : undefined;
+  }
+
+  // Fallback deterministic multi-item extraction when LLM omitted items[] on a multi-material row
+  if (!intent.items && intent.category === 'materials_writeoff') {
+    const fallbackMulti = extractMultipleWriteoffItemsFromText1C(row.description);
+    if (fallbackMulti.length >= 2) {
+      intent.items = fallbackMulti;
+    }
+  }
+
   if (intent.nomenclature) {
-    const cleanedNom = cleanNomenclatureName1C(intent.nomenclature.canonicalName);
-    intent.nomenclature.canonicalName = cleanedNom || intent.nomenclature.canonicalName.trim();
+    const cleanedNom = cleanNomenclatureName1C(
+      intent.nomenclature.canonicalName,
+      row.description
+    );
+    if (!cleanedNom || isGenericPlaceholderNomenclature1C(cleanedNom)) {
+      if (intent.nomenclature.canonicalName.trim()) {
+        warnings.push(
+          `Blocked generic placeholder nomenclature "${intent.nomenclature.canonicalName}"`
+        );
+      }
+      if (intent.nomenclature.nomenclatureGroup && intent.nomenclature.nomenclatureGroup.trim()) {
+        intent.nomenclature.canonicalName = '';
+      } else {
+        intent.nomenclature = undefined;
+      }
+    } else {
+      intent.nomenclature.canonicalName = cleanedNom;
+      // Enforce 43 ('Продукция') for own finished goods when row explicitly refers to продукция or rolling stock/production
+      if (
+        (intent.category === 'production_output' ||
+          /(?:поставлен|отгружен|реализован|выпущен|за)\p{L}*\s+продукци|панел\p{L}*\s+из\s+пвх\s+и\s+мдф/iu.test(
+            rowCombinedText
+          )) &&
+        intent.nomenclature.account === '41.01'
+      ) {
+        intent.nomenclature.account = '43';
+      }
+    }
+  }
+
+  if (intent.rpbIntent || intent.category === 'deferred_expense_97') {
+    const rpbSchedule = extractRpbTermAndDates1C(row.description, row.actionSequenceHint);
+    if (intent.rpbIntent) {
+      if (rpbSchedule.hasExplicitTerm) {
+        intent.rpbIntent.termMonths = rpbSchedule.termMonths;
+      } else if (
+        /вступительн\p{L}*\s+взнос.*(?:сро|саморегулируем)/iu.test(rowCombinedText) &&
+        intent.rpbIntent.termMonths === 12
+      ) {
+        intent.rpbIntent.termMonths = 32;
+      }
+      if (rpbSchedule.startDate && rpbSchedule.endDate) {
+        intent.rpbIntent.startDate = rpbSchedule.startDate;
+        intent.rpbIntent.endDate = rpbSchedule.endDate;
+        intent.rpbIntent.writeOffMethod = 'calendar_days';
+      } else if (/календарн\p{L}*\s+дн/iu.test(rowCombinedText)) {
+        intent.rpbIntent.writeOffMethod = 'calendar_days';
+      } else {
+        intent.rpbIntent.writeOffMethod = 'monthly';
+      }
+    }
+  }
+
+  if (intent.amountIntent.isRecurringMonthly) {
+    const hasRecurringServiceEvidence =
+      /ежемесячн|абонентск|аренд|связ|интернет|коммунальн|обслуживан|охрана|в\s+месяц|за\s+\d+\s*мес/iu.test(
+        rowCombinedText
+      ) && !/расчет\s+за\s+[^\n]{1,40}в\s+течение\s+\d+\s*мес/iu.test(rowCombinedText);
+    if (!hasRecurringServiceEvidence) {
+      intent.amountIntent.isRecurringMonthly = false;
+    }
+  } else {
+    intent.amountIntent.isRecurringMonthly = false;
   }
 
   return {

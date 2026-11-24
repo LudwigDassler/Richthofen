@@ -34,6 +34,8 @@ export function applyParsedIntentToDraft(
       intent.category === 'policy_event'
     ) {
       next.amount = 0;
+    } else if (intent.category === 'wip_inventory' && next.rawExcelAmount && next.rawExcelAmount > 0) {
+      next.amount = next.rawExcelAmount;
     } else if (!(next.rawExcelAmount && next.rawExcelAmount > 0)) {
       next.amount = 0;
     }
@@ -52,6 +54,12 @@ export function applyParsedIntentToDraft(
 
   if (intent.amountIntent.orderTotalAmount && intent.amountIntent.orderTotalAmount > 0) {
     next.orderTotalAmount = intent.amountIntent.orderTotalAmount;
+  }
+  if (intent.amountIntent.isRecurringMonthly !== undefined) {
+    next.isRecurringMonthly = intent.amountIntent.isRecurringMonthly;
+    if (!intent.amountIntent.isRecurringMonthly) {
+      next.periodicPaymentAmount = undefined;
+    }
   }
 
   // Намерение по НДС
@@ -85,10 +93,23 @@ export function applyParsedIntentToDraft(
       intent.counterparty.kind === 'individual' ? 'ФизическоеЛицо' : 'ЮридическоеЛицо';
   }
 
-  // Номенклатура, субсчёт 10.*, объект работ / НЗП (номенклатурная группа)
+  // Многострочный подбор материалов / ТМЦ (например: Плита ПВХ, Заготовка МДФ, Клей)
+  if (intent.items && intent.items.length > 0) {
+    next.items = intent.items.map((it) => ({
+      cleanName: it.cleanName,
+      quantity: it.quantity,
+      unit: it.unit,
+      unitPrice: it.unitPrice,
+      account: it.account !== 'service' ? it.account : undefined,
+    }));
+  }
+
+  // Номенклатура, субсчёт 10.* / 43 / 41.01 / 08.04.1, объект работ / НЗП (номенклатурная группа)
   if (intent.nomenclature) {
     if (intent.nomenclature.canonicalName.trim().length >= 2) {
       next.nomenclatureName = intent.nomenclature.canonicalName.trim();
+    } else if (!intent.nomenclature.canonicalName.trim()) {
+      next.nomenclatureName = '';
     }
     if (
       intent.nomenclature.quantity !== undefined &&
@@ -110,7 +131,13 @@ export function applyParsedIntentToDraft(
     ) {
       next.nomenclatureGroupHint = intent.nomenclature.nomenclatureGroup.trim();
     }
-    if (intent.nomenclature.account.startsWith('10.')) {
+    if (
+      intent.nomenclature.account.startsWith('10.') ||
+      intent.nomenclature.account === '43' ||
+      intent.nomenclature.account === '41.01' ||
+      intent.nomenclature.account === '08.04.1' ||
+      intent.nomenclature.account === '97.21'
+    ) {
       next.materialAccountHint = intent.nomenclature.account;
     }
   }

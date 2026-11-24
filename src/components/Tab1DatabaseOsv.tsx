@@ -363,7 +363,7 @@ export function Tab1DatabaseOsv() {
       ],
       ...bodyRows,
       [
-        'ИТОГО',
+        'Итого',
         'Контроль двойной записи по балансовым субсчетам',
         osvReport.totals.startDebit,
         osvReport.totals.startCredit,
@@ -1176,7 +1176,7 @@ export function Tab1DatabaseOsv() {
                       colSpan={2}
                       className="py-3 px-3.5 border-r border-slate-200 dark:border-slate-800"
                     >
-                      ИТОГО по балансовым субсчетам
+                      Итого
                     </td>
                     <td className="py-3 px-3 text-right tabular-nums border-r border-slate-200 dark:border-slate-800">
                       {formatMoney(osvReport.totals.startDebit, true)}

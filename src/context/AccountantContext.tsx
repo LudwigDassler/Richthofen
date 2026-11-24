@@ -1106,6 +1106,19 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
           { reportingYear }
         );
         setOperations(mergedOps);
+
+        const maxImportedDate = result.operations
+          .map((o) => o.date)
+          .filter((d): d is string => Boolean(d && /^\d{4}-\d{2}-\d{2}$/.test(d)))
+          .sort()
+          .pop();
+        if (maxImportedDate) {
+          setPeriodFilter((prev) =>
+            prev.dateTo && prev.dateTo < maxImportedDate
+              ? { ...prev, dateTo: `${reportingYear}-12-31` > maxImportedDate ? maxImportedDate : prev.dateTo }
+              : prev
+          );
+        }
       }
 
       if (result.completenessStats.filesUploaded > 0) {
@@ -1337,6 +1350,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
         vatRule: 'none',
         categoryHint: 'manual',
         docTypeHint: 'ОперацияБух',
+        isManuallyCreated: true,
       },
       db1C
     );
@@ -1737,6 +1751,8 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
 
   const removeOperation = useCallback(
     (id: string) => {
+      setActive1CModalOpId((curr) => (curr === id ? null : curr));
+      setFocusedOperationId((curr) => (curr === id ? null : curr));
       setOperations((prev) =>
         recalculateOperationsChronologically(
           prev.filter((op) => op.id !== id),
@@ -2913,7 +2929,9 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
             const existingIds = new Set(prev.map((o) => o.id));
             const merged = [
               ...prev,
-              ...closingRes.newOperations.filter((co) => !existingIds.has(co.id)),
+              ...closingRes.newOperations
+                .filter((co) => !existingIds.has(co.id))
+                .map((co) => ({ ...co, isManuallyCreated: true })),
             ];
             const recalc = recalculateOperationsChronologically(merged, db1C, {
               reportingYear,
@@ -2950,6 +2968,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
             costAccountHint: preset.defaultCostAccount,
             docTypeHint: preset.docType1C,
             categoryHint: preset.category,
+            isManuallyCreated: true,
           },
           db1C,
           newId,
@@ -2969,6 +2988,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
           hasInvoiceSF: preset.defaultHasInvoiceSF,
           vatRate: preset.defaultVatRate,
           vatRule: preset.defaultVatRule,
+          isManuallyCreated: true,
         };
 
         return recalculateOperationsChronologically([...prev, patched], db1C, {
@@ -3066,6 +3086,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
             quantity: sourceOp.quantity || 1,
             docTypeHint: option.targetDocType1C,
             categoryHint: option.targetCategory,
+            isManuallyCreated: true,
           },
           db1C,
           newId,
@@ -3082,6 +3103,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
           docType1C: option.targetDocType1C,
           category: option.targetCategory,
           linkedSourceOpIds: [sourceOp.id],
+          isManuallyCreated: true,
         };
 
         return recalculateOperationsChronologically([...prev, patched], db1C, {
@@ -3236,6 +3258,9 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
             docTypeHint: nextDocType,
             categoryHint: nextCategory,
             customPostings: patch.customPostings,
+            isManuallyCreated: op.isManuallyCreated,
+            isRecurringMonthly: op.isRecurringMonthly,
+            items: op.items,
           },
           db1C,
           op.id,
