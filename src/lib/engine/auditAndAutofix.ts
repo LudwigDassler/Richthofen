@@ -37,8 +37,10 @@ import {
   extractCanonicalProjectNomGroup1C,
   extractFounderFioFromDescription,
   findPersonMentionedInDescription1C,
+  formatRuMoneyPlainSpace,
   isFounderContributionText,
   isMisclassifiedLegacyOperation,
+  isNonDeductibleProfitTaxEntry1C,
   matchPersonOrCounterpartyIn1C,
   normalizeEntityKey,
   recalculateOperationsChronologically,
@@ -2654,14 +2656,27 @@ export function generatePeriodClosingOperations(params: {
     const existingNetCredit9901 = existing9901Row
       ? round2(existing9901Row.endCredit - existing9901Row.endDebit)
       : 0;
-    const priorTaxEntries = [
+    const priorTaxEntries: Array<{
+      debit: string;
+      credit: string;
+      amount: number;
+      debitSubconto?: string;
+      description?: string;
+      nonDeductibleForProfitTax?: boolean;
+    }> = [
       ...(db1C?.postings ?? [])
         .filter(
           (p) =>
             (!closeYearPrefix || (p.date ?? '').startsWith(closeYearPrefix)) &&
             (!closeDate || !p.date || p.date <= closeDate)
         )
-        .map((p) => ({ debit: p.debit, credit: p.credit, amount: p.amount })),
+        .map((p) => ({
+          debit: p.debit,
+          credit: p.credit,
+          amount: p.amount,
+          debitSubconto: (p.debitSubconto ?? []).join(' / '),
+          description: p.description,
+        })),
       ...operations
         .filter(
           (o) =>
@@ -2715,9 +2730,19 @@ export function generatePeriodClosingOperations(params: {
     const totalProfitBeforeTax = round2(
       existingNetCredit9901 + closingDeltaCredit9901 + legacyTaxOn9901 + reformedOutOf9901
     );
+    const nonDeductibleYtd = round2(
+      [...priorTaxEntries, ...closingEntries]
+        .filter((e) => isNonDeductibleProfitTaxEntry1C(e))
+        .reduce((s, e) => s + e.amount, 0)
+    );
+    const taxBaseYtd = Math.max(0, round2(totalProfitBeforeTax + nonDeductibleYtd));
     const targetTaxTotal =
-      totalProfitBeforeTax > 0.01 ? round2(totalProfitBeforeTax * (profitTaxRate / 100)) : 0;
+      taxBaseYtd > 0.01 ? round2(taxBaseYtd * (profitTaxRate / 100)) : 0;
     const profitTaxDelta = round2(targetTaxTotal - alreadyAccruedTax);
+    const taxBaseExplanation =
+      nonDeductibleYtd >= 0.01
+        ? `база НУ ${formatRuMoneyPlainSpace(taxBaseYtd)} ₽ = прибыль БУ (99.01.1) ${formatRuMoneyPlainSpace(totalProfitBeforeTax)} ₽ + постоянные разницы по ст. 270 НК РФ ${formatRuMoneyPlainSpace(nonDeductibleYtd)} ₽`
+        : `база НУ ${formatRuMoneyPlainSpace(taxBaseYtd)} ₽ (прибыль БУ 99.01.1: ${formatRuMoneyPlainSpace(totalProfitBeforeTax)} ₽, постоянные разницы по ст. 270 НК РФ: 0,00 ₽)`;
     if (profitTaxDelta > 0.02) {
       closingEntries.push({
         id: nextAutoFixId('close-profit-tax'),
@@ -2726,16 +2751,16 @@ export function generatePeriodClosingOperations(params: {
         debitSubconto: 'Текущий налог на прибыль',
         creditSubconto: 'Налог (взносы): начислено / уплачено',
         amount: profitTaxDelta,
-        description: `Расчёт налога на прибыль организаций (${profitTaxRate}%) по итогам отчётного периода`,
+        description: `Регламентный расчёт налога на прибыль организаций (${profitTaxRate}%): ${taxBaseExplanation}`,
       });
       log.push(
-        `Начислен налог на прибыль ${profitTaxRate}%: Дт 99.02.1 Кт 68.04.1 на ${profitTaxDelta.toFixed(2)} ₽ (база прибыли ${totalProfitBeforeTax.toFixed(2)} ₽)`
+        `Начислен налог на прибыль ${profitTaxRate}%: Дт 99.02.1 Кт 68.04.1 на ${profitTaxDelta.toFixed(2)} ₽ (${taxBaseExplanation})`
       );
       structuredChanges.push({
         id: nextAutoFixId('chg-profit-tax'),
-        whatWas: `Прибыль до налогообложения на счёте 99.01.1 = ${totalProfitBeforeTax.toFixed(2)} ₽`,
+        whatWas: `Налоговая база прибыли: ${taxBaseExplanation}`,
         whatBecame: `Проводка Дт 99.02.1 Кт 68.04.1 = ${profitTaxDelta.toFixed(2)} ₽ (ставка ${profitTaxRate}% ОСНО)`,
-        basis: 'Ст. 284 НК РФ — регламентная операция «Расчёт налога на прибыль» 1С:БП 3.0',
+        basis: 'Ст. 270, 284 НК РФ — регламентная операция «Расчёт налога на прибыль» 1С:БП 3.0',
         category: 'closing',
       });
     } else if (profitTaxDelta < -0.02) {
@@ -2747,7 +2772,7 @@ export function generatePeriodClosingOperations(params: {
         debitSubconto: 'Налог (взносы): начислено / уплачено',
         creditSubconto: 'Текущий налог на прибыль',
         amount: taxReduction,
-        description: `Уменьшение налога на прибыль организаций (${profitTaxRate}%) нарастающим итогом с начала года`,
+        description: `Уменьшение налога на прибыль организаций (${profitTaxRate}%) нарастающим итогом с начала года: ${taxBaseExplanation}`,
       });
       log.push(
         `Уменьшен налог на прибыль ${profitTaxRate}% (пересчёт с начала года): Дт 68.04.1 Кт 99.02.1 на ${taxReduction.toFixed(2)} ₽`
@@ -2756,7 +2781,7 @@ export function generatePeriodClosingOperations(params: {
         id: nextAutoFixId('chg-profit-tax-reduce'),
         whatWas: `Начисленный ранее авансовый налог на прибыль (${alreadyAccruedTax.toFixed(2)} ₽) превышает налог с годовой базы (${targetTaxTotal.toFixed(2)} ₽)`,
         whatBecame: `Проводка Дт 68.04.1 Кт 99.02.1 = ${taxReduction.toFixed(2)} ₽`,
-        basis: 'Ст. 286–287 НК РФ — пересчёт налога на прибыль нарастающим итогом при снижении налоговой базы / убытке квартала',
+        basis: 'Ст. 270, 286–287 НК РФ — пересчёт налога на прибыль нарастающим итогом при снижении налоговой базы / убытке квартала',
         category: 'closing',
       });
     }

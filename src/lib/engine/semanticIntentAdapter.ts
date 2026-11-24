@@ -16,7 +16,10 @@ export function applyParsedIntentToDraft(
     ...baseDraft,
     semanticIntent: intent,
     categoryHint: intent.category,
-    docTypeHint: intent.docType1C,
+    docTypeHint:
+      intent.category === 'hr_hire' && intent.employee?.hrAction === 'transfer'
+        ? 'КадровыйПеревод'
+        : intent.docType1C,
   };
 
   // Намерение по сумме: сохраняем rawExcelAmount нетронутым; для расчётных/непроводных режимов

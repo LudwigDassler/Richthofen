@@ -265,6 +265,7 @@ export type DocType1CBP30 =
   | 'ПоступлениеНаличных'
   | 'НачислениеЗарплаты'
   | 'ПриемНаРаботу'
+  | 'КадровыйПеревод'
   | 'ИсполнительныйЛист'
   | 'ВедомостьВБанк'
   | 'ВедомостьВКассу'
@@ -460,6 +461,7 @@ export interface AccountingEntry {
   description: string;
   amountRuleNote?: string;
   isOffBalance?: boolean;
+  nonDeductibleForProfitTax?: boolean;
 }
 
 export type VatPolicy1C =
@@ -794,6 +796,11 @@ export interface VirtualEmployee1C {
   isSingleParent?: boolean;
   propertyTaxDeduction?: number;
   propertyTaxDeductionStartDate?: string;
+  ytdTaxableIncome?: number;
+  ytdGiftGross?: number;
+  ytdGiftTaxable?: number;
+  ytdMaterialAidGross?: number;
+  ytdMaterialAidTaxable?: number;
   inn?: string;
   isStaffEmployee: boolean;
   source: VirtualEntityOriginSource1C;
@@ -937,12 +944,22 @@ export interface VirtualDeferredExpense1C {
   usages: VirtualEntityUsageRef1C[];
 }
 
+export interface VirtualPayrollYtdState1C {
+  year?: string;
+  ytdTaxableIncomeByEmployee: Record<string, number>;
+  ytdGiftGrossByEmployee: Record<string, number>;
+  ytdGiftTaxableByEmployee: Record<string, number>;
+  ytdMaterialAidGrossByEmployee: Record<string, number>;
+  ytdMaterialAidTaxableByEmployee: Record<string, number>;
+}
+
 export interface Virtual1CStateSnapshot {
   ownOrganization?: VirtualOwnOrganization1C;
   counterparties: VirtualCounterparty1C[];
   contracts: VirtualContract1C[];
   nomenclature: VirtualNomenclature1C[];
   employees: VirtualEmployee1C[];
+  payroll?: VirtualPayrollYtdState1C;
   fixedAssets: VirtualFixedAsset1C[];
   deferredExpenses?: VirtualDeferredExpense1C[];
   writsOfExecution: VirtualWritOfExecution1C[];

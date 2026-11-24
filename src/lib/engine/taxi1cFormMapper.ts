@@ -436,6 +436,7 @@ export function resolveTaxi1CLayoutKind(op: QueuedOperation): Taxi1CLayoutKind {
   }
   if (
     dt === 'ПриемНаРаботу' ||
+    dt === 'КадровыйПеревод' ||
     dt === 'НачислениеЗарплаты' ||
     dt === 'ИсполнительныйЛист' ||
     dt === 'ВедомостьВБанк' ||
@@ -506,6 +507,7 @@ export function build1CWindowTitle(op: QueuedOperation): {
     СчетФактураПолученный: 'Счет-фактура полученный',
     СчетФактураВыданный: 'Счет-фактура выданный (на аванс)',
     ПриемНаРаботу: 'Прием на работу',
+    КадровыйПеревод: 'Кадровый перевод',
     НачислениеЗарплаты: 'Начисление зарплаты и взносов',
     ИсполнительныйЛист: 'Исполнительный лист',
     ВедомостьВБанк: 'Ведомость в банк',
@@ -524,6 +526,7 @@ export function build1CWindowTitle(op: QueuedOperation): {
     op.docType1C === 'СчетПокупателю' ||
     op.docType1C === 'СчетОтПоставщика' ||
     op.docType1C === 'ПриемНаРаботу' ||
+    op.docType1C === 'КадровыйПеревод' ||
     op.docType1C === 'ИсполнительныйЛист' ||
     op.docType1C === 'ИнвентаризацияНЗП';
 
@@ -735,7 +738,7 @@ export function buildCreateBasedOnLinks1C(
         ? `№ ${linkedSale.docNumber || 'б/н'} от ${formatDateRu(linkedSale.date)}`
         : undefined,
     });
-  } else if (op.docType1C === 'ПриемНаРаботу') {
+  } else if (op.docType1C === 'ПриемНаРаботу' || op.docType1C === 'КадровыйПеревод') {
     const linkedPayroll = findRelated(
       (c) => c.docType1C === 'НачислениеЗарплаты' && c.date >= op.date
     );
@@ -1093,27 +1096,27 @@ export function build1CRegistersImpact(op: QueuedOperation): RegisterImpactRow1C
 
   if (
     op.docType1C === 'ПриемНаРаботу' ||
+    op.docType1C === 'КадровыйПеревод' ||
     op.docType1C === 'НачислениеЗарплаты' ||
     op.category === 'hr_hire' ||
     op.category === 'payroll_accrual'
   ) {
+    const isHrOrderDoc =
+      op.docType1C === 'ПриемНаРаботу' || op.docType1C === 'КадровыйПеревод';
     rows.push({
       id: 'reg-zarplata-ndfl',
-      movementSign: op.docType1C === 'ПриемНаРаботу' ? 'ℹ' : '+',
-      registerName:
-        op.docType1C === 'ПриемНаРаботу'
-          ? 'Регистры сведений «Кадровая история» и «Плановые начисления»'
-          : 'Регистры накопления «Взаиморасчеты с сотрудниками», «Учет доходов для НДФЛ», «Страховые взносы»',
+      movementSign: isHrOrderDoc ? 'ℹ' : '+',
+      registerName: isHrOrderDoc
+        ? 'Регистры сведений «Кадровая история» и «Плановые начисления»'
+        : 'Регистры накопления «Взаиморасчеты с сотрудниками», «Учет доходов для НДФЛ», «Страховые взносы»',
       registerKind: 'Кадровый учет, 6-НДФЛ и РСВ',
       analytics: `${op.employeeName || 'Штат сотрудников'} · Счёт затрат ${op.costAccount || '26'}`,
-      amountOrValue:
-        op.docType1C === 'ПриемНаРаботу'
-          ? `${formatMoney(op.monthlySalary || op.amount, true)} ₽/мес`
-          : amtFmt,
-      explanation:
-        op.docType1C === 'ПриемНаРаботу'
-          ? 'Регистрирует плановый оклад и подразделение сотрудника, чтобы «Начисление зарплаты» заполнилось по кнопке «Заполнить».'
-          : 'Формирует базу для ведомостей на выплату, расчёта 6-НДФЛ (с вычетами на детей ст. 218 НК РФ) и РСВ (30% + травматизм).',
+      amountOrValue: isHrOrderDoc
+        ? `${formatMoney(op.monthlySalary || op.amount, true)} ₽/мес`
+        : amtFmt,
+      explanation: isHrOrderDoc
+        ? 'Регистрирует плановый оклад и подразделение сотрудника, чтобы «Начисление зарплаты» заполнилось по кнопке «Заполнить».'
+        : 'Формирует базу для ведомостей на выплату, расчёта 6-НДФЛ (с вычетами на детей ст. 218 НК РФ) и РСВ (30% + травматизм).',
     });
   }
 

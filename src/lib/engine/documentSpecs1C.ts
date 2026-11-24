@@ -2332,6 +2332,7 @@ export const DOC_TYPE_TO_DEFAULT_CATEGORY_1C: Record<DocType1CBP30, OperationCat
   ПоступлениеНаличных: 'cash_in',
   НачислениеЗарплаты: 'payroll_accrual',
   ПриемНаРаботу: 'hr_hire',
+  КадровыйПеревод: 'hr_hire',
   ИсполнительныйЛист: 'writ_of_execution',
   ВедомостьВБанк: 'payroll_payout',
   ВедомостьВКассу: 'payroll_payout',
@@ -2367,6 +2368,7 @@ export const DOC_TYPE_LABELS_1C: Record<DocType1CBP30, string> = {
   ПоступлениеНаличных: '1С: Поступление наличных (ПКО)',
   НачислениеЗарплаты: '1С: Начисление зарплаты и взносов',
   ПриемНаРаботу: '1С: Приём на работу (кадровый приказ)',
+  КадровыйПеревод: '1С: Кадровый перевод',
   ИсполнительныйЛист: '1С: Исполнительный лист (удержание алиментов)',
   ВедомостьВБанк: '1С: Ведомость в банк (выплата ЗП)',
   ВедомостьВКассу: '1С: Ведомость в кассу (выплата ЗП)',
@@ -2399,6 +2401,7 @@ export const ALL_DOC_TYPES_1C: DocType1CBP30[] = [
   'ПередачаОС',
   'СписаниеОС',
   'ПриемНаРаботу',
+  'КадровыйПеревод',
   'ИсполнительныйЛист',
   'НачислениеЗарплаты',
   'ВедомостьВБанк',
@@ -2559,6 +2562,20 @@ export function getDocumentSpecForOperation(
     };
   }
 
+  if (op.category === 'hr_hire' && op.docType1C === 'КадровыйПеревод') {
+    return {
+      ...base,
+      docType: 'КадровыйПеревод',
+      label: 'Кадровый перевод сотрудника',
+      menuPath1C:
+        'Зарплата и кадры → Кадровый учёт → Кадровые переводы → кнопка «Создать» (Перевод)',
+      documentKind1C:
+        op.documentSubKind1C ||
+        'Кадровый перевод сотрудника (изменение должности / подразделения / оклада)',
+      exportBslKind: 'hr_hire',
+    };
+  }
+
   // If user manually changed docType1C to something different from base.docType, respect docType1C's menu path
   if (op.docType1C && op.docType1C !== base.docType) {
     const byDoc = getDocumentSpecByDocType(op.docType1C, op.category);
@@ -2591,6 +2608,7 @@ export function doesSpecAllowZeroPostings(
   }
   if (
     opOrCategory.docType1C === 'ПриемНаРаботу' ||
+    opOrCategory.docType1C === 'КадровыйПеревод' ||
     opOrCategory.docType1C === 'ИсполнительныйЛист' ||
     opOrCategory.docType1C === 'СчетПокупателю' ||
     opOrCategory.docType1C === 'СчетОтПоставщика'

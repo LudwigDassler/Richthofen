@@ -92,11 +92,20 @@ test('End-to-end Q1–Q3 audit: all 9 accounting core, auto-fix, and EnterpriseD
   const row9901 = finalOsv.leafRows.find((r) => r.code === '99.01.1');
   const row99021 = finalOsv.leafRows.find((r) => r.code === '99.02.1');
   const ytdProfit = Number(((row9901?.endCredit ?? 0) - (row9901?.endDebit ?? 0)).toFixed(2));
-  const expectedYtdTax = Number((ytdProfit * 0.2).toFixed(2));
+  const nonDeductibleYtd = Number(
+    ops
+      .filter((o) => o.includeInProcessing !== false && (o.date || '') <= '2026-09-30')
+      .flatMap((o) => o.entries)
+      .filter((e) => e.nonDeductibleForProfitTax === true)
+      .reduce((s, e) => s + e.amount, 0)
+      .toFixed(2)
+  );
+  assert.equal(nonDeductibleYtd, 188000, '9M non-deductible expenses (gifts 144 000 + material aid 44 000) must equal 188 000 ₽');
+  const expectedYtdTax = Number(((ytdProfit + nonDeductibleYtd) * 0.2).toFixed(2));
   assert.ok(ytdProfit > 15_000_000, `Expected substantial 9-month YTD profit on 99.01.1, got ${ytdProfit}`);
   assert.ok(
     Math.abs((row99021?.endDebit ?? 0) - expectedYtdTax) <= 0.02,
-    `99.02.1 ending debit (${row99021?.endDebit}) must equal 20% of 99.01.1 YTD profit (${expectedYtdTax})`
+    `99.02.1 ending debit (${row99021?.endDebit}) must equal 20% of (99.01.1 YTD profit + 188 000 non-deductible) = ${expectedYtdTax}`
   );
 
   // --- FIX #2 & #3: Default 20% VAT on OSNO sales/advances + 76.АВ deduction on refunds & offsets + ZERO phantom АВТ-СФА ---

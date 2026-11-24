@@ -3186,7 +3186,9 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
         }
 
         const isHireOrder =
-          nextCategory === 'hr_hire' || nextDocType === 'ПриемНаРаботу';
+          nextCategory === 'hr_hire' ||
+          nextDocType === 'ПриемНаРаботу' ||
+          nextDocType === 'КадровыйПеревод';
         const nextSalary =
           patch.monthlySalary !== undefined ? patch.monthlySalary : op.monthlySalary;
 

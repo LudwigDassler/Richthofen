@@ -20,8 +20,9 @@ const NON_NOMENCLATURE_EXPORT_RE =
   /^(?:вексел\p{L}*(?:\s+.*)?|долговы[ех]\s+ценн\p{L}*\s+бумаг\p{L}*|кредит\p{L}*(?:\s+.*)?|(?:процент\p{L}*|%%)(?:\s+.*)?|задолженност\p{L}*(?:\s+.*)?|на\s+основани\p{L}*(?:\s+.*)?|займ\p{L}*(?:\s+.*)?|заём\p{L}*(?:\s+.*)?)$/iu;
 
 function sanitizeExportNomenclatureName(rawName: string, descriptionCtx?: string): string {
+  if (!rawName || rawName.includes(',')) return '';
   const cleaned = (cleanNomenclatureName1C(rawName, descriptionCtx) || rawName || '').trim();
-  if (!cleaned) return '';
+  if (!cleaned || cleaned.includes(',')) return '';
   if (isGenericPlaceholderNomenclature1C(cleaned)) return '';
   if (NON_NOMENCLATURE_EXPORT_RE.test(cleaned)) return '';
   return cleaned;
@@ -295,21 +296,35 @@ export function buildExportBundle(params: {
 
     const specAllowsNomenclature =
       DOCUMENT_SPECS[op.category]?.masterDataRules.createsNomenclature ?? false;
-    const cleanOpNom = specAllowsNomenclature
-      ? sanitizeExportNomenclatureName(op.nomenclatureName, op.description)
-      : '';
     if (
-      cleanOpNom &&
+      specAllowsNomenclature &&
       (mode === 'clean_db' || op.bindings.nomenclature.status === 'new_for_1c')
     ) {
-      const key = cleanOpNom.toLowerCase();
-      if (!nomMap.has(key)) {
-        nomMap.set(key, {
-          name: cleanOpNom,
-          unit: 'шт',
-          isService: op.category === 'purchase_services' || op.category === 'sale_services',
-          vatRate: op.vatRate,
-        });
+      const candidateExportItems: Array<{ name: string; unit?: string }> =
+        op.items && op.items.length > 0
+          ? op.items.map((it) => ({
+              name: sanitizeExportNomenclatureName(it.cleanName, op.description),
+              unit: it.unit,
+            }))
+          : op.nomenclatureName && op.nomenclatureName.includes(',')
+            ? op.nomenclatureName
+                .split(',')
+                .map((part) => ({
+                  name: sanitizeExportNomenclatureName(part.trim(), op.description),
+                }))
+            : [{ name: sanitizeExportNomenclatureName(op.nomenclatureName, op.description) }];
+
+      for (const cand of candidateExportItems) {
+        if (!cand.name || cand.name.includes(',')) continue;
+        const key = cand.name.toLowerCase();
+        if (!nomMap.has(key)) {
+          nomMap.set(key, {
+            name: cand.name,
+            unit: cand.unit || 'шт',
+            isService: op.category === 'purchase_services' || op.category === 'sale_services',
+            vatRate: op.vatRate,
+          });
+        }
       }
     }
 
@@ -985,10 +1000,8 @@ function generateBslModule(params: {
         lines.push('\t\tСФВыд.Записать(РежимЗаписиДокумента.Проведение);');
       }
     } else if (op.docType1C === 'РасходМатериалов') {
-      const nomItem = escapeBsl(op.nomenclatureName || 'Материалы');
-      const qty = op.quantity && op.quantity > 0 ? op.quantity : 1;
       const costAcc = escapeBsl(op.costAccount || op.entries[0]?.debit || '20.01');
-      const matAcc = escapeBsl(op.materialAccount || op.entries[0]?.credit || '10.01');
+      const defaultMatAcc = escapeBsl(op.materialAccount || op.entries[0]?.credit || '10.01');
       lines.push('\t\tДок = Документы.РасходМатериалов.СоздатьДокумент();');
       lines.push(`\t\tДок.Дата = ${dateExpr};`);
       lines.push('\t\tДок.Организация = ОрганизацияСсылка;');
@@ -1005,10 +1018,33 @@ function generateBslModule(params: {
           `\t\tПопытка Док.Субконто2 = НайтиИлиСоздатьСтатьюЗатрат("${escapeBsl(op.expenseItemName)}"); Исключение КонецПопытки;`
         );
       }
-      lines.push('\t\tСтр = Док.Материалы.Добавить();');
-      lines.push(`\t\tСтр.Номенклатура = НайтиИлиСоздатьНоменклатуру("${nomItem}", Ложь, "БезНДС");`);
-      lines.push(`\t\tСтр.Количество = ${qty};`);
-      lines.push(`\t\tСтр.СчетУчета = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${matAcc}");`);
+      const writeoffRows =
+        op.items && op.items.length > 0
+          ? op.items.map((it) => ({
+              name: it.cleanName,
+              qty: it.quantity && it.quantity > 0 ? it.quantity : 1,
+              acc: it.account || defaultMatAcc,
+            }))
+          : [
+              {
+                name:
+                  op.nomenclatureName && !op.nomenclatureName.includes(',')
+                    ? op.nomenclatureName
+                    : 'Материалы',
+                qty: op.quantity && op.quantity > 0 ? op.quantity : 1,
+                acc: defaultMatAcc,
+              },
+            ];
+      for (const rowIt of writeoffRows) {
+        lines.push('\t\tСтр = Док.Материалы.Добавить();');
+        lines.push(
+          `\t\tСтр.Номенклатура = НайтиИлиСоздатьНоменклатуру("${escapeBsl(rowIt.name)}", Ложь, "БезНДС");`
+        );
+        lines.push(`\t\tСтр.Количество = ${rowIt.qty};`);
+        lines.push(
+          `\t\tСтр.СчетУчета = ПланыСчетов.Хозрасчетный.НайтиПоКоду("${escapeBsl(rowIt.acc)}");`
+        );
+      }
       lines.push(`\t\tДок.Комментарий = "${descEsc}";`);
       lines.push('\t\tДок.Записать(РежимЗаписиДокумента.Проведение);');
     } else if (op.docType1C === 'ПередачаМатериаловВЭксплуатацию') {
@@ -1088,12 +1124,14 @@ function generateBslModule(params: {
       }
       lines.push(`\t\tДок.Комментарий = "${descEsc}";`);
       lines.push('\t\tДок.Записать(РежимЗаписиДокумента.Проведение);');
-    } else if (op.docType1C === 'ПриемНаРаботу') {
+    } else if (op.docType1C === 'ПриемНаРаботу' || op.docType1C === 'КадровыйПеревод') {
       const empFio = escapeBsl(op.employeeName || 'Сотрудник');
       const sal = (op.monthlySalary ?? 0).toFixed(2);
+      const hrDocObj =
+        op.docType1C === 'КадровыйПеревод' ? 'КадровыйПеревод' : 'ПриемНаРаботу';
       lines.push(`\t\tФизЛицоСсылка = НайтиИлиСоздатьФизлицо("${empFio}");`);
       lines.push('\t\tПопытка');
-      lines.push('\t\t\tДокКадр = Документы.ПриемНаРаботу.СоздатьДокумент();');
+      lines.push(`\t\t\tДокКадр = Документы.${hrDocObj}.СоздатьДокумент();`);
       lines.push(`\t\t\tДокКадр.Дата = ${dateExpr};`);
       lines.push('\t\t\tДокКадр.Организация = ОрганизацияСсылка;');
       lines.push('\t\t\tДокКадр.ФизическоеЛицо = ФизЛицоСсылка;');
@@ -1529,7 +1567,9 @@ function generateEnterpriseDataXml(params: {
                                             ? 'Документ.СписаниеОС'
                                             : op.docType1C === 'ПриемНаРаботу'
                                               ? 'Документ.ПриемНаРаботу'
-                                              : op.docType1C === 'НачислениеЗарплаты'
+                                              : op.docType1C === 'КадровыйПеревод'
+                                                ? 'Документ.КадровыйПеревод'
+                                                : op.docType1C === 'НачислениеЗарплаты'
                                                 ? 'Документ.НачислениеЗарплаты'
                                                 : op.docType1C === 'КорректировкаДолга'
                                                   ? 'Документ.КорректировкаДолга'

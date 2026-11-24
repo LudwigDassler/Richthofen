@@ -1240,7 +1240,10 @@ export function extractRequisitesFromFreeText(
       if (fixedVal > 0) {
         alimonyFixedAmountHint = fixedVal;
         alimonyRatePercentHint = 0;
-        alimonyShareLabelHint = `${fixedVal.toLocaleString('ru-RU')} ₽ / мес.`;
+        const [intPart, decPart] = Math.abs(Math.round((fixedVal + Number.EPSILON) * 100) / 100)
+          .toFixed(2)
+          .split('.');
+        alimonyShareLabelHint = `фикс. ${intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ' ')},${decPart} ₽`;
       }
     } else if (pctExplicit) {
       alimonyRatePercentHint = Number(pctExplicit[1].replace(',', '.'));
@@ -2155,6 +2158,7 @@ function parseRowsMatrixDetailed(params: {
         alimonyRecipientInn: req.alimonyRecipientHint ? req.inn || undefined : undefined,
         alimonyRatePercent: req.alimonyRatePercentHint,
         alimonyShareLabel: req.alimonyShareLabelHint,
+        alimonyFixedAmount: req.alimonyFixedAmountHint,
         financialNotesSummary: req.financialNotesSummaryHint,
         financialNotesList: req.financialNotesListHint,
         periodicPaymentAmount: req.periodicPaymentAmountHint,
@@ -2397,6 +2401,7 @@ export function parseFreeTextOrDelimitedOperations(
       alimonyRecipientInn: req.alimonyRecipientHint ? req.inn || undefined : undefined,
       alimonyRatePercent: req.alimonyRatePercentHint,
       alimonyShareLabel: req.alimonyShareLabelHint,
+      alimonyFixedAmount: req.alimonyFixedAmountHint,
       financialNotesSummary: req.financialNotesSummaryHint,
       financialNotesList: req.financialNotesListHint,
       periodicPaymentAmount: req.periodicPaymentAmountHint,

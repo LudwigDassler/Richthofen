@@ -81,6 +81,32 @@ function round2(n: number): number {
   return Object.is(r, -0) ? 0 : r;
 }
 
+export function formatRuMoneyPlainSpace(n: number): string {
+  const [intPart, decPart] = Math.abs(round2(n)).toFixed(2).split('.');
+  const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  return `${n < 0 ? '-' : ''}${grouped},${decPart}`;
+}
+
+export function isNonDeductibleProfitTaxEntry1C(e: {
+  debit: string;
+  credit: string;
+  debitSubconto?: string;
+  description?: string;
+  nonDeductibleForProfitTax?: boolean;
+}): boolean {
+  if (e.nonDeductibleForProfitTax === true) return true;
+  if (e.nonDeductibleForProfitTax === false) return false;
+  if (e.debit !== '91.02') return false;
+  if (e.credit === '73.03') return true;
+  if (
+    e.credit === '68.02' &&
+    /безвозмездн|подар/iu.test(`${e.debitSubconto ?? ''} ${e.description ?? ''}`)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function normalizeEntityKey(raw: string): string {
   return raw
     .toLowerCase()
@@ -1546,18 +1572,26 @@ export function detectOperationClassification(
     /приказ\p{L}*.*увольнен|(?:^|[^\p{L}])уволен[аы]?(?:\s+с\s+работ|\s+по\s+собственн|\s+с\s+\d)/iu.test(
       itemAndDescText
     );
+  const isHrTransferOrder =
+    Boolean(draft.semanticIntent?.employee?.hrAction === 'transfer') ||
+    /перевед[её]н\p{L}*(?:\s+на\s+должност|\s+в\s+подразделен|\s+на\s+оклад|\s+на\s+работ)|кадров\p{L}*\s+перевод/iu.test(
+      `${itemAndDescText} ${draft.actionSequenceHint ?? ''}`
+    );
   if (
     isDismissalOrderWithoutAccrual ||
-    /принят[аы]?\s+на\s+работу|прием\s+на\s+работу|оформлен[аы]?\s+в\s+штат|трудовой\s+договор.*оклад|переведен\p{L}*\s+на\s+должност|кадров\p{L}*\s+перевод/iu.test(
+    isHrTransferOrder ||
+    /принят[аы]?\s+на\s+работу|прием\s+на\s+работу|оформлен[аы]?\s+в\s+штат|трудовой\s+договор.*оклад/iu.test(
       itemAndDescText
     )
   ) {
     return {
       category: 'hr_hire',
-      docType1C: 'ПриемНаРаботу',
+      docType1C: isHrTransferOrder ? 'КадровыйПеревод' : 'ПриемНаРаботу',
       documentSubKind1C: isDismissalOrderWithoutAccrual
         ? 'Увольнение сотрудника (прекращение начислений)'
-        : 'Приём на работу / кадровый перевод (регистрация оклада)',
+        : isHrTransferOrder
+          ? 'Кадровый перевод сотрудника (изменение должности / оклада)'
+          : 'Приём на работу (регистрация оклада)',
     };
   }
 
@@ -1989,6 +2023,26 @@ function detectCategoryAndDocType(
   docType1C: DocType1CBP30;
   documentSubKind1C?: string;
 } {
+  const isExplicitHrTransfer =
+    Boolean(draft.semanticIntent?.employee?.hrAction === 'transfer') ||
+    /перевед[её]н\p{L}*(?:\s+на\s+должност|\s+в\s+подразделен|\s+на\s+оклад|\s+на\s+работ)|кадров\p{L}*\s+перевод/iu.test(
+      `${draft.description ?? ''} ${draft.actionSequenceHint ?? ''}`
+    );
+  if (
+    isExplicitHrTransfer &&
+    (!draft.categoryHint ||
+      draft.categoryHint === 'hr_hire') &&
+    (!draft.docTypeHint ||
+      draft.docTypeHint === 'ПриемНаРаботу' ||
+      draft.docTypeHint === 'КадровыйПеревод')
+  ) {
+    return {
+      category: 'hr_hire',
+      docType1C: 'КадровыйПеревод',
+      documentSubKind1C: 'Кадровый перевод сотрудника (изменение должности / оклада)',
+    };
+  }
+
   if (draft.categoryHint && draft.docTypeHint) {
     return {
       category: draft.categoryHint,
@@ -2469,6 +2523,10 @@ export function bindAndGenerateOperation(
   }
   let resolvedAlimonyRecipientInn = (draft.alimonyRecipientInn ?? '').replace(/\D/g, '');
   let resolvedAlimonyRatePercent = draft.alimonyRatePercent;
+  let resolvedAlimonyFixedAmount =
+    draft.alimonyFixedAmount && draft.alimonyFixedAmount > 0
+      ? round2(draft.alimonyFixedAmount)
+      : undefined;
   let resolvedAlimonyShareLabel = draft.alimonyShareLabel;
   let resolvedFinancialNotesSummary = (draft.financialNotesSummary ?? '').trim();
 
@@ -3814,7 +3872,22 @@ export function bindAndGenerateOperation(
       const mInn = draft.description.match(/инн\s*[:№]?\s*(\d{10}|\d{12})/iu);
       if (mInn?.[1]) resolvedAlimonyRecipientInn = mInn[1];
     }
-    if (!resolvedAlimonyRatePercent) {
+    if (!resolvedAlimonyFixedAmount && !/%|1\s*\/\s*[234]|четверт|трет\p{L}*|половин/iu.test(draft.description)) {
+      const mFixed = draft.description.match(
+        /(?:в\s+размере|на\s+сумму|в\s+сумме|по)\s*([0-9][0-9\s\u00A0]*(?:[.,]\d+)?)\s*(?:руб\p{L}*|₽)/iu
+      );
+      if (mFixed?.[1]) {
+        const parsedFix = Number(mFixed[1].replace(/[\s\u00A0]/g, '').replace(',', '.'));
+        if (Number.isFinite(parsedFix) && parsedFix > 0) {
+          resolvedAlimonyFixedAmount = round2(parsedFix);
+        }
+      }
+    }
+
+    if (resolvedAlimonyFixedAmount && resolvedAlimonyFixedAmount > 0) {
+      resolvedAlimonyRatePercent = 0;
+      resolvedAlimonyShareLabel = `фикс. ${formatRuMoneyPlainSpace(resolvedAlimonyFixedAmount)} ₽`;
+    } else if (!resolvedAlimonyRatePercent) {
       if (/1\s*\/\s*4|одной?\s+четверт|четверт\p{L}*\s+част|25\s*%/iu.test(draft.description)) {
         resolvedAlimonyRatePercent = 25;
         resolvedAlimonyShareLabel = '1/4 (25%)';
@@ -3842,7 +3915,10 @@ export function bindAndGenerateOperation(
     }
 
     amountMode = 'calculated_by_1c';
-    calculationProvenance = `Исполнительный лист зарегистрирован: удержание с «${employeeName || 'сотрудника'}» в пользу «${resolvedAlimonyRecipientName || 'получателя'}» в размере ${resolvedAlimonyShareLabel} от дохода после НДФЛ 13% (автопроводка Дт 70 Кт 76.41 при начислении ЗП)`;
+    calculationProvenance =
+      resolvedAlimonyFixedAmount && resolvedAlimonyFixedAmount > 0
+        ? `Исполнительный лист зарегистрирован: удержание с «${employeeName || 'сотрудника'}» в пользу «${resolvedAlimonyRecipientName || 'получателя'}» в размере ${resolvedAlimonyShareLabel} ежемесячно (автопроводка Дт 70 Кт 76.41 при начислении ЗП)`
+        : `Исполнительный лист зарегистрирован: удержание с «${employeeName || 'сотрудника'}» в пользу «${resolvedAlimonyRecipientName || 'получателя'}» в размере ${resolvedAlimonyShareLabel} от дохода после НДФЛ 13% (автопроводка Дт 70 Кт 76.41 при начислении ЗП)`;
     amountCalculationNote = calculationProvenance;
   }
 
@@ -5121,6 +5197,7 @@ export function bindAndGenerateOperation(
       allowZeroCalculated?: boolean;
       amountRuleNote?: string;
       isOffBalance?: boolean;
+      nonDeductibleForProfitTax?: boolean;
     }
   ) => {
     const cleanAmt = round2(amount);
@@ -5134,6 +5211,7 @@ export function bindAndGenerateOperation(
       amount: Math.max(0, cleanAmt),
       amountRuleNote: opts?.amountRuleNote,
       isOffBalance: opts?.isOffBalance,
+      ...(opts?.nonDeductibleForProfitTax ? { nonDeductibleForProfitTax: true } : {}),
       description,
     });
   };
@@ -7351,6 +7429,7 @@ export function bindAndGenerateOperation(
               {
                 allowZeroCalculated: isCalculatedBy1C,
                 amountRuleNote: 'По штатному расписанию и производственному календарю 2026 г.',
+                nonDeductibleForProfitTax: isMaterialAid && effWageDt === '91.02' ? true : undefined,
               }
             );
           }
@@ -7375,6 +7454,8 @@ export function bindAndGenerateOperation(
             {
               allowZeroCalculated: isCalculatedBy1C,
               amountRuleNote: 'По штатному ФОТ за месяц (кнопка «Заполнить» в 1С)',
+              nonDeductibleForProfitTax:
+                isMaterialAid && effFallbackWageDt === '91.02' ? true : undefined,
             }
           );
         }
@@ -7484,12 +7565,18 @@ export function bindAndGenerateOperation(
               isMaterialAid && activeRosterForTax.length === 1
                 ? Math.max(0, round2(staffRow.salary - materialAidExemptAmount))
                 : staffRow.salary;
-            const priorYtdGross = sumPriorYtdGrossForEmp(
+            const priorYtdWagesFallback = sumPriorYtdGrossForEmp(
               pKey,
               vEmp?.hireDate,
               staffRow.fullMonthlySalary ?? staffRow.salary
             );
-            const ytdGrossIncludingCurrent = round2(priorYtdGross + taxableRowGross);
+            const priorYtdFromVirtualPayroll =
+              priorVirtualState.payroll &&
+              (!curPayrollYear ||
+                !priorVirtualState.payroll.year ||
+                priorVirtualState.payroll.year === curPayrollYear)
+                ? (priorVirtualState.payroll.ytdTaxableIncomeByEmployee[pKey] ?? 0)
+                : 0;
 
             // Calculate taxable gift base for this employee in current month (separate 4 000 ₽ annual gift exemption under p. 28 Art. 217 NK RF)
             let empMonthGiftGross = 0;
@@ -7516,12 +7603,43 @@ export function bindAndGenerateOperation(
                 ? Math.max(0, round2(empMonthGiftGross - Math.min(empMonthGiftGross, remGiftExemption4000)))
                 : 0;
 
+            // Fallback taxable gifts + material aid YTD when priorVirtualState.payroll was not pre-populated
+            const priorTaxableGiftsTotal = Math.max(
+              0,
+              round2(empPriorGiftGross + empMonthGiftGross - 4000)
+            );
+            let priorMaterialAidGross = 0;
+            for (const aOp of priorOps) {
+              if (!aOp.includeInProcessing || aOp.isDuplicateIn1C) continue;
+              if (aOp.category !== 'employee_settlement_73') continue;
+              if (curPayrollYear && aOp.date && !aOp.date.startsWith(curPayrollYear)) continue;
+              if (draft.date && aOp.date && aOp.date > draft.date) continue;
+              if (!/материальн\p{L}*\s+помощ/iu.test(aOp.description || '')) continue;
+              if (normalizePersonIdentityKey1C(aOp.employeeName) === pKey) {
+                const eAid = aOp.entries.find((e) => e.debit === '91.02' && e.credit === '73.03');
+                priorMaterialAidGross = round2(
+                  priorMaterialAidGross + (eAid ? eAid.amount : aOp.amount)
+                );
+              }
+            }
+            const priorTaxableAidTotal = Math.max(0, round2(priorMaterialAidGross - 4000));
+            const fallbackPriorYtdTaxable = round2(
+              priorYtdWagesFallback + priorTaxableGiftsTotal + priorTaxableAidTotal
+            );
+            const effectivePriorYtdTaxable = Math.max(
+              priorYtdFromVirtualPayroll,
+              fallbackPriorYtdTaxable
+            );
+            const ytdTaxableIncomeForChildLimit = round2(
+              effectivePriorYtdTaxable + taxableRowGross
+            );
+
             let childDed = 0;
-            // Apply monthly child deduction once per calendar month on regular payroll/sick/vacation accruals
+            // Apply monthly child deduction once per calendar month up to 450 000 ₽ YTD (ст. 218 НК РФ)
             if (
               !isMaterialAid &&
               (vEmp?.childCount ?? 0) > 0 &&
-              round2(ytdGrossIncludingCurrent + empTaxableGift) <= 450_000 &&
+              ytdTaxableIncomeForChildLimit <= 450_000 &&
               !hasPriorPayrollInSameMonthForEmp(pKey)
             ) {
               childDed = computeMonthlyChildDeduction2026(
@@ -7658,18 +7776,22 @@ export function bindAndGenerateOperation(
                 : round2(debtorNetAfterNdfl * (writ.ratePercent / 100));
 
             if (alimonyAmt > 0 || isCalculatedBy1C) {
+              const alimonyBasisLabel =
+                writ.fixedAmount && writ.fixedAmount > 0
+                  ? `фикс. ${formatRuMoneyPlainSpace(writ.fixedAmount)} ₽`
+                  : writ.shareLabel || `${writ.ratePercent}%`;
               pushEntry(
                 '70',
                 '76.41',
                 alimonyAmt,
                 writ.debtorEmployeeName,
                 writ.recipientName,
-                `Удержаны алименты по исполнительному листу (${writ.shareLabel || `${writ.ratePercent}%`})`,
+                `Удержаны алименты по исполнительному листу (${alimonyBasisLabel})`,
                 {
                   allowZeroCalculated: isCalculatedBy1C,
                   amountRuleNote:
                     writ.fixedAmount && writ.fixedAmount > 0
-                      ? `Фиксированная сумма ${writ.fixedAmount.toLocaleString('ru-RU')} ₽/мес.`
+                      ? `Фиксированная сумма: фикс. ${formatRuMoneyPlainSpace(writ.fixedAmount)} ₽/мес.`
                       : `${writ.shareLabel || `${writ.ratePercent}%`} от (Оклад − НДФЛ 13%)`,
                 }
               );
@@ -8408,14 +8530,27 @@ export function bindAndGenerateOperation(
         const profitTaxRate = db1C?.accountingPolicy.profitTaxRate ?? 20;
         const closeYearPrefix = (draft.date ?? '').slice(0, 4);
 
-        const priorTaxEntries = [
+        const priorTaxEntries: Array<{
+          debit: string;
+          credit: string;
+          amount: number;
+          debitSubconto?: string;
+          description?: string;
+          nonDeductibleForProfitTax?: boolean;
+        }> = [
           ...(db1C?.postings ?? [])
             .filter(
               (p) =>
                 (!closeYearPrefix || (p.date ?? '').startsWith(closeYearPrefix)) &&
                 (!draft.date || !p.date || p.date <= draft.date)
             )
-            .map((p) => ({ debit: p.debit, credit: p.credit, amount: p.amount })),
+            .map((p) => ({
+              debit: p.debit,
+              credit: p.credit,
+              amount: p.amount,
+              debitSubconto: (p.debitSubconto ?? []).join(' / '),
+              description: p.description,
+            })),
           ...priorOps
             .filter(
               (p) =>
@@ -8467,13 +8602,21 @@ export function bindAndGenerateOperation(
             legacyTaxOn9901 +
             reformedOutOf9901
         );
+        const nonDeductibleYtd = round2(
+          [...priorTaxEntries, ...entries]
+            .filter((e) => isNonDeductibleProfitTaxEntry1C(e))
+            .reduce((s, e) => s + e.amount, 0)
+        );
+        const taxBaseYtd = Math.max(0, round2(preTaxCumulativeProfit + nonDeductibleYtd));
 
         if (isOsno && ['03', '06', '09', '12'].includes(closeMonth) && profitTaxRate > 0) {
           const targetTaxTotal =
-            preTaxCumulativeProfit > 0.01
-              ? round2(preTaxCumulativeProfit * (profitTaxRate / 100))
-              : 0;
+            taxBaseYtd > 0.01 ? round2(taxBaseYtd * (profitTaxRate / 100)) : 0;
           const taxDelta = round2(targetTaxTotal - alreadyAccruedTax);
+          const taxBaseExplanation =
+            nonDeductibleYtd >= 0.01
+              ? `база НУ ${formatRuMoneyPlainSpace(taxBaseYtd)} ₽ = прибыль БУ (99.01.1) ${formatRuMoneyPlainSpace(preTaxCumulativeProfit)} ₽ + постоянные разницы по ст. 270 НК РФ ${formatRuMoneyPlainSpace(nonDeductibleYtd)} ₽`
+              : `база НУ ${formatRuMoneyPlainSpace(taxBaseYtd)} ₽ (прибыль БУ 99.01.1: ${formatRuMoneyPlainSpace(preTaxCumulativeProfit)} ₽, постоянные разницы по ст. 270 НК РФ: 0,00 ₽)`;
           if (taxDelta > 0.01) {
             pushEntry(
               '99.02.1',
@@ -8481,7 +8624,10 @@ export function bindAndGenerateOperation(
               taxDelta,
               'Текущий налог на прибыль',
               `Налог на прибыль организаций (${profitTaxRate}%)`,
-              `Регламентный расчёт налога на прибыль организаций (${profitTaxRate}%) за отчётный период`
+              `Регламентный расчёт налога на прибыль организаций (${profitTaxRate}%): ${taxBaseExplanation}`,
+              {
+                amountRuleNote: `${profitTaxRate}% × ${formatRuMoneyPlainSpace(taxBaseYtd)} ₽ (${taxBaseExplanation})`,
+              }
             );
           } else if (taxDelta < -0.01) {
             pushEntry(
@@ -8490,7 +8636,10 @@ export function bindAndGenerateOperation(
               Math.abs(taxDelta),
               `Налог на прибыль организаций (${profitTaxRate}%)`,
               'Текущий налог на прибыль',
-              `Уменьшение (пересчёт нарастающим итогом с начала года) налога на прибыль (${profitTaxRate}%) при снижении налоговой базы`
+              `Уменьшение налога на прибыль (${profitTaxRate}%) нарастающим итогом с начала года: ${taxBaseExplanation}`,
+              {
+                amountRuleNote: `${profitTaxRate}% × ${formatRuMoneyPlainSpace(taxBaseYtd)} ₽ (${taxBaseExplanation})`,
+              }
             );
           }
         }
@@ -8992,7 +9141,8 @@ export function bindAndGenerateOperation(
               giftCost,
               'Расходы на подарки сотрудникам (безвозмездная передача)',
               empSub,
-              'Списана стоимость подарков сотрудникам в прочие расходы'
+              'Списана стоимость подарков сотрудникам в прочие расходы (не принимаемые в НУ, п. 16 ст. 270 НК РФ)',
+              { nonDeductibleForProfitTax: true }
             );
             if (isOsno) {
               pushEntry(
@@ -9001,7 +9151,8 @@ export function bindAndGenerateOperation(
                 round2(giftCost * 0.2),
                 'НДС при безвозмездной передаче подарков сотрудникам',
                 'Налог (взносы): начислено / уплачено',
-                'Начислен НДС при безвозмездной передаче подарков (пп. 1 п. 1 ст. 146 НК РФ)'
+                'Начислен НДС при безвозмездной передаче подарков (пп. 1 п. 1 ст. 146, п. 16 ст. 270 НК РФ)',
+                { nonDeductibleForProfitTax: true }
               );
             }
           }
@@ -9015,7 +9166,8 @@ export function bindAndGenerateOperation(
             aidGross,
             'Материальная помощь сотрудникам',
             empSub,
-            'Начислена материальная помощь сотруднику'
+            'Начислена материальная помощь сотруднику (не принимаемая в НУ, п. 23 ст. 270 НК РФ)',
+            { nonDeductibleForProfitTax: true }
           );
           if (aidNdfl >= 0.01) {
             pushEntry(
@@ -9660,7 +9812,7 @@ export function bindAndGenerateOperation(
     alimonyRecipientName: resolvedAlimonyRecipientName || undefined,
     alimonyRecipientInn: resolvedAlimonyRecipientInn || undefined,
     alimonyRatePercent: resolvedAlimonyRatePercent,
-    alimonyFixedAmount: draft.alimonyFixedAmount,
+    alimonyFixedAmount: resolvedAlimonyFixedAmount,
     alimonyShareLabel: resolvedAlimonyShareLabel,
     writStartDate: draft.writStartDate,
     financialNotesSummary: resolvedFinancialNotesSummary || undefined,

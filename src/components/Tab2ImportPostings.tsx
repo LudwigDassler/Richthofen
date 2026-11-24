@@ -94,6 +94,7 @@ function deriveReadinessStatus(op: QueuedOperation): OperationReadinessStatus {
   if (
     op.category === 'hr_hire' ||
     op.docType1C === 'ПриемНаРаботу' ||
+    op.docType1C === 'КадровыйПеревод' ||
     op.category === 'writ_of_execution' ||
     op.docType1C === 'ИсполнительныйЛист' ||
     op.category === 'contract_event' ||

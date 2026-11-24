@@ -166,10 +166,18 @@ test('Multi-period OSV (Q1, Q2, H1, Q3, 9M): collapsed synthetic 90/91/99 in И�
   const row9901NineM = osv9M.leafRows.find((r) => r.code === '99.01.1');
   const row9902NineM = osv9M.leafRows.find((r) => r.code === '99.02.1');
   assert.ok((row9901NineM?.endCredit ?? 0) > 0, '99.01.1 cumulative profit remains open at end of 9M');
+  const nonDeductible9M = round2(
+    ops
+      .filter((o) => o.includeInProcessing !== false && (o.date || '') <= '2026-09-30')
+      .flatMap((o) => o.entries)
+      .filter((e) => e.nonDeductibleForProfitTax === true)
+      .reduce((s, e) => s + e.amount, 0)
+  );
+  assert.equal(nonDeductible9M, 188000, '9M non-deductible expenses under Art. 270 NK RF (144 000 gifts + 44 000 material aid) must equal 188 000 ₽');
   assert.equal(
     row9902NineM?.endDebit ?? 0,
-    round2((row9901NineM?.endCredit ?? 0) * 0.2),
-    '99.02.1 cumulative profit tax at 9M must equal exact 20% of 99.01.1'
+    round2(((row9901NineM?.endCredit ?? 0) + nonDeductible9M) * 0.2),
+    '99.02.1 cumulative profit tax at 9M must equal exact 20% of (99.01.1 + nonDeductibleYTD)'
   );
 });
 

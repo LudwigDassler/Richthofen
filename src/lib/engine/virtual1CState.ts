@@ -35,6 +35,12 @@ function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
+function formatRuMoneyPlainSpace(n: number): string {
+  const [intPart, decPart] = Math.abs(round2(n)).toFixed(2).split('.');
+  const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  return `${n < 0 ? '-' : ''}${grouped},${decPart}`;
+}
+
 export function formatRuDateShort(iso?: string): string {
   if (!iso) return 'ранее';
   const m = iso.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -650,6 +656,22 @@ export function cloneVirtual1CState(state: Virtual1CStateSnapshot): Virtual1CSta
     })),
     nomenclature: state.nomenclature.map((n) => ({ ...n, usages: [...n.usages] })),
     employees: state.employees.map((e) => ({ ...e, usages: [...e.usages] })),
+    payroll: state.payroll
+      ? {
+          year: state.payroll.year,
+          ytdTaxableIncomeByEmployee: { ...state.payroll.ytdTaxableIncomeByEmployee },
+          ytdGiftGrossByEmployee: { ...state.payroll.ytdGiftGrossByEmployee },
+          ytdGiftTaxableByEmployee: { ...state.payroll.ytdGiftTaxableByEmployee },
+          ytdMaterialAidGrossByEmployee: { ...state.payroll.ytdMaterialAidGrossByEmployee },
+          ytdMaterialAidTaxableByEmployee: { ...state.payroll.ytdMaterialAidTaxableByEmployee },
+        }
+      : {
+          ytdTaxableIncomeByEmployee: {},
+          ytdGiftGrossByEmployee: {},
+          ytdGiftTaxableByEmployee: {},
+          ytdMaterialAidGrossByEmployee: {},
+          ytdMaterialAidTaxableByEmployee: {},
+        },
     fixedAssets: state.fixedAssets.map((a) => ({ ...a, usages: [...a.usages] })),
     deferredExpenses: (state.deferredExpenses ?? []).map((d) => ({ ...d, usages: [...d.usages] })),
     writsOfExecution: state.writsOfExecution.map((w) => ({ ...w, usages: [...w.usages] })),
@@ -681,6 +703,14 @@ export function createInitialVirtual1CState(
     contracts: [],
     nomenclature: [],
     employees: [],
+    payroll: {
+      year: db1C?.periodStart ? db1C.periodStart.slice(0, 4) : undefined,
+      ytdTaxableIncomeByEmployee: {},
+      ytdGiftGrossByEmployee: {},
+      ytdGiftTaxableByEmployee: {},
+      ytdMaterialAidGrossByEmployee: {},
+      ytdMaterialAidTaxableByEmployee: {},
+    },
     fixedAssets: [],
     deferredExpenses: [],
     writsOfExecution: [],
@@ -745,10 +775,10 @@ export function createInitialVirtual1CState(
     });
   }
 
-  // 3. Nomenclature
+  // 3. Nomenclature (exclude comma-concatenated lists)
   for (const nom of db1C.nomenclature) {
     const name = (nom.name || nom.fullName || '').trim();
-    if (!name) continue;
+    if (!name || name.includes(',')) continue;
     const key = `nom:${normalizeSimpleEntityKey1C(name)}`;
     if (state.nomenclature.some((x) => x.key === key)) continue;
     const inferred = inferNomenclatureCatalogMeta1C(name, undefined, nom.defaultAccount);
@@ -1532,11 +1562,21 @@ export function advanceVirtual1CStateWithOperation(
               account: it.account || op.materialAccount,
               unit: it.unit,
             }))
-            .filter((it) => it.name && !isGenericPlaceholderNomenclature1C(it.name))
-        : op.nomenclatureName &&
-            op.nomenclatureName.trim() &&
-            !isGenericPlaceholderNomenclature1C(op.nomenclatureName)
-          ? [{ name: op.nomenclatureName.trim(), account: op.materialAccount }]
+            .filter(
+              (it) =>
+                it.name &&
+                !it.name.includes(',') &&
+                !isGenericPlaceholderNomenclature1C(it.name)
+            )
+        : op.nomenclatureName && op.nomenclatureName.trim()
+          ? (op.nomenclatureName.includes(',')
+              ? op.nomenclatureName.split(',').map((part) => cleanNomenclatureName1C(part.trim()))
+              : [op.nomenclatureName.trim()]
+            )
+              .filter(
+                (nm) => nm && !nm.includes(',') && !isGenericPlaceholderNomenclature1C(nm)
+              )
+              .map((nm) => ({ name: nm, account: op.materialAccount }))
           : [];
 
     for (const cand of candidateItems) {
@@ -1759,6 +1799,180 @@ export function advanceVirtual1CStateWithOperation(
         }
         existingEmp.usages = addUsageRef(existingEmp.usages, usageRef);
       }
+    }
+  }
+
+  // 4b. Update payroll YTD income per employee for standard child deduction limit (450 000 ₽, ст. 218 НК РФ):
+  // includes wages + taxable part of gifts (valueWithVat - 4 000 ₽) + taxable part of material aid (amount - 4 000 ₽)
+  if (!state.payroll) {
+    state.payroll = {
+      ytdTaxableIncomeByEmployee: {},
+      ytdGiftGrossByEmployee: {},
+      ytdGiftTaxableByEmployee: {},
+      ytdMaterialAidGrossByEmployee: {},
+      ytdMaterialAidTaxableByEmployee: {},
+    };
+  }
+  const opCalendarYear = (op.date || '').slice(0, 4);
+  if (opCalendarYear && /^\d{4}$/.test(opCalendarYear)) {
+    if (state.payroll.year && state.payroll.year !== opCalendarYear) {
+      state.payroll = {
+        year: opCalendarYear,
+        ytdTaxableIncomeByEmployee: {},
+        ytdGiftGrossByEmployee: {},
+        ytdGiftTaxableByEmployee: {},
+        ytdMaterialAidGrossByEmployee: {},
+        ytdMaterialAidTaxableByEmployee: {},
+      };
+      for (const emp of state.employees) {
+        emp.ytdTaxableIncome = 0;
+        emp.ytdGiftGross = 0;
+        emp.ytdGiftTaxable = 0;
+        emp.ytdMaterialAidGross = 0;
+        emp.ytdMaterialAidTaxable = 0;
+      }
+    } else if (!state.payroll.year) {
+      state.payroll.year = opCalendarYear;
+    }
+  }
+
+  const resolvePayrollEmpKey = (rawPerson: string): string => {
+    const pKey = normalizePersonIdentityKey1C(rawPerson);
+    if (!pKey) return '';
+    const exactEmp = state.employees.find((e) => e.key === `emp:${pKey}`);
+    if (exactEmp) return normalizePersonIdentityKey1C(exactEmp.fullName);
+    const stem = pKey
+      .split(/\s+/)[0]
+      .replace(/(?:ова|ева|ина|ына|ской|цкой|ская|цкая|ов|ев|ин|ын|ский|цкий|у|ю|ом|ем|ой|ей)$/u, '');
+    if (!rawPerson.includes('.') && stem.length >= 4) {
+      const byStem = state.employees.find((e) =>
+        e.fullName.toLowerCase().replace(/ё/g, 'е').split(/\s+/)[0].startsWith(stem)
+      );
+      if (byStem) return normalizePersonIdentityKey1C(byStem.fullName);
+    }
+    return pKey;
+  };
+
+  if (!op.isDuplicateIn1C) {
+    if (op.category === 'payroll_accrual') {
+      const isMatAidPayroll = /материальн\p{L}*\s+помощ/iu.test(op.description || '');
+      const addWageOrAidToEmp = (rawName: string, grossAmt: number) => {
+        const pKey = resolvePayrollEmpKey(rawName);
+        if (!pKey || grossAmt <= 0) return;
+        if (isMatAidPayroll) {
+          const prevAidGross = state.payroll!.ytdMaterialAidGrossByEmployee[pKey] ?? 0;
+          const remAid4000 = Math.max(0, round2(4000 - prevAidGross));
+          const taxableAid = Math.max(0, round2(grossAmt - Math.min(grossAmt, remAid4000)));
+          state.payroll!.ytdMaterialAidGrossByEmployee[pKey] = round2(prevAidGross + grossAmt);
+          state.payroll!.ytdMaterialAidTaxableByEmployee[pKey] = round2(
+            (state.payroll!.ytdMaterialAidTaxableByEmployee[pKey] ?? 0) + taxableAid
+          );
+          state.payroll!.ytdTaxableIncomeByEmployee[pKey] = round2(
+            (state.payroll!.ytdTaxableIncomeByEmployee[pKey] ?? 0) + taxableAid
+          );
+        } else {
+          state.payroll!.ytdTaxableIncomeByEmployee[pKey] = round2(
+            (state.payroll!.ytdTaxableIncomeByEmployee[pKey] ?? 0) + grossAmt
+          );
+        }
+      };
+
+      if (op.payrollStaffSummary && op.payrollStaffSummary.length > 0) {
+        for (const s of op.payrollStaffSummary) {
+          if (s.name && s.salary > 0) {
+            addWageOrAidToEmp(s.name, s.salary);
+          }
+        }
+      } else if (op.employeeName && op.amount > 0) {
+        addWageOrAidToEmp(op.employeeName, op.amount);
+      } else if (op.amount > 0 && state.employees.length > 0) {
+        for (const emp of state.employees) {
+          if (
+            emp.isStaffEmployee &&
+            emp.monthlySalary > 0 &&
+            (!emp.hireDate || !op.date || emp.hireDate <= op.date) &&
+            (!emp.terminationDate || !op.date || emp.terminationDate >= op.date)
+          ) {
+            addWageOrAidToEmp(emp.fullName, emp.monthlySalary);
+          }
+        }
+      }
+    } else if (op.category === 'employee_settlement_73') {
+      const isGiftOp = /подар[ока]|безвозмездн\p{L}*\s+передач\p{L}*.*сотрудник/iu.test(
+        op.description || ''
+      );
+      const isMatAidOp = /материальн\p{L}*\s+помощ/iu.test(op.description || '');
+
+      if (isGiftOp) {
+        const e73 = op.entries.find((e) => e.debit === '73.03');
+        const eVat = op.entries.find((e) => e.debit === '91.02' && e.credit === '68.02');
+        const giftTotalWithVat = round2(
+          (e73 ? e73.amount : op.amount) + (eVat ? eVat.amount : 0)
+        );
+        if (giftTotalWithVat > 0) {
+          const targetedKey =
+            op.employeeName && !/сотрудник/iu.test(op.employeeName)
+              ? resolvePayrollEmpKey(op.employeeName)
+              : '';
+          const recipientKeys = targetedKey
+            ? [targetedKey]
+            : state.employees
+                .filter(
+                  (e) =>
+                    e.isStaffEmployee &&
+                    (e.monthlySalary ?? 0) > 0 &&
+                    (!e.hireDate || !op.date || e.hireDate <= op.date) &&
+                    (!e.terminationDate || !op.date || e.terminationDate >= op.date)
+                )
+                .map((e) => normalizePersonIdentityKey1C(e.fullName))
+                .filter(Boolean);
+          if (recipientKeys.length > 0) {
+            const perEmpGiftWithVat = round2(giftTotalWithVat / recipientKeys.length);
+            for (const pKey of recipientKeys) {
+              const prevGiftGross = state.payroll.ytdGiftGrossByEmployee[pKey] ?? 0;
+              const remGift4000 = Math.max(0, round2(4000 - prevGiftGross));
+              const taxableGift = Math.max(
+                0,
+                round2(perEmpGiftWithVat - Math.min(perEmpGiftWithVat, remGift4000))
+              );
+              state.payroll.ytdGiftGrossByEmployee[pKey] = round2(
+                prevGiftGross + perEmpGiftWithVat
+              );
+              state.payroll.ytdGiftTaxableByEmployee[pKey] = round2(
+                (state.payroll.ytdGiftTaxableByEmployee[pKey] ?? 0) + taxableGift
+              );
+              state.payroll.ytdTaxableIncomeByEmployee[pKey] = round2(
+                (state.payroll.ytdTaxableIncomeByEmployee[pKey] ?? 0) + taxableGift
+              );
+            }
+          }
+        }
+      } else if (isMatAidOp) {
+        const eAid = op.entries.find((e) => e.debit === '91.02' && e.credit === '73.03');
+        const aidGross = round2(eAid ? eAid.amount : op.amount);
+        const pKey = op.employeeName ? resolvePayrollEmpKey(op.employeeName) : '';
+        if (pKey && aidGross > 0) {
+          const prevAidGross = state.payroll.ytdMaterialAidGrossByEmployee[pKey] ?? 0;
+          const remAid4000 = Math.max(0, round2(4000 - prevAidGross));
+          const taxableAid = Math.max(0, round2(aidGross - Math.min(aidGross, remAid4000)));
+          state.payroll.ytdMaterialAidGrossByEmployee[pKey] = round2(prevAidGross + aidGross);
+          state.payroll.ytdMaterialAidTaxableByEmployee[pKey] = round2(
+            (state.payroll.ytdMaterialAidTaxableByEmployee[pKey] ?? 0) + taxableAid
+          );
+          state.payroll.ytdTaxableIncomeByEmployee[pKey] = round2(
+            (state.payroll.ytdTaxableIncomeByEmployee[pKey] ?? 0) + taxableAid
+          );
+        }
+      }
+    }
+
+    for (const emp of state.employees) {
+      const pKey = normalizePersonIdentityKey1C(emp.fullName);
+      emp.ytdTaxableIncome = state.payroll.ytdTaxableIncomeByEmployee[pKey] ?? 0;
+      emp.ytdGiftGross = state.payroll.ytdGiftGrossByEmployee[pKey] ?? 0;
+      emp.ytdGiftTaxable = state.payroll.ytdGiftTaxableByEmployee[pKey] ?? 0;
+      emp.ytdMaterialAidGross = state.payroll.ytdMaterialAidGrossByEmployee[pKey] ?? 0;
+      emp.ytdMaterialAidTaxable = state.payroll.ytdMaterialAidTaxableByEmployee[pKey] ?? 0;
     }
   }
 
@@ -1988,8 +2202,9 @@ export function advanceVirtual1CStateWithOperation(
       : op.alimonyRatePercent && op.alimonyRatePercent > 0
         ? op.alimonyRatePercent
         : 25;
-    const shareLabel =
-      op.alimonyShareLabel || (fixedAmt ? `${fixedAmt.toLocaleString('ru-RU')} ₽ / мес.` : `${rate}%`);
+    const shareLabel = fixedAmt
+      ? `фикс. ${formatRuMoneyPlainSpace(fixedAmt)} ₽`
+      : op.alimonyShareLabel || `${rate}%`;
     const debtorKey = normalizePersonIdentityKey1C(debtor);
     const writKey = `writ:${debtorKey}`;
     const existingWrit = state.writsOfExecution.find(
@@ -2783,6 +2998,8 @@ export function buildStep00DirectoryPrepSteps(
       ],
     });
 
+    const fixedStepAmt =
+      op.alimonyFixedAmount && op.alimonyFixedAmount > 0 ? round2(op.alimonyFixedAmount) : undefined;
     const rate = op.alimonyRatePercent && op.alimonyRatePercent > 0 ? op.alimonyRatePercent : 25;
     steps.push({
       id: `prep-writ-${op.id}`,
@@ -2800,7 +3017,9 @@ export function buildStep00DirectoryPrepSteps(
         { field: 'Удерживать с', value: formatRuDateShort(op.date) },
         {
           field: 'Способ расчёта',
-          value: `Процентом (долей) от заработка — ${op.alimonyShareLabel || `${rate}%`} (от дохода за вычетом НДФЛ 13%)`,
+          value: fixedStepAmt
+            ? `Фиксированной суммой — фикс. ${formatRuMoneyPlainSpace(fixedStepAmt)} ₽ ежемесячно`
+            : `Процентом (долей) от заработка — ${op.alimonyShareLabel || `${rate}%`} (от дохода за вычетом НДФЛ 13%)`,
         },
       ],
     });
