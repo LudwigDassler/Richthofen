@@ -9705,7 +9705,6 @@ export function bindAndGenerateOperation(
     contractNumber,
     contractDate,
     nomenclatureName: nomName,
-    items: resolvedItems,
     warehouseName,
     warehouseToName: warehouseToName || undefined,
     expenseItemName,

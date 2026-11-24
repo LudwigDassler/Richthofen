@@ -64,6 +64,7 @@ test('RPB (97.21) parser & calculator: monthly equal shares default vs calendar_
       monthlyAmount: 33333.33,
       writeOffMethod: 'monthly',
       writeOffAccount: '26',
+      originDate: '2026-01-15',
       startMonth: '2026-01',
       settlementAccount: '60.01',
       source: 'created_in_operation',
@@ -77,6 +78,7 @@ test('RPB (97.21) parser & calculator: monthly equal shares default vs calendar_
 test('Explicit ruble WIP inventory (ИнвентаризацияНЗП) retains exact WIP amount and closes excess 20.01 to 90.02.1', () => {
   const op1 = bindAndGenerateOperation(
     {
+      sourceFileName: 'test.csv',
       date: '2026-10-10',
       description: 'Списаны материалы в основное производство',
       amount: 400000,
@@ -92,6 +94,7 @@ test('Explicit ruble WIP inventory (ИнвентаризацияНЗП) retains 
   );
   const op2 = bindAndGenerateOperation(
     {
+      sourceFileName: 'test.csv',
       date: '2026-10-31',
       description: 'Инвентаризация НЗП на конец октября',
       amount: 150000,
@@ -106,8 +109,10 @@ test('Explicit ruble WIP inventory (ИнвентаризацияНЗП) retains 
 
   const op3 = bindAndGenerateOperation(
     {
+      sourceFileName: 'test.csv',
       date: '2026-10-31',
       description: 'Закрытие месяца за октябрь 2026',
+      amount: 0,
       categoryHint: 'closing',
       docTypeHint: 'ЗакрытиеМесяца',
     },
@@ -140,7 +145,9 @@ test('AI Chief-Accountant sanitizer blocks generic nomenclature placeholders, re
     openOrders: [],
     openSettlements: [],
     stockBalances: [],
+    stockItems: [],
     fixedAssets: [],
+    financialBills: [],
     deferredExpenses: [],
   };
 
@@ -332,9 +339,9 @@ test('Q1 standalone reference 1C parity (21,78 млн ₽ OSV) & sequential Q1 -
   assert.ok(recCard7641?.roleHint?.includes('76.41'));
 
   // Check RPB carry-over state after Q1
-  assert.equal(q1State.deferredExpenses.length, 1);
-  assert.equal(q1State.deferredExpenses[0].remainingAmount, 968750);
-  assert.equal(q1State.deferredExpenses[0].remainingMonths, 31);
+  assert.equal((q1State.deferredExpenses ?? []).length, 1);
+  assert.equal(q1State.deferredExpenses![0].remainingAmount, 968750);
+  assert.equal(q1State.deferredExpenses![0].remainingMonths, 31);
 
   // --- STEP 2: Sequential import Q2 on top of Q1 ---
   const q2Res = await processBatchFiles([q2Input], null, {
@@ -363,7 +370,7 @@ test('Q1 standalone reference 1C parity (21,78 млн ₽ OSV) & sequential Q1 -
     'After Q2 (3 more months * 31 250 ₽), 97.21 ending debit must equal 875 000.00 ₽'
   );
   const { finalState: q2State } = buildVirtual1CStateTimeline(null, opsQ1Q2);
-  assert.equal(q2State.deferredExpenses[0].remainingMonths, 28);
+  assert.equal(q2State.deferredExpenses![0].remainingMonths, 28);
 
   // --- STEP 3: Sequential import Q3 on top of Q1+Q2 ---
   const q3Res = await processBatchFiles([q3Input], null, {
@@ -397,7 +404,7 @@ test('Q1 standalone reference 1C parity (21,78 млн ₽ OSV) & sequential Q1 -
     'After Q3 September closing (no wip_inventory in Sep), 20.01 must close 100% to 0.00 ₽'
   );
   const { finalState: q3State } = buildVirtual1CStateTimeline(null, opsQ1Q2Q3);
-  assert.equal(q3State.deferredExpenses[0].remainingMonths, 25);
+  assert.equal(q3State.deferredExpenses![0].remainingMonths, 25);
 
   // Verify sequential Q1->Q2->Q3 OSV matches all-at-once Q1+Q2+Q3 OSV to the exact kopek!
   const allAtOnce = await processBatchFiles([q1Input, q2Input, q3Input], null, {
