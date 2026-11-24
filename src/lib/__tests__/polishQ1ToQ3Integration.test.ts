@@ -252,18 +252,18 @@ test('Q1 standalone reference 1C parity (21,78 млн ₽ OSV) & sequential Q1 -
   assert.equal(q1Row9721?.turnoverCredit, 31250, 'Q1 97.21 March write-off must equal 31 250.00 ₽');
   assert.equal(q1Row9721?.endDebit, 968750, 'Q1 97.21 ending debit must equal 968 750.00 ₽');
 
-  // 1b. 20.01 closing: ONLY "Реконструкция кровли" (364 539.94 ₽) stays in WIP; "Основная номенклатурная группа" closes 100% (0.00 tail!)
+  // 1b. 20.01 closing: ONLY "Реконструкция кровли" (369 198.27 ₽ incl. #35 cement delivery 4 658.33 ₽) stays in WIP; "Основная номенклатурная группа" closes 100% (0.00 tail!)
   const q1Row2001 = q1Osv.leafRows.find((r) => r.code === '20.01');
-  assert.equal(q1Row2001?.endDebit, 364539.94, 'Q1 20.01 ending WIP must equal exact 364 539.94 ₽ without 50 347.22 ₽ tail');
+  assert.equal(q1Row2001?.endDebit, 369198.27, 'Q1 20.01 ending WIP must equal exact 369 198.27 ₽ without 50 347.22 ₽ tail');
   const q1Subs20 = q1Osv.subcontoRowsByAccount?.['20.01'] ?? [];
   const mainGroup20 = q1Subs20.find((s) =>
     s.subcontoLabel.toLowerCase().includes('основная номенклатурная группа')
   );
   assert.equal(mainGroup20?.endDebit ?? 0, 0, 'Основная номенклатурная группа on 20.01 must close 100% to 0.00 ₽');
 
-  // 1c. Q1 OSV Итого matches reference 1C (~21.78M ₽, balanced to 0.00 kopeks)
+  // 1c. Q1 OSV Итого matches reference 1C (21 790 820.16 ₽ incl. #35 cement delivery WIP, balanced to 0.00 kopeks)
   assert.equal(q1Osv.totals.endDiff, 0);
-  assert.equal(Math.floor(q1Osv.totals.endDebit / 10000), 2178, `Expected Q1 endDebit in 21,78 млн ₽ band, got ${q1Osv.totals.endDebit}`);
+  assert.equal(q1Osv.totals.endDebit, 21790820.16, `Expected Q1 endDebit = 21 790 820.16 ₽, got ${q1Osv.totals.endDebit}`);
 
   // 1d. Q1 #53 is classified as ИнвентаризацияНЗП ('wip_inventory')
   assert.equal(q1Res.operations[52].category, 'wip_inventory');

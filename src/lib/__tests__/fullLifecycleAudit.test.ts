@@ -285,33 +285,32 @@ test('Full 28-operation multi-quarter coursework lifecycle: closed-world L1..L7 
   assert.equal(founderCheckOp.counterpartyName, 'Петров П.П.');
   assert.ok(founderCheckOp.entries.some((e) => e.debit === '51' && e.credit === '75.01' && e.amount === 500000));
 
-  // Note #1: 280,000 @ 13% -> 3 months = 280,000 * 0.13 * (3/12) = 9,100 ₽
-  // Note #2: 540,000 @ 11% -> 3 months = 540,000 * 0.11 * (3/12) = 14,850 ₽
-  // First interest accrual (both active) = 9,100 + 14,850 = 23,950 ₽
+  // Note #1: 280,000 @ 13% -> 82 days (18.01..10.04) = 280,000 * 0.13 * 82 / 365 = 8,177.53 ₽
+  // Note #2: 540,000 @ 11% -> 82 days (18.01..10.04) = 540,000 * 0.11 * 82 / 365 = 13,344.66 ₽
+  // First interest accrual (both active) = 8,177.53 + 13,344.66 = 21,522.19 ₽
   const noteInterestOps = syncedOps.filter(
     (o) => o.category === 'financial_interest_accrual'
   );
   assert.equal(noteInterestOps.length, 2);
-  assert.equal(noteInterestOps[0].amount, 23950);
+  assert.equal(noteInterestOps[0].amount, 21522.19);
 
-  // Endorsement of Note #1 to ООО «ПромХимПоставка»: principal 280,000 + accrued interest 9,100 = 289,100 ₽!
-  // Entries: Дт 76.09 Кт 91.01 (289,100), Дт 91.02 Кт 58.02 (280,000), Дт 60.01 Кт 76.09 (289,100 + 9,100 accrued or principal+interest settlement)
+  // Endorsement of Note #1 to ООО «ПромХимПоставка»: principal 280,000 + accrued interest
   const noteDisposalOp = syncedOps.find((o) => o.category === 'financial_disposal');
   assert.ok(noteDisposalOp);
   assert.ok(noteDisposalOp.entries.some((e) => e.debit === '91.02' && e.credit === '58.02' && e.amount === 280000));
   assert.ok(noteDisposalOp.entries.some((e) => e.debit === '60.01' && e.credit === '76.09'));
 
-  // Second interest accrual (10.07.2026) MUST accrue ONLY on active Note #2 (540,000 * 11% * 3/12 = 14,850 ₽), NOT disposed Note #1!
-  assert.equal(noteInterestOps[1].amount, 14850);
+  // Second interest accrual (10.07.2026, 91 days 10.04..10.07) MUST accrue ONLY on active Note #2 (540,000 * 11% * 91 / 365 = 14,809.32 ₽), NOT disposed Note #1!
+  assert.equal(noteInterestOps[1].amount, 14809.32);
 
-  // Loan issued (200,000 @ 12%) -> 1 month interest = 200,000 * 0.12 / 12 = 2,000 ₽
+  // Loan issued (200,000 @ 12%, 15.07..15.08 = 31 days) -> interest = 200,000 * 0.12 * 31 / 365 = 2,038.36 ₽
   const loanOp = syncedOps.find((o) => o.category === 'loan_issued');
   assert.ok(loanOp);
   assert.ok(loanOp.entries.some((e) => e.debit === '58.03' && e.credit === '51' && e.amount === 200000));
 
   const loanInterestOp = syncedOps.find((o) => o.category === 'loan_interest_accrual');
   assert.ok(loanInterestOp);
-  assert.equal(loanInterestOp.amount, 2000);
+  assert.equal(loanInterestOp.amount, 2038.36);
 
   // OS disposal via retirement subaccount 01.09: writes off initial cost 350,000 (Дт 01.09 Кт 01.01), accumulated depreciation (Дт 02.01 Кт 01.09), residual value to 91.02 (Дт 91.02 Кт 01.09) so 01.09 closes to 0!
   const osDisposalOp = syncedOps.find((o) => o.category === 'os_disposal');

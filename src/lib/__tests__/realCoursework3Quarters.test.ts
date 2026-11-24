@@ -262,7 +262,7 @@ test('Real 3-quarter coursework CSV pipeline (207 operations): all 8 systemic ch
   assert.equal(q2Ops[42].amount, 3150000);
 
   assert.equal(q2Ops[3].category, 'penalty_claim');
-  assert.equal(q2Ops[3].amount, 196510, 'Q2 #4 Сбыт court writ must equal 3 000 + 5 000 + 188 510 = 196 510 ₽');
+  assert.equal(q2Ops[3].amount, 203710, 'Q2 #4 Сбыт court writ must equal 3 000 + 5 000 + 195 710 = 203 710 ₽');
   assert.equal(q3Ops[1].docType1C, 'КорректировкаДолга');
   assert.equal(q3Ops[1].entries[0]?.credit, '60.01', 'Q3 #2 must credit 60.01 (7 000 ₽)');
   assert.equal(q3Ops[2].docType1C, 'КорректировкаДолга');

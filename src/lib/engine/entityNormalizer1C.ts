@@ -751,7 +751,7 @@ export function extractEmployeeTaxDeductions1C(text: string): ExtractedEmployeeT
 }
 
 const BANNED_GENERIC_NOMENCLATURE_RE =
-  /^(?:материал[ыа]?|материл[ыа]?|сырь[её](?:\s+и\s+материалы)?|товар[ыа]?|продукци[яюи]|готов\p{L}*\s+продукци[яюи]|услуг[иа]|работ[ыа]|тмц|мпз|номенклатур[аы]|объект\s+ос|основн(?:ое|ые)\s+средств[оа]|оборудовани[ея]|инвентарь|(?:предоплат|аванс|доплат|оплат|плат[её]ж|перечислен)\p{L}*(?:\s+.*)?)$/iu;
+  /^(?:материал[ыа]?|материл[ыа]?|сырь[её](?:\s+и\s+материалы)?|товар[ыа]?|продукци[яюи]|готов\p{L}*\s+продукци[яюи]|услуг[иа]|работ[ыа]|тмц|мпз|номенклатур[аы]|объект\s+ос|основн(?:ое|ые)\s+средств[оа]|оборудовани[ея]|инвентарь|(?:предоплат|аванс|доплат|оплат|плат[её]ж|перечислен)\p{L}*(?:\s+.*)?|на\s+основани\p{L}*(?:\s+.*)?|кредит\p{L}*(?:\s+в\s+банк\p{L}*)?(?:\s+.*)?|(?:процент\p{L}*|%%)\s+(?:по|за)\s+.*|задолженност\p{L}*\s+по\s+.*|долговы[ех]\s+ценн\p{L}*\s+бумаг\p{L}*)$/iu;
 
 export function isGenericPlaceholderNomenclature1C(rawName?: string): boolean {
   const s = (rawName ?? '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
@@ -790,6 +790,7 @@ export function cleanNomenclatureName1C(rawName: string, descriptionContext?: st
       /^(?:от|у|в|из)\s+(?:(?:ООО|АО|ПАО|ЗАО|ОАО|НАО|ГУП|МУП)\s*[«"'„“”]?[^»"'”:\n(]{2,55}[»"'”]?|ИП\s+[А-ЯЁ][а-яё-]+(?:\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?)?)\s*(?:\([^)]*\)\s*)?(?:по\s+дог[^,;:\n-]*\s*)?(?:на\s+основани\p{L}*\s+[^-—–:\n]+[-—–:]\s*)?(?:(?:и\s+)?(?:поступил|получен|принят|приобретен|оплачен)\p{L}*(?:\s+и\s+(?:оплачен|получен|поступил)\p{L}*)?\s*)?:?\s*/iu,
       ''
     )
+    .replace(/^на\s+основани\p{L}*\s+[^-—–:\n]+[-—–:]\s*/iu, '')
     .trim();
 
   // Reject residual counterparty-only strings ("От ООО ...", "ООО ...") or multi-item price lists ("обои 400 м по цене..., клей...")
@@ -814,6 +815,8 @@ export function cleanNomenclatureName1C(rawName: string, descriptionContext?: st
       s = 'Оконный блок';
     } else if (/потолочн\p{L}*\s+плит/iu.test(ctx)) {
       s = 'Потолочные плиты';
+    } else if (/паркет/iu.test(ctx)) {
+      s = 'Паркет';
     } else if (/строительн\p{L}*\s+материал|(?:(?:^|[^\p{L}])обои(?=$|[^\p{L}]).*краск)/iu.test(ctx)) {
       s = 'Строительные материалы';
     } else if (/экскаватор[ау]?-погрузчик/iu.test(ctx)) {
@@ -833,10 +836,15 @@ export function cleanNomenclatureName1C(rawName: string, descriptionContext?: st
     } else if (/(?:^|[^\p{L}])минитрактор[ау]?(?=$|[^\p{L}])/iu.test(ctx)) {
       s = 'Минитрактор';
     } else {
+      const dashItemMatch = ctx.match(
+        /[-—–:]\s*([А-ЯЁа-яё][А-ЯЁа-яё0-9\s-]{2,40}?)(?=\s+\d+(?:[.,]\d+)?\s*(?:шт|штук|ед|кг|т|л|м|м2|м3|бан|уп|рул|компл))/u
+      );
       const prodAfterMatch = ctx.match(
         /продукци[яюи]\s+(?:в\s+(?:кол-ве|количестве)\s+)?(?:\d+(?:[.,]\d+)?\s*(?:шт|штук|ед)\.?\s+)?([А-ЯЁ][А-ЯЁа-яё0-9\s-]{3,50}?)(?=\s+(?:по\s+цене|вкл\.?\s*ндс|с\s+ндс|без\s+ндс|в\s+кол-ве|в\s+количестве)|[.,;]|$)/u
       );
-      if (prodAfterMatch?.[1] && !isGenericPlaceholderNomenclature1C(prodAfterMatch[1])) {
+      if (dashItemMatch?.[1] && !isGenericPlaceholderNomenclature1C(dashItemMatch[1])) {
+        s = dashItemMatch[1].trim();
+      } else if (prodAfterMatch?.[1] && !isGenericPlaceholderNomenclature1C(prodAfterMatch[1])) {
         s = prodAfterMatch[1].trim();
       }
     }

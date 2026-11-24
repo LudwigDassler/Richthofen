@@ -581,26 +581,22 @@ function resolveOperationAmountAndLinksCore(
       (f) => f.account === '58.02' && f.status !== 'disposed' && (f.interestRatePercent ?? 0) > 0
     );
     if (activeNotes.length > 0) {
-      const mMonths = input.description.match(/за\s+(\d{1,2})\s*мес/iu);
-      const explicitMonths = mMonths
-        ? Number(mMonths[1])
-        : /за\s+месяц|ежемесячн/iu.test(input.description)
-          ? 1
-          : /за\s+квартал/iu.test(input.description)
-            ? 3
-            : 0;
       const items: PromissoryNoteInterestCalcItem[] = activeNotes.map((note) => {
         const principal = note.principalAmount ?? note.totalAmount;
         const rate = note.interestRatePercent ?? 0;
         const fromDate = note.lastInterestDate || note.acquisitionDate || input.date;
-        const days = daysBetweenIsoDates(fromDate, input.date);
-        const useMonthsFormula = explicitMonths > 0;
-        const interestAmount = useMonthsFormula
-          ? round2((principal * (rate / 100) * explicitMonths) / 12)
-          : round2((principal * (rate / 100) * days) / 365);
-        const formulaLabel = useMonthsFormula
-          ? `${note.name}: ${fmtMoney(principal)} × ${rate}% × ${explicitMonths} / 12 мес. = ${fmtMoney(interestAmount)}`
-          : `${note.name}: ${fmtMoney(principal)} × ${rate}% × ${days} дн. / 365 = ${fmtMoney(interestAmount)}`;
+        const rawDays = daysBetweenIsoDates(fromDate, input.date);
+        const mMonths = input.description.match(/за\s+(\d{1,2})\s*мес/iu);
+        const fallbackDays = mMonths
+          ? Number(mMonths[1]) * 30
+          : /за\s+квартал/iu.test(input.description)
+            ? 91
+            : /за\s+месяц|ежемесячн/iu.test(input.description)
+              ? 30
+              : 0;
+        const days = rawDays > 0 ? rawDays : fallbackDays;
+        const interestAmount = round2((principal * (rate / 100) * days) / 365);
+        const formulaLabel = `${note.name}: ${fmtMoney(principal)} × ${rate}% × ${days} дн. / 365 = ${fmtMoney(interestAmount)}`;
         return {
           note,
           principal,
@@ -641,12 +637,12 @@ function resolveOperationAmountAndLinksCore(
 
   if (input.category === 'loan_interest_accrual') {
     const mMonths = input.description.match(/за\s+(\d{1,2})\s*мес/iu);
-    const explicitMonths = mMonths
-      ? Number(mMonths[1])
-      : /за\s+месяц|ежемесячн/iu.test(input.description)
-        ? 1
-        : /за\s+квартал/iu.test(input.description)
-          ? 3
+    const fallbackLoanDays = mMonths
+      ? Number(mMonths[1]) * 30
+      : /за\s+квартал/iu.test(input.description)
+        ? 91
+        : /за\s+месяц|ежемесячн/iu.test(input.description)
+          ? 30
           : 0;
     const cpNormLoan = normalizeCounterpartyKey1C(linkedCpName);
 
@@ -666,15 +662,10 @@ function resolveOperationAmountAndLinksCore(
       const principal = loan.principalAmount ?? loan.totalAmount;
       const rate = loan.interestRatePercent ?? 0;
       const fromDate = loan.lastInterestDate || loan.acquisitionDate || input.date;
-      const days = daysBetweenIsoDates(fromDate, input.date);
-      const interestAmt =
-        explicitMonths > 0
-          ? round2((principal * (rate / 100) * explicitMonths) / 12)
-          : round2((principal * (rate / 100) * days) / 365);
-      const formulaStr =
-        explicitMonths > 0
-          ? `${fmtMoney(principal)} × ${rate}% × ${explicitMonths} / 12 мес. = ${fmtMoney(interestAmt)}`
-          : `${fmtMoney(principal)} × ${rate}% × ${days} дн. / 365 = ${fmtMoney(interestAmt)}`;
+      const rawDays = daysBetweenIsoDates(fromDate, input.date);
+      const days = rawDays > 0 ? rawDays : fallbackLoanDays;
+      const interestAmt = round2((principal * (rate / 100) * days) / 365);
+      const formulaStr = `${fmtMoney(principal)} × ${rate}% × ${days} дн. / 365 = ${fmtMoney(interestAmt)}`;
 
       return {
         resolvedAmount: interestAmt,
@@ -734,15 +725,10 @@ function resolveOperationAmountAndLinksCore(
             }
           }
         }
-        const days = daysBetweenIsoDates(startInterestDate, input.date);
-        const interestAmt =
-          explicitMonths > 0
-            ? round2((prev.amount * (rate / 100) * explicitMonths) / 12)
-            : round2((prev.amount * (rate / 100) * days) / 365);
-        const formulaStr =
-          explicitMonths > 0
-            ? `${fmtMoney(prev.amount)} × ${rate}% × ${explicitMonths} / 12 мес. = ${fmtMoney(interestAmt)}`
-            : `${fmtMoney(prev.amount)} × ${rate}% × ${days} дн. / 365 = ${fmtMoney(interestAmt)}`;
+        const rawDays = daysBetweenIsoDates(startInterestDate, input.date);
+        const days = rawDays > 0 ? rawDays : fallbackLoanDays;
+        const interestAmt = round2((prev.amount * (rate / 100) * days) / 365);
+        const formulaStr = `${fmtMoney(prev.amount)} × ${rate}% × ${days} дн. / 365 = ${fmtMoney(interestAmt)}`;
         return {
           resolvedAmount: interestAmt,
           amountMode: 'calculated_by_1c',
@@ -1087,8 +1073,8 @@ function resolveOperationAmountAndLinksCore(
           counterpartyInn: linkedCpInn || ord.counterpartyInn,
           counterpartyKpp: linkedCpKpp || ord.counterpartyKpp,
           contractName: linkedContract || ord.contractName,
-          vatRate: ord.vatRate,
-          vatRule: ord.vatRule,
+          vatRate: (ord.vatRate ?? 0) > 0 ? ord.vatRate : undefined,
+          vatRule: ord.vatRule && ord.vatRule !== 'none' ? ord.vatRule : undefined,
           step01Breakdown: {
             resolverLevel: 3,
             resolverLevelName: LEVEL_NAMES[3],
@@ -1258,8 +1244,11 @@ function resolveOperationAmountAndLinksCore(
           counterpartyInn: linkedCpInn || cpRec?.inn,
           counterpartyKpp: linkedCpKpp || cpRec?.kpp,
           contractName: linkedContract || periodicBuyerCtr.name,
-          vatRate: periodicBuyerCtr.vatRate,
-          vatRule: periodicBuyerCtr.vatRule,
+          vatRate: (periodicBuyerCtr.vatRate ?? 0) > 0 ? periodicBuyerCtr.vatRate : undefined,
+          vatRule:
+            periodicBuyerCtr.vatRule && periodicBuyerCtr.vatRule !== 'none'
+              ? periodicBuyerCtr.vatRule
+              : undefined,
           step01Breakdown: {
             resolverLevel: 3,
             resolverLevelName: LEVEL_NAMES[3],
@@ -1328,8 +1317,11 @@ function resolveOperationAmountAndLinksCore(
           counterpartyInn: linkedCpInn || chosenOrder.counterpartyInn,
           counterpartyKpp: linkedCpKpp || chosenOrder.counterpartyKpp,
           contractName: linkedContract || chosenOrder.contractName,
-          vatRate: chosenOrder.vatRate,
-          vatRule: chosenOrder.vatRule,
+          vatRate: (chosenOrder.vatRate ?? 0) > 0 ? chosenOrder.vatRate : undefined,
+          vatRule:
+            chosenOrder.vatRule && chosenOrder.vatRule !== 'none'
+              ? chosenOrder.vatRule
+              : undefined,
           step01Breakdown: {
             resolverLevel: 3,
             resolverLevelName: LEVEL_NAMES[3],
@@ -2095,7 +2087,7 @@ function resolveOperationAmountAndLinksCore(
   if (input.category === 'penalty_claim') {
     const inlineMatches = Array.from(
       input.description.matchAll(
-        /(?:неуй?стойк\p{L}*|штраф\p{L}*|пен[ияей])\s*(?:в\s+размере\s*|составил\p{L}*\s*|=|:|—|-)\s*(\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)/giu
+        /(?:неуй?стойк\p{L}*|штраф\p{L}*|пен[ияей])\s*(?:в\s+размере\s*|составил\p{L}*\s*|=|:|—|-)\s*(\d{1,3}(?:[\s\u00A0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)/giu
       )
     );
     let penaltySum = 0;

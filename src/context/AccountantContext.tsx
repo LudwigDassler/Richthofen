@@ -1862,12 +1862,12 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     const res = autoFixAllBy1CDb({
       db1C,
       operations,
-      calculateCurrentOsv: (ops) =>
+      calculateCurrentOsv: (ops, dateToOverride) =>
         calculateOsvReport({
           db1C,
           operations: ops,
-          dateFrom: periodFilter.dateFrom,
-          dateTo: periodFilter.dateTo,
+          dateFrom: `${reportingYear}-01-01`,
+          dateTo: dateToOverride || endDate,
           reportingYear,
           balanceAnchorOverride,
           includeQueuedOperations: true,

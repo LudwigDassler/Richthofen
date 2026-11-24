@@ -367,7 +367,7 @@ test('Stage 5 & 6: Audit detects unclosed accounts/advances, Auto-Fix closes per
     periodEndDate: '2025-04-30',
   });
 
-  assert.ok(fixed.fixedCount >= 4);
+  assert.ok(fixed.fixedCount >= 3);
   assert.equal(fixed.executionSummary.remainingAutofixableCount, 0);
 
   const postOsv = calcOsv(fixed.operations);

@@ -1,4 +1,10 @@
 import { isOffBalanceAccountCode } from '@/data/chartOfAccounts';
+import { DOCUMENT_SPECS } from '@/lib/engine/documentSpecs1C';
+import {
+  cleanNomenclatureName1C,
+  extractCharterCapitalInfo1C,
+  isGenericPlaceholderNomenclature1C,
+} from '@/lib/engine/entityNormalizer1C';
 import {
   Database1CSnapshot,
   DEFAULT_REPORTING_YEAR,
@@ -9,6 +15,74 @@ import {
   PersistedWorkbenchStateV2,
   QueuedOperation,
 } from '@/types/accounting';
+
+const NON_NOMENCLATURE_EXPORT_RE =
+  /^(?:вексел\p{L}*(?:\s+.*)?|долговы[ех]\s+ценн\p{L}*\s+бумаг\p{L}*|кредит\p{L}*(?:\s+.*)?|(?:процент\p{L}*|%%)(?:\s+.*)?|задолженност\p{L}*(?:\s+.*)?|на\s+основани\p{L}*(?:\s+.*)?|займ\p{L}*(?:\s+.*)?|заём\p{L}*(?:\s+.*)?)$/iu;
+
+function sanitizeExportNomenclatureName(rawName: string, descriptionCtx?: string): string {
+  const cleaned = (cleanNomenclatureName1C(rawName, descriptionCtx) || rawName || '').trim();
+  if (!cleaned) return '';
+  if (isGenericPlaceholderNomenclature1C(cleaned)) return '';
+  if (NON_NOMENCLATURE_EXPORT_RE.test(cleaned)) return '';
+  return cleaned;
+}
+
+interface EffectiveExportOrganization {
+  name: string;
+  fullName: string;
+  inn: string;
+  kpp: string;
+  ogrn?: string;
+  guid1C?: string;
+  bik?: string;
+  bankName?: string;
+  bankAccount?: string;
+}
+
+function resolveEffectiveExportOrganization(
+  db1C: Database1CSnapshot | null,
+  operations: QueuedOperation[],
+  fullState?: PersistedWorkbenchStateV2
+): EffectiveExportOrganization | null {
+  const dbOrg = db1C?.organization;
+  if (dbOrg && dbOrg.name && dbOrg.name.trim()) {
+    const cleanInn = (dbOrg.inn || '').replace(/\D/g, '');
+    const derivedKpp =
+      dbOrg.kpp || (cleanInn.length === 10 ? `${cleanInn.slice(0, 4)}01001` : '');
+    return {
+      name: dbOrg.name.trim(),
+      fullName: (dbOrg.fullName || dbOrg.name).trim(),
+      inn: cleanInn || dbOrg.inn || '',
+      kpp: derivedKpp,
+      ogrn: dbOrg.ogrn,
+      guid1C: dbOrg.guid1C,
+      bik: dbOrg.bik,
+      bankName: dbOrg.bankName,
+      bankAccount: dbOrg.bankAccount,
+    };
+  }
+
+  const allOps = [...operations, ...(fullState?.operations ?? [])];
+  for (const op of allOps) {
+    const cand = op.ownOrganization ?? extractCharterCapitalInfo1C(op.description).ownOrganization;
+    if (cand && cand.name && cand.name.trim()) {
+      const cleanInn = (cand.inn || '').replace(/\D/g, '');
+      const derivedKpp =
+        cand.kpp || (cleanInn.length === 10 ? `${cleanInn.slice(0, 4)}01001` : '');
+      const bikOp = allOps.find((o) => Boolean(o.organizationBik));
+      return {
+        name: cand.name.trim(),
+        fullName: cand.name.trim(),
+        inn: cleanInn || cand.inn || '',
+        kpp: derivedKpp,
+        bik: bikOp?.organizationBik,
+        bankName: bikOp?.organizationBankName,
+      };
+    }
+  }
+
+  return null;
+}
 
 function escapeBsl(str: string): string {
   return (str ?? '').replace(/"/g, '""').replace(/\r?\n/g, ' ').trim();
@@ -148,8 +222,10 @@ export function buildExportBundle(params: {
       });
     }
     for (const n of db1C.nomenclature) {
-      nomMap.set(n.name.toLowerCase(), {
-        name: n.name,
+      const cleanNom = sanitizeExportNomenclatureName(n.name);
+      if (!cleanNom) continue;
+      nomMap.set(cleanNom.toLowerCase(), {
+        name: cleanNom,
         unit: n.unit || 'шт',
         isService: /услуг/i.test(n.itemKind),
         vatRate: db1C.accountingPolicy.vatRate,
@@ -217,14 +293,19 @@ export function buildExportBundle(params: {
       }
     }
 
+    const specAllowsNomenclature =
+      DOCUMENT_SPECS[op.category]?.masterDataRules.createsNomenclature ?? false;
+    const cleanOpNom = specAllowsNomenclature
+      ? sanitizeExportNomenclatureName(op.nomenclatureName, op.description)
+      : '';
     if (
-      op.nomenclatureName &&
+      cleanOpNom &&
       (mode === 'clean_db' || op.bindings.nomenclature.status === 'new_for_1c')
     ) {
-      const key = op.nomenclatureName.toLowerCase();
+      const key = cleanOpNom.toLowerCase();
       if (!nomMap.has(key)) {
         nomMap.set(key, {
-          name: op.nomenclatureName,
+          name: cleanOpNom,
           unit: 'шт',
           isService: op.category === 'purchase_services' || op.category === 'sale_services',
           vatRate: op.vatRate,
@@ -287,9 +368,12 @@ export function buildExportBundle(params: {
       activeNewOps.reduce((s, o) => s + o.entries.length, 0) + dbPostingsCountInCleanMode,
   };
 
+  const effectiveOrg = resolveEffectiveExportOrganization(db1C, operations, fullState);
+
   const bslCode = generateBslModule({
     mode,
     db1C,
+    effectiveOrg,
     reportingYear: effYear,
     filteredDbPostings: filteredDbPostingsForCleanMode,
     activeNewOps,
@@ -303,7 +387,7 @@ export function buildExportBundle(params: {
 
   const enterpriseDataXml = generateEnterpriseDataXml({
     mode,
-    db1C,
+    effectiveOrg,
     activeNewOps,
     cpList: Array.from(cpMap.values()),
     ctrList: Array.from(ctrMap.values()),
@@ -336,6 +420,7 @@ export function buildExportBundle(params: {
 function generateBslModule(params: {
   mode: ExportMode1C;
   db1C: Database1CSnapshot | null;
+  effectiveOrg: EffectiveExportOrganization | null;
   reportingYear?: number;
   filteredDbPostings: Database1CSnapshot['postings'];
   activeNewOps: QueuedOperation[];
@@ -358,6 +443,7 @@ function generateBslModule(params: {
   const {
     mode,
     db1C,
+    effectiveOrg,
     reportingYear,
     filteredDbPostings,
     activeNewOps,
@@ -369,7 +455,7 @@ function generateBslModule(params: {
     expList,
   } = params;
 
-  const org = db1C?.organization;
+  const org = effectiveOrg ?? db1C?.organization;
   const orgName = escapeBsl(org?.name || '');
   const orgFull = escapeBsl(org?.fullName || org?.name || '');
   const orgInn = escapeBsl(org?.inn || '');
@@ -1320,14 +1406,13 @@ function generateBslModule(params: {
 
 function generateEnterpriseDataXml(params: {
   mode: ExportMode1C;
-  db1C: Database1CSnapshot | null;
+  effectiveOrg: EffectiveExportOrganization | null;
   activeNewOps: QueuedOperation[];
   cpList: Array<{ name: string; fullName: string; inn: string; kpp: string; kind: string }>;
   ctrList: Array<{ name: string; number: string; date: string; cpName: string; cpInn: string; kind: string }>;
   nomList: Array<{ name: string; unit: string; isService: boolean; vatRate: number }>;
 }): string {
-  const { mode, db1C, activeNewOps, cpList, ctrList, nomList } = params;
-  const org = db1C?.organization;
+  const { mode, effectiveOrg: org, activeNewOps, cpList, ctrList, nomList } = params;
   const orgUuid = org?.guid1C || deterministicUuid(`org:${org?.inn || org?.name || 'default'}`);
 
   const xml: string[] = [];
@@ -1463,6 +1548,7 @@ function generateEnterpriseDataXml(params: {
     xml.push(`          <Ссылка>${escapeXml(orgUuid)}</Ссылка>`);
     xml.push(`          <Наименование>${escapeXml(org?.name || '')}</Наименование>`);
     xml.push(`          <ИНН>${escapeXml(org?.inn || '')}</ИНН>`);
+    xml.push(`          <КПП>${escapeXml(org?.kpp || '')}</КПП>`);
     xml.push('        </Организация>');
     xml.push('      </КлючевыеСвойства>');
     xml.push(`      <Сумма>${op.amount.toFixed(2)}</Сумма>`);

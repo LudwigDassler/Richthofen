@@ -22,6 +22,7 @@ import {
   getDocumentSpecByDocType,
   getDocumentSpecForOperation,
 } from '@/lib/engine/documentSpecs1C';
+import { calculateOsvReport } from '@/lib/engine/osvCalculator';
 import {
   DOC_TYPE_LABELS_1C,
   buildOperationMentorGuide1C,
@@ -809,14 +810,47 @@ export function runAuditDiagnostics(params: {
     }
   }
 
-  // Check unaccrued VAT on remaining buyer advances (62.02 > 0 in OSNO without sufficient 76.АВ)
+  // Check unaccrued VAT on remaining buyer advances (62.02 > 0 in OSNO without sufficient 76.АВ) strictly per counterparty
   const isOsno = (db1C?.accountingPolicy.taxSystem ?? 'ОСНО') === 'ОСНО';
   const vatRate = db1C?.accountingPolicy.vatRate ?? 20;
   if (isOsno && vatRate > 0 && acc6202 && acc6202.endCredit > 0.01) {
-    const expected76AV = round2((acc6202.endCredit * vatRate) / (100 + vatRate));
-    const acc76AV = osv.leafRows.find((r) => r.code === '76.АВ');
-    const current76AV = acc76AV?.endDebit ?? 0;
-    if (expected76AV - current76AV > 1) {
+    const subs6202 = (osv.subcontoRowsByAccount?.['62.02'] ?? []).filter(
+      (s) => s.subcontoLabel !== 'Без аналитики (субконто)' && s.endCredit > 0.01
+    );
+    const subs76avByKey = new Map<string, number>();
+    for (const sAv of osv.subcontoRowsByAccount?.['76.АВ'] ?? []) {
+      if (sAv.endDebit > 0.01) {
+        const k = normalizeEntityKey(sAv.subcontoLabel.split('/')[0] ?? '') || sAv.subcontoLabel;
+        subs76avByKey.set(k, round2((subs76avByKey.get(k) ?? 0) + sAv.endDebit));
+      }
+    }
+    let missing76AvTotal = 0;
+    let totalExpected76AV = 0;
+    let totalCurrent76AV = 0;
+    if (subs6202.length > 0) {
+      const adv6202ByKey = new Map<string, number>();
+      for (const s62 of subs6202) {
+        const k = normalizeEntityKey(s62.subcontoLabel.split('/')[0] ?? '') || s62.subcontoLabel;
+        adv6202ByKey.set(k, round2((adv6202ByKey.get(k) ?? 0) + s62.endCredit));
+      }
+      for (const [k, remAdv] of adv6202ByKey.entries()) {
+        const expAv = round2((remAdv * vatRate) / (100 + vatRate));
+        const curAv = subs76avByKey.get(k) ?? 0;
+        totalExpected76AV = round2(totalExpected76AV + expAv);
+        totalCurrent76AV = round2(totalCurrent76AV + curAv);
+        if (expAv - curAv > 1) {
+          missing76AvTotal = round2(missing76AvTotal + (expAv - curAv));
+        }
+      }
+    } else {
+      totalExpected76AV = round2((acc6202.endCredit * vatRate) / (100 + vatRate));
+      const acc76AV = osv.leafRows.find((r) => r.code === '76.АВ');
+      totalCurrent76AV = acc76AV?.endDebit ?? 0;
+      if (totalExpected76AV - totalCurrent76AV > 1) {
+        missing76AvTotal = round2(totalExpected76AV - totalCurrent76AV);
+      }
+    }
+    if (missing76AvTotal > 1) {
       issues.push({
         id: 'missing-advance-vat-76av',
         fixId: 'accrue_advance_vat_76av',
@@ -824,7 +858,7 @@ export function runAuditDiagnostics(params: {
         category: 'vat_discrepancy',
         accountCode: '76.АВ',
         title: 'Не начислен НДС с полученных авансов покупателей (76.АВ — 68.02)',
-        description: `По остатку авансов на счёте 62.02 (${acc6202.endCredit.toFixed(2)} ₽) расчётный НДС ${vatRate}/${100 + vatRate} составляет ${expected76AV.toFixed(2)} ₽ (отражено на 76.АВ: ${current76AV.toFixed(2)} ₽).`,
+        description: `По остатку авансов на счёте 62.02 (${acc6202.endCredit.toFixed(2)} ₽) расчётный НДС ${vatRate}/${100 + vatRate} составляет ${totalExpected76AV.toFixed(2)} ₽ (отражено на 76.АВ: ${totalCurrent76AV.toFixed(2)} ₽, не доначислено ${missing76AvTotal.toFixed(2)} ₽).`,
         accountingReason: `Согласно п. 1 ст. 167 НК РФ налогоплательщик на ОСНО обязан исчислить НДС по расчётной ставке ${vatRate}/${100 + vatRate} с суммы полученной предоплаты и выставить счёт-фактуру на аванс (Дт 76.АВ Кт 68.02).`,
         quickFixLabel: 'Сформировать СФ на аванс кнопкой «Исправить»',
         guide1C: {
@@ -1747,6 +1781,29 @@ export function generatePeriodClosingOperations(params: {
     const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
     closeDate = `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
   }
+  const closeYearPrefix = (closeDate || '').slice(0, 4);
+  const expectedYtdStart = closeYearPrefix ? `${closeYearPrefix}-01-01` : '';
+  const effectiveOsv =
+    osv.dateFrom === expectedYtdStart &&
+    osv.dateTo === closeDate &&
+    osv.sourceMode === 'combined'
+      ? osv
+      : calculateOsvReport({
+          db1C,
+          operations,
+          dateFrom: expectedYtdStart || undefined,
+          dateTo: closeDate,
+          reportingYear: Number(closeYearPrefix) || undefined,
+          balanceAnchorOverride:
+            osv.balanceMode === 'end_balances_reconstructed_start'
+              ? 'treat_raw_as_end'
+              : osv.balanceMode === 'start_balances_forward_end'
+                ? 'treat_raw_as_start'
+                : 'auto',
+          includeQueuedOperations: true,
+          sourceMode: 'combined',
+        });
+
   const log: string[] = [];
   const structuredChanges: AutoFixChangeRecord[] = [];
   const generated: QueuedOperation[] = [];
@@ -1756,10 +1813,10 @@ export function generatePeriodClosingOperations(params: {
     db1C?.nomenclatureGroups[0]?.name || 'Основная номенклатурная группа';
 
   // 1. Advance Offset (Зачёт авансов 60.01—60.02 and 62.02—62.01 strictly per counterparty subconto!)
-  const subs6001 = (osv.subcontoRowsByAccount?.['60.01'] ?? []).filter(
+  const subs6001 = (effectiveOsv.subcontoRowsByAccount?.['60.01'] ?? []).filter(
     (s) => s.subcontoLabel !== 'Без аналитики (субконто)' && s.endCredit >= 0.01
   );
-  const subs6002 = (osv.subcontoRowsByAccount?.['60.02'] ?? []).filter(
+  const subs6002 = (effectiveOsv.subcontoRowsByAccount?.['60.02'] ?? []).filter(
     (s) => s.subcontoLabel !== 'Без аналитики (субконто)' && s.endDebit >= 0.01
   );
   const rem6002 = new Map(subs6002.map((s) => [s.subcontoLabel, round2(s.endDebit)]));
@@ -1792,29 +1849,38 @@ export function generatePeriodClosingOperations(params: {
     }
   }
 
-  const subs6201 = (osv.subcontoRowsByAccount?.['62.01'] ?? []).filter(
+  const subs6201 = (effectiveOsv.subcontoRowsByAccount?.['62.01'] ?? []).filter(
     (s) => s.subcontoLabel !== 'Без аналитики (субконто)' && s.endDebit >= 0.01
   );
-  const subs6202 = (osv.subcontoRowsByAccount?.['62.02'] ?? []).filter(
+  const subs6202 = (effectiveOsv.subcontoRowsByAccount?.['62.02'] ?? []).filter(
     (s) => s.subcontoLabel !== 'Без аналитики (субконто)' && s.endCredit >= 0.01
   );
   const rem6202 = new Map(subs6202.map((s) => [s.subcontoLabel, round2(s.endCredit)]));
-  const subs76AV = new Map(
-    (osv.subcontoRowsByAccount?.['76.АВ'] ?? [])
-      .filter((s) => s.endDebit >= 0.01)
-      .map((s) => [normalizeEntityKey(s.subcontoLabel.split('/')[0] ?? ''), { label: s.subcontoLabel, rem: round2(s.endDebit) }])
-  );
+  const subs76AV = new Map<string, { label: string; rem: number }>();
+  for (const sAv of effectiveOsv.subcontoRowsByAccount?.['76.АВ'] ?? []) {
+    if (sAv.endDebit < 0.01) continue;
+    const avKey = normalizeEntityKey(sAv.subcontoLabel.split('/')[0] ?? '') || sAv.subcontoLabel;
+    const prevAv = subs76AV.get(avKey);
+    subs76AV.set(avKey, {
+      label: prevAv?.label || sAv.subcontoLabel,
+      rem: round2((prevAv?.rem ?? 0) + sAv.endDebit),
+    });
+  }
   const pairs62: Array<{ dtSub: string; ktSub: string; amount: number; vatRestore?: { sub: string; amt: number } }> = [];
 
   for (const dSub of subs6201) {
     let remDebt = round2(dSub.endDebit);
     if (remDebt < 0.01) continue;
     const baseKey = normalizeEntityKey(dSub.subcontoLabel.split('/')[0] ?? '');
-    const record62Offset = (advLabel: string, off: number) => {
+    const record62Offset = (advLabel: string, off: number, totalAdvForKeyAfter: number) => {
       let vatRestore: { sub: string; amt: number } | undefined;
       const avEntry = baseKey ? subs76AV.get(baseKey) : undefined;
       if (avEntry && avEntry.rem >= 0.01) {
-        const calcVat = round2(Math.min(avEntry.rem, (off * 20) / 120));
+        const rawVat = round2((off * 20) / 120);
+        const calcVat =
+          totalAdvForKeyAfter < 0.01 && Math.abs(avEntry.rem - rawVat) <= 0.05
+            ? avEntry.rem
+            : round2(Math.min(avEntry.rem, rawVat));
         if (calcVat >= 0.01) {
           vatRestore = { sub: avEntry.label, amt: calcVat };
           avEntry.rem = round2(avEntry.rem - calcVat);
@@ -1823,12 +1889,23 @@ export function generatePeriodClosingOperations(params: {
       pairs62.push({ dtSub: advLabel, ktSub: dSub.subcontoLabel, amount: off, vatRestore });
     };
 
+    const sumRem6202ForBaseKey = (k: string): number => {
+      if (!k) return 0;
+      let sum = 0;
+      for (const [lbl, val] of rem6202.entries()) {
+        if (val >= 0.01 && normalizeEntityKey(lbl.split('/')[0] ?? '') === k) {
+          sum = round2(sum + val);
+        }
+      }
+      return sum;
+    };
+
     const exactAdv = rem6202.get(dSub.subcontoLabel) ?? 0;
     if (exactAdv >= 0.01) {
       const off = round2(Math.min(remDebt, exactAdv));
-      record62Offset(dSub.subcontoLabel, off);
-      remDebt = round2(remDebt - off);
       rem6202.set(dSub.subcontoLabel, round2(exactAdv - off));
+      remDebt = round2(remDebt - off);
+      record62Offset(dSub.subcontoLabel, off, sumRem6202ForBaseKey(baseKey));
     }
     if (remDebt >= 0.01 && baseKey) {
       for (const [advLabel, advVal] of rem6202.entries()) {
@@ -1836,9 +1913,9 @@ export function generatePeriodClosingOperations(params: {
         const advBase = normalizeEntityKey(advLabel.split('/')[0] ?? '');
         if (advBase === baseKey) {
           const off = round2(Math.min(remDebt, advVal));
-          record62Offset(advLabel, off);
-          remDebt = round2(remDebt - off);
           rem6202.set(advLabel, round2(advVal - off));
+          remDebt = round2(remDebt - off);
+          record62Offset(advLabel, off, sumRem6202ForBaseKey(baseKey));
         }
       }
     }
@@ -1951,30 +2028,74 @@ export function generatePeriodClosingOperations(params: {
     generated.push(offsetOp);
   }
 
-  // 2. Advance VAT on remaining 62.02 balance (after offset62)
+  // 2. Advance VAT on remaining 62.02 balance (after offset62) — strictly per counterparty!
   const isOsno = (db1C?.accountingPolicy.taxSystem ?? 'ОСНО') === 'ОСНО';
   const vatRate = db1C?.accountingPolicy.vatRate ?? 20;
-  const acc6202 = osv.leafRows.find((r) => r.code === '62.02');
+  const acc6202 = effectiveOsv.leafRows.find((r) => r.code === '62.02');
   const remaining6202 = round2((acc6202?.endCredit ?? 0) - offset62);
   if (isOsno && vatRate > 0 && remaining6202 > 0.01) {
-    const expected76AV = round2((remaining6202 * vatRate) / (100 + vatRate));
-    const restored76AV = round2(pairs62.reduce((s, p) => s + (p.vatRestore?.amt ?? 0), 0));
-    const current76AV = round2(
-      (osv.leafRows.find((r) => r.code === '76.АВ')?.endDebit ?? 0) - restored76AV
-    );
-    const deltaVat = round2(expected76AV - current76AV);
-    if (deltaVat > 1) {
-      const advOp = operations.find((o) =>
-        o.entries.some((e) => e.credit === '62.02')
+    const remAdvByCpKey = new Map<string, { label: string; remAdv: number }>();
+    for (const [advLbl, advRem] of rem6202.entries()) {
+      if (advRem < 0.01) continue;
+      const cpKey = normalizeEntityKey(advLbl.split('/')[0] ?? '') || advLbl;
+      const prev = remAdvByCpKey.get(cpKey);
+      remAdvByCpKey.set(cpKey, {
+        label: prev?.label || advLbl,
+        remAdv: round2((prev?.remAdv ?? 0) + advRem),
+      });
+    }
+
+    // Fallback only when 62.02 came from aggregate rawBalances without subcontos
+    if (remAdvByCpKey.size === 0 && subs6202.length === 0) {
+      const restored76AV = round2(pairs62.reduce((s, p) => s + (p.vatRestore?.amt ?? 0), 0));
+      const current76AV = round2(
+        (effectiveOsv.leafRows.find((r) => r.code === '76.АВ')?.endDebit ?? 0) - restored76AV
       );
-      const cpName = advOp?.counterpartyName ?? 'Покупатели по авансам';
+      const expected76AV = round2((remaining6202 * vatRate) / (100 + vatRate));
+      const deltaVat = round2(expected76AV - current76AV);
+      if (deltaVat > 1) {
+        remAdvByCpKey.set('__aggregate__', { label: 'Покупатели по авансам', remAdv: remaining6202 });
+      }
+    }
+
+    for (const [cpKey, cpAdvInfo] of remAdvByCpKey.entries()) {
+      const expectedCp76AV = round2((cpAdvInfo.remAdv * vatRate) / (100 + vatRate));
+      const curCp76AV =
+        cpKey === '__aggregate__'
+          ? round2(
+              (effectiveOsv.leafRows.find((r) => r.code === '76.АВ')?.endDebit ?? 0) -
+                round2(pairs62.reduce((s, p) => s + (p.vatRestore?.amt ?? 0), 0))
+            )
+          : round2(subs76AV.get(cpKey)?.rem ?? 0);
+      const deltaVat = round2(expectedCp76AV - curCp76AV);
+      if (deltaVat <= 1) continue;
+
+      const matchingAdvOps = operations.filter(
+        (o) =>
+          o.includeInProcessing &&
+          !o.isDuplicateIn1C &&
+          (!closeDate || o.date <= closeDate) &&
+          o.entries.some((e) => e.credit === '62.02') &&
+          (cpKey === '__aggregate__' ||
+            normalizeEntityKey(o.counterpartyName) === cpKey ||
+            o.entries.some(
+              (e) =>
+                e.credit === '62.02' &&
+                normalizeEntityKey((e.creditSubconto || '').split('/')[0] ?? '') === cpKey
+            ))
+      );
+      const advOp = matchingAdvOps[matchingAdvOps.length - 1];
+      const cpName =
+        advOp?.counterpartyName || cpAdvInfo.label.split(' / ')[0].trim() || 'Покупатели по авансам';
+      const advDate = advOp?.date || closeDate;
+
       const advVatOp: QueuedOperation = {
         id: nextAutoFixId('op-auto-76av'),
         createdAt: new Date().toISOString(),
         sourceFileName: 'Автоисправление 1С',
-        date: closeDate,
+        date: advDate,
         docNumber: 'АВТ-СФА',
-        description: `Регистрация счёта-фактуры на полученный аванс (НДС ${vatRate}/${100 + vatRate})`,
+        description: `Регистрация счёта-фактуры на полученный аванс от ${cpName} (НДС ${vatRate}/${100 + vatRate})`,
         category: 'advance_vat',
         docType1C: 'СчетФактураВыданный',
         documentSubKind1C: 'На аванс',
@@ -1991,8 +2112,8 @@ export function generatePeriodClosingOperations(params: {
         counterpartyKpp: advOp?.counterpartyKpp ?? '',
         counterpartyKind: 'ЮридическоеЛицо',
         contractName: advOp?.contractName ?? '',
-        contractNumber: '',
-        contractDate: '',
+        contractNumber: advOp?.contractNumber ?? '',
+        contractDate: advOp?.contractDate ?? '',
         nomenclatureName: '',
         warehouseName: '',
         expenseItemName: '',
@@ -2018,17 +2139,17 @@ export function generatePeriodClosingOperations(params: {
             debitSubconto: cpName,
             creditSubconto: 'Налог (взносы): начислено / уплачено',
             amount: deltaVat,
-            description: 'Начислен НДС с полученных авансов покупателей',
+            description: `Начислен НДС с полученного аванса покупателя (${cpName})`,
           },
         ],
       };
       advVatOp.mentorGuide1C = buildOperationMentorGuide1C(advVatOp, db1C);
       generated.push(advVatOp);
-      log.push(`Начислен НДС с авансов покупателей Дт 76.АВ Кт 68.02 на ${deltaVat.toFixed(2)} ₽`);
+      log.push(`Начислен НДС с аванса покупателя «${cpName}» Дт 76.АВ Кт 68.02 на ${deltaVat.toFixed(2)} ₽`);
       structuredChanges.push({
         id: nextAutoFixId('chg-76av'),
-        whatWas: `Остаток Кт 62.02 (${remaining6202.toFixed(2)} ₽) без полного исчисления НДС на 76.АВ`,
-        whatBecame: `СФ на аванс: Дт 76.АВ Кт 68.02 на ${deltaVat.toFixed(2)} ₽ (${vatRate}/${100 + vatRate})`,
+        whatWas: `Остаток Кт 62.02 по «${cpName}» (${cpAdvInfo.remAdv.toFixed(2)} ₽) без полного исчисления НДС на 76.АВ`,
+        whatBecame: `СФ на аванс (${advDate}): Дт 76.АВ Кт 68.02 на ${deltaVat.toFixed(2)} ₽ (${vatRate}/${100 + vatRate})`,
         basis: 'П. 1 ст. 167 и п. 4 ст. 164 НК РФ (исчисление НДС с предоплаты на ОСНО)',
         category: 'vat_calc',
       });
@@ -2048,14 +2169,6 @@ export function generatePeriodClosingOperations(params: {
   const closeTotalMonths =
     Number(closeYearStr) * 12 + (Number(closeMonthStr) || 0);
 
-  const alreadyHasDeprInCloseMonth = operations.some(
-    (o) =>
-      o.includeInProcessing &&
-      !o.isDuplicateIn1C &&
-      o.date.slice(0, 7) === closeYm &&
-      o.entries.some((e) => e.credit === '02.01')
-  );
-
   let addedTo9007 = 0;
   let addedRpbTo44 = 0;
   const vTimelineForClosing = buildVirtual1CStateTimeline(
@@ -2064,7 +2177,7 @@ export function generatePeriodClosingOperations(params: {
   );
   const finalVState = vTimelineForClosing.finalState;
 
-  if (!alreadyHasDeprInCloseMonth && closeTotalMonths > 0) {
+  if (closeTotalMonths > 0) {
     const activeAssets = Object.values(finalVState.fixedAssets).filter(
       (fa) =>
         fa.status === 'Введено в эксплуатацию (счёт 01.01)' &&
@@ -2075,6 +2188,22 @@ export function generatePeriodClosingOperations(params: {
     );
 
     for (const fa of activeAssets) {
+      const faNormKey = normalizeEntityKey(fa.name || '');
+      const alreadyDepreciatedAssetInCloseMonth = operations.some(
+        (o) =>
+          o.includeInProcessing &&
+          !o.isDuplicateIn1C &&
+          o.date.slice(0, 7) === closeYm &&
+          o.entries.some((e) => {
+            if (e.credit !== '02.01') return false;
+            const eSubNorm = normalizeEntityKey((e.creditSubconto || '').split('/')[0] ?? '');
+            if (faNormKey && eSubNorm) return eSubNorm === faNormKey;
+            const descNorm = normalizeEntityKey(e.description || o.description || '');
+            return Boolean(faNormKey && descNorm.includes(faNormKey));
+          })
+      );
+      if (alreadyDepreciatedAssetInCloseMonth) continue;
+
       const spi = fa.usefulLifeMonths && fa.usefulLifeMonths > 0 ? fa.usefulLifeMonths : 60;
       const rawMDepr =
         fa.monthlyDepreciation > 0 ? fa.monthlyDepreciation : round2(fa.initialCost / spi);
@@ -2151,10 +2280,10 @@ export function generatePeriodClosingOperations(params: {
     }
   }
 
-  const acc25 = osv.leafRows.find((r) => r.code === '25');
+  const acc25 = effectiveOsv.leafRows.find((r) => r.code === '25');
   const total25ToClose = round2(acc25?.endDebit ?? 0);
   if (total25ToClose > 0.01) {
-    const subs25 = (osv.subcontoRowsByAccount?.['25'] ?? []).filter((s) => s.endDebit >= 0.01);
+    const subs25 = (effectiveOsv.subcontoRowsByAccount?.['25'] ?? []).filter((s) => s.endDebit >= 0.01);
     const sumSubs25 = round2(subs25.reduce((s, r) => s + r.endDebit, 0));
     if (subs25.length > 0 && Math.abs(sumSubs25 - total25ToClose) < 0.02) {
       for (const s25 of subs25) {
@@ -2189,22 +2318,22 @@ export function generatePeriodClosingOperations(params: {
     });
   }
 
-  const acc20 = osv.leafRows.find((r) => r.code === '20.01');
+  const acc20 = effectiveOsv.leafRows.find((r) => r.code === '20.01');
   const base20EndDebit = round2(acc20?.endDebit ?? 0);
   const total20ToClose = round2(
     base20EndDebit +
       total25ToClose +
       addedDeprTo20 +
       (!directCosting
-        ? (osv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0) + addedDeprTo26
+        ? (effectiveOsv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0) + addedDeprTo26
         : 0)
   );
-  const base26EndDebit = round2(osv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0);
+  const base26EndDebit = round2(effectiveOsv.leafRows.find((r) => r.code === '26')?.endDebit ?? 0);
   const total26ToClose = round2(base26EndDebit + addedDeprTo26);
 
   if (total26ToClose > 0.01) {
     const targetDt = directCosting ? '90.08.1' : '20.01';
-    const subs26 = (osv.subcontoRowsByAccount?.['26'] ?? []).filter((s) => s.endDebit >= 0.01);
+    const subs26 = (effectiveOsv.subcontoRowsByAccount?.['26'] ?? []).filter((s) => s.endDebit >= 0.01);
     const sumSubs26 = round2(subs26.reduce((s, r) => s + r.endDebit, 0));
     if (subs26.length > 0 && Math.abs(sumSubs26 - base26EndDebit) < 0.02) {
       for (const s26 of subs26) {
@@ -2310,7 +2439,7 @@ export function generatePeriodClosingOperations(params: {
       }
     }
     if (!monthHasHandover && !explicitAllWipInMonth && opsInCloseMonth.length === 0) {
-      const rev9001 = osv.leafRows.find((r) => r.code === '90.01.1')?.endCredit ?? 0;
+      const rev9001 = effectiveOsv.leafRows.find((r) => r.code === '90.01.1')?.endCredit ?? 0;
       if (rev9001 > 0.01) monthHasHandover = true;
     }
 
@@ -2334,7 +2463,7 @@ export function generatePeriodClosingOperations(params: {
       return monthHasHandover || (!explicitAllWipInMonth && explicitWipGroupsInMonth.size === 0);
     };
 
-    const subs20 = (osv.subcontoRowsByAccount?.['20.01'] ?? []).filter((s) => s.endDebit >= 0.01);
+    const subs20 = (effectiveOsv.subcontoRowsByAccount?.['20.01'] ?? []).filter((s) => s.endDebit >= 0.01);
     const sumSubs20 = round2(subs20.reduce((s, r) => s + r.endDebit, 0));
     const extra20 = round2(
       total25ToClose + addedDeprTo20 + (!directCosting ? total26ToClose : 0)
@@ -2395,7 +2524,7 @@ export function generatePeriodClosingOperations(params: {
     }
   }
 
-  const acc4401 = osv.leafRows.find((r) => r.code === '44.01');
+  const acc4401 = effectiveOsv.leafRows.find((r) => r.code === '44.01');
   const total44ToClose = round2((acc4401?.endDebit ?? 0) + addedRpbTo44);
   if (total44ToClose > 0.01) {
     closingEntries.push({
@@ -2419,7 +2548,7 @@ export function generatePeriodClosingOperations(params: {
   }
 
   // Net residual on 90 after closing 20.01, 26 and 44.01
-  const children90 = osv.leafRows.filter((r) => r.code.startsWith('90.'));
+  const children90 = effectiveOsv.leafRows.filter((r) => r.code.startsWith('90.'));
   const currentNet90DebitMinusCredit = round2(
     children90.reduce((s, r) => s + (r.endDebit - r.endCredit), 0) +
       addedTo9008 +
@@ -2469,7 +2598,7 @@ export function generatePeriodClosingOperations(params: {
   }
 
   // Net residual on 91
-  const children91 = osv.leafRows.filter((r) => r.code.startsWith('91.'));
+  const children91 = effectiveOsv.leafRows.filter((r) => r.code.startsWith('91.'));
   const net91DebitMinusCredit = round2(
     children91.reduce((s, r) => s + (r.endDebit - r.endCredit), 0)
   );
@@ -2520,9 +2649,8 @@ export function generatePeriodClosingOperations(params: {
   const closeMonthNum = Number((closeDate || '').slice(5, 7)) || 0;
   const isQuarterEnd = [3, 6, 9, 12].includes(closeMonthNum);
   const profitTaxRate = db1C?.accountingPolicy.profitTaxRate ?? 20;
-  const closeYearPrefix = (closeDate || '').slice(0, 4);
   if (isOsno && isQuarterEnd && profitTaxRate > 0) {
-    const existing9901Row = osv.leafRows.find((r) => r.code === '99.01.1' || r.code === '99');
+    const existing9901Row = effectiveOsv.leafRows.find((r) => r.code === '99.01.1' || r.code === '99');
     const existingNetCredit9901 = existing9901Row
       ? round2(existing9901Row.endCredit - existing9901Row.endDebit)
       : 0;
@@ -2590,7 +2718,7 @@ export function generatePeriodClosingOperations(params: {
     const targetTaxTotal =
       totalProfitBeforeTax > 0.01 ? round2(totalProfitBeforeTax * (profitTaxRate / 100)) : 0;
     const profitTaxDelta = round2(targetTaxTotal - alreadyAccruedTax);
-    if (profitTaxDelta >= 0.01) {
+    if (profitTaxDelta > 0.02) {
       closingEntries.push({
         id: nextAutoFixId('close-profit-tax'),
         debit: '99.02.1',
@@ -2610,7 +2738,7 @@ export function generatePeriodClosingOperations(params: {
         basis: 'Ст. 284 НК РФ — регламентная операция «Расчёт налога на прибыль» 1С:БП 3.0',
         category: 'closing',
       });
-    } else if (profitTaxDelta <= -0.01) {
+    } else if (profitTaxDelta < -0.02) {
       const taxReduction = Math.abs(profitTaxDelta);
       closingEntries.push({
         id: nextAutoFixId('close-profit-tax-reduce'),
@@ -2648,13 +2776,13 @@ export function generatePeriodClosingOperations(params: {
     );
     {
       const codes90 = new Set<string>([
-        ...osv.leafRows.filter((r) => r.code.startsWith('90.') && r.code !== '90.09').map((r) => r.code),
+        ...effectiveOsv.leafRows.filter((r) => r.code.startsWith('90.') && r.code !== '90.09').map((r) => r.code),
         ...closingEntries
           .flatMap((e) => [e.debit, e.credit])
           .filter((c) => c.startsWith('90.') && c !== '90.09'),
       ]);
       for (const code90 of codes90) {
-        const r90 = osv.leafRows.find((r) => r.code === code90);
+        const r90 = effectiveOsv.leafRows.find((r) => r.code === code90);
         const extraDt = closingEntries
           .filter((e) => e.debit === code90)
           .reduce((s, e) => s + e.amount, 0);
@@ -2686,13 +2814,13 @@ export function generatePeriodClosingOperations(params: {
       }
 
       const codes91 = new Set<string>([
-        ...osv.leafRows.filter((r) => r.code.startsWith('91.') && r.code !== '91.09').map((r) => r.code),
+        ...effectiveOsv.leafRows.filter((r) => r.code.startsWith('91.') && r.code !== '91.09').map((r) => r.code),
         ...closingEntries
           .flatMap((e) => [e.debit, e.credit])
           .filter((c) => c.startsWith('91.') && c !== '91.09'),
       ]);
       for (const code91 of codes91) {
-        const r91 = osv.leafRows.find((r) => r.code === code91);
+        const r91 = effectiveOsv.leafRows.find((r) => r.code === code91);
         const extraDt = closingEntries
           .filter((e) => e.debit === code91)
           .reduce((s, e) => s + e.amount, 0);
@@ -2723,7 +2851,7 @@ export function generatePeriodClosingOperations(params: {
         }
       }
 
-      const children99 = osv.leafRows.filter((r) => r.code.startsWith('99.') || r.code === '99');
+      const children99 = effectiveOsv.leafRows.filter((r) => r.code.startsWith('99.') || r.code === '99');
       const codes99 = new Set<string>([
         ...children99.map((r) => r.code),
         ...closingEntries
@@ -2856,7 +2984,7 @@ export function generatePeriodClosingOperations(params: {
 export function autoFixAllBy1CDb(params: {
   db1C: Database1CSnapshot | null;
   operations: QueuedOperation[];
-  calculateCurrentOsv: (ops: QueuedOperation[]) => OsvReport;
+  calculateCurrentOsv: (ops: QueuedOperation[], dateToOverride?: string) => OsvReport;
   periodEndDate: string;
   reportingYear?: number;
   defaultBik?: string;
@@ -4406,7 +4534,7 @@ export function autoFixSingleOperation(params: {
   operationId: string;
   db1C: Database1CSnapshot | null;
   operations: QueuedOperation[];
-  calculateCurrentOsv: (ops: QueuedOperation[]) => OsvReport;
+  calculateCurrentOsv: (ops: QueuedOperation[], dateToOverride?: string) => OsvReport;
   periodEndDate: string;
   reportingYear?: number;
   defaultBik?: string;
@@ -4466,7 +4594,7 @@ export function autoFixAuditIssue(params: {
   issue: AuditIssue;
   db1C: Database1CSnapshot | null;
   operations: QueuedOperation[];
-  calculateCurrentOsv: (ops: QueuedOperation[]) => OsvReport;
+  calculateCurrentOsv: (ops: QueuedOperation[], dateToOverride?: string) => OsvReport;
   periodEndDate: string;
   reportingYear?: number;
   defaultBik?: string;

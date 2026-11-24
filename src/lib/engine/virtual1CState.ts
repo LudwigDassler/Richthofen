@@ -972,21 +972,38 @@ export function resolveUnpaidSupplier6001ByKeywords(
   );
   if (open6001.length === 0) return null;
 
-  // Case A: Counterparty is already known, but amount is missing -> sum open 60.01 for that supplier (filtered by stems if stems match)
+  // Case A: Counterparty is already known, but amount is missing -> sum open 60.01 for that supplier (filtered by explicit contract number or stems)
   if (explicitCounterpartyName && explicitCounterpartyName.trim()) {
     const cpKey = normalizeCounterpartyKey1C(explicitCounterpartyName);
     const forSupplier = open6001.filter(
       (s) => normalizeCounterpartyKey1C(s.counterpartyName) === cpKey
     );
     if (forSupplier.length > 0) {
+      const ctrNumMatch = paymentText.match(
+        /(?:дог(?:овор\p{L}*)?|контракт\p{L}*)\s*(?:№\s*)?(\d[А-Яа-яA-Za-z0-9/-]*)/iu
+      );
+      const explicitCtrNum = ctrNumMatch?.[1]?.trim();
+      const ctrFiltered = explicitCtrNum
+        ? forSupplier.filter((s) => {
+            const escaped = explicitCtrNum.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            return new RegExp(`(?:^|[^\\d])${escaped}(?:$|[^\\d])`, 'iu').test(
+              s.contractName || ''
+            );
+          })
+        : [];
       const queryStems = extractKeywordStems1C(paymentText);
       const stemFiltered =
-        queryStems.length > 0
+        ctrFiltered.length === 0 && queryStems.length > 0
           ? forSupplier.filter((s) =>
               s.keywordStems.some((ks) => queryStems.some((qs) => stemsMatch(ks, qs)))
             )
           : [];
-      const chosen = stemFiltered.length > 0 ? stemFiltered : forSupplier;
+      const chosen =
+        ctrFiltered.length > 0
+          ? ctrFiltered
+          : stemFiltered.length > 0
+            ? stemFiltered
+            : forSupplier;
       const total = round2(chosen.reduce((acc, s) => acc + s.remainingAmount, 0));
       const refs = chosen
         .map((s) =>
