@@ -59,6 +59,8 @@ export type UnitCode1COkei = '796' | '166' | '055' | '112' | '113';
 
 export type InvoiceSFKind1CPackage = 'received' | 'issued_sale' | 'issued_advance' | 'none';
 
+export type DynamicBalanceMode1C = 'taxes_all' | 'payroll_balance';
+
 export interface PackageMeta1C {
   schemaVersion: 'bp30-v1';
   generatedAt: string;
@@ -66,6 +68,7 @@ export interface PackageMeta1C {
   periodFrom: string;
   periodTo: string;
   totalDocuments: number;
+  usesLegacyPayrollAccounts?: boolean;
 }
 
 export interface PackageOrganization1C {
@@ -164,6 +167,7 @@ export interface PackageDocumentHeader1C {
   invoiceSFKind: InvoiceSFKind1CPackage;
   isPaidImmediately: boolean;
   paidAccount: string;
+  dynamicBalanceMode?: DynamicBalanceMode1C;
 }
 
 export interface PackageDocumentRow1C {
@@ -203,6 +207,7 @@ export interface PackageDocument1C {
   quarter: 1 | 2 | 3 | 4;
   metaType1C: MetaType1CBP30;
   executionStrategy: ExecutionStrategy1C;
+  dynamicBalanceMode?: DynamicBalanceMode1C;
   header: PackageDocumentHeader1C;
   rows: PackageDocumentRow1C[];
   entries: PackageAccountingEntry1C[];
@@ -872,6 +877,63 @@ function resolveMetaTypeAndStrategy(op: QueuedOperation): {
   };
 }
 
+function resolveDynamicBalanceMode(
+  op: QueuedOperation,
+  metaType1C: MetaType1CBP30,
+  operationKind1C: string
+): DynamicBalanceMode1C | undefined {
+  const desc = (op.description || '').toLowerCase();
+
+  // 1. Full tax & social contribution debt settlement ('taxes_all')
+  const isTaxOut =
+    metaType1C === 'СписаниеСРасчетногоСчета' &&
+    (op.category === 'tax_payment' ||
+      operationKind1C === 'ПеречислениеНалога' ||
+      op.entries.some((e) => (e.debit.startsWith('68.') || e.debit.startsWith('69.')) && e.credit === '51'));
+
+  if (isTaxOut) {
+    const distinctTaxDebits = new Set(
+      op.entries
+        .filter((e) => e.debit.startsWith('68.') || e.debit.startsWith('69.'))
+        .map((e) => e.debit)
+    );
+    const mentionsAllTaxesOrDebt =
+      /налог\p{L}*\s+и\s+(?:страхов\p{L}*\s+)?взнос|задолженност\p{L}*\s+по\s+налог|в\s+бюджет\s+задолженност|все\p{L}*\s+налог|налог\p{L}*\s+и\s+сбор/iu.test(
+        desc
+      );
+    const noHardcodedRawExcelAmount = (op.rawExcelAmount ?? 0) < 0.01 && op.amountMode !== 'explicit';
+
+    if (distinctTaxDebits.size >= 2 || mentionsAllTaxesOrDebt || noHardcodedRawExcelAmount) {
+      return 'taxes_all';
+    }
+  }
+
+  // 2. Final / prior-month payroll debt payout from account 70 ('payroll_balance')
+  const isPayrollOut =
+    (metaType1C === 'СписаниеСРасчетногоСчета' || metaType1C === 'ВыдачаНаличных') &&
+    (op.category === 'payroll_payout' ||
+      operationKind1C === 'ПеречислениеЗаработнойПлатыРаботнику' ||
+      operationKind1C === 'ВыплатаЗаработнойПлатыПоВедомостям' ||
+      op.entries.some((e) => e.debit === '70' && (e.credit === '51' || e.credit.startsWith('50'))));
+
+  if (isPayrollOut) {
+    const isMidMonthAdvance = /аванс|перв\p{L}+\s+половин/iu.test(desc);
+    if (!isMidMonthAdvance) {
+      const mentionsMonthlySettlement =
+        /окончательн|за\s+прошл|за\s+отработан|за\s+(?:январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)|задолженност\p{L}*\s+по\s+(?:заработн|оплат)|перечислен\p{L}*\s+(?:с\s+расчетн\p{L}*\s+счет\p{L}*\s+)?заработн\p{L}*\s+плат|выплачен\p{L}*\s+заработн\p{L}*\s+плат/iu.test(
+          desc
+        );
+      const noHardcodedRawExcelAmount = (op.rawExcelAmount ?? 0) < 0.01 && op.amountMode !== 'explicit';
+
+      if (mentionsMonthlySettlement || noHardcodedRawExcelAmount) {
+        return 'payroll_balance';
+      }
+    }
+  }
+
+  return undefined;
+}
+
 export function build1CTransferPackage(
   operations: QueuedOperation[],
   db1C?: Database1CSnapshot | null,
@@ -1459,6 +1521,8 @@ export function build1CTransferPackage(
         op.entries.some((e) => e.credit === '51')
     );
 
+    const dynamicBalanceMode = resolveDynamicBalanceMode(op, metaType1C, operationKind1C);
+
     const header: PackageDocumentHeader1C = {
       counterpartyKey,
       contractKey,
@@ -1478,6 +1542,7 @@ export function build1CTransferPackage(
       invoiceSFKind,
       isPaidImmediately,
       paidAccount: isPaidImmediately ? '51' : '',
+      ...(dynamicBalanceMode ? { dynamicBalanceMode } : {}),
     };
 
     // Build rows for multi-item and single-item tabular documents
@@ -1909,6 +1974,7 @@ export function build1CTransferPackage(
       quarter,
       metaType1C,
       executionStrategy,
+      ...(dynamicBalanceMode ? { dynamicBalanceMode } : {}),
       header,
       rows,
       entries,
@@ -1923,6 +1989,9 @@ export function build1CTransferPackage(
       periodFrom,
       periodTo,
       totalDocuments: documents.length,
+      ...(typeof db1C?.usesLegacyPayrollAccounts === 'boolean'
+        ? { usesLegacyPayrollAccounts: db1C.usesLegacyPayrollAccounts }
+        : {}),
     },
     organization,
     catalogs: {

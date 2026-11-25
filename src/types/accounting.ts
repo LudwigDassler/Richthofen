@@ -239,6 +239,8 @@ export interface Database1CSnapshot {
   bankAccounts: BankAccount1C[];
   rawDirectories: Record<string, Record<string, unknown>[]>;
   rawRegisters: Record<string, unknown>;
+  usesLegacyPayrollAccounts?: boolean;
+  payrollAccounts69?: string[];
 }
 
 export type DocType1CBP30 =

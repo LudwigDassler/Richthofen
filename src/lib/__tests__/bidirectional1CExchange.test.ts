@@ -179,6 +179,45 @@ test('build1CTransferPackage (bp30-v1): builds canonical Q1–Q3 package with cl
     pkg.documents.length,
     '8-section summary counts must partition pkg.documents.length exactly'
   );
+
+  // 7. Dynamic balance modes for full tax settlements ('taxes_all') and monthly salary payouts ('payroll_balance')
+  const taxesAllDocs = pkg.documents.filter((d) => d.dynamicBalanceMode === 'taxes_all');
+  assert.ok(
+    taxesAllDocs.length >= 2,
+    `Expected >= 2 full tax/insurance payoff documents with dynamicBalanceMode = 'taxes_all', got ${taxesAllDocs.length}`
+  );
+  assert.equal(
+    taxesAllDocs.every(
+      (d) =>
+        d.metaType1C === 'СписаниеСРасчетногоСчета' &&
+        d.header.dynamicBalanceMode === 'taxes_all'
+    ),
+    true,
+    'All taxes_all documents must be СписаниеСРасчетногоСчета with header.dynamicBalanceMode = taxes_all'
+  );
+
+  const payrollBalanceDocs = pkg.documents.filter(
+    (d) => d.dynamicBalanceMode === 'payroll_balance'
+  );
+  assert.ok(
+    payrollBalanceDocs.length >= 2,
+    `Expected >= 2 completed-month salary payout documents with dynamicBalanceMode = 'payroll_balance', got ${payrollBalanceDocs.length}`
+  );
+
+  // Mid-month salary advance ("аванс") must NOT be overridden by live balance on 70
+  const advancePayouts = pkg.documents.filter(
+    (d) =>
+      (d.metaType1C === 'СписаниеСРасчетногоСчета' || d.metaType1C === 'ВыдачаНаличных') &&
+      /аванс|перв\p{L}+\s+половин/iu.test(d.comment) &&
+      d.entries.some((e) => e.debit === '70')
+  );
+  for (const adv of advancePayouts) {
+    assert.equal(
+      adv.dynamicBalanceMode,
+      undefined,
+      `Mid-month advance (${adv.date}: ${adv.comment}) must keep explicit JSON amount without payroll_balance`
+    );
+  }
 });
 
 test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with zero .Выбрать() calls and safe ОперацияБух recording', () => {
@@ -244,6 +283,20 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
   assert.match(bsl, /РасшифровкаПлатежа\.Добавить\(\)/u);
   assert.match(bsl, /Документы\.СчетФактураПолученный\.СоздатьДокумент\(\)/u);
   assert.match(bsl, /Документы\.СчетФактураВыданный\.СоздатьДокумент\(\)/u);
+
+  // 5. Pre-ENS 1C:BP 3.0 compatibility: monthly period filter, live Хозрасчетный.Остатки, and 69.09 -> 69.01/69.02.7/69.03.1 split
+  assert.match(bsl, /РеквизитФормы\("ПериодС"/u);
+  assert.match(bsl, /РеквизитФормы\("ПериодПо"/u);
+  assert.match(bsl, /ДатаНачалаЗагрузки\s*=\s*ЭтотОбъект\["ПериодС"\]/u);
+  assert.match(bsl, /ДатаОкончанияЗагрузки\s*=\s*ЭтотОбъект\["ПериодПо"\]/u);
+  assert.match(bsl, /РегистрБухгалтерии\.Хозрасчетный\.Остатки/u);
+  assert.match(bsl, /"taxes_all"/u);
+  assert.match(bsl, /"payroll_balance"/u);
+  assert.match(bsl, /ПланыСчетов\.Хозрасчетный\.НайтиПоКоду\("69\.09"\)/u);
+  assert.match(bsl, /НайтиСчет\("69\.01"\)/u);
+  assert.match(bsl, /НайтиСчет\("69\.02\.7"\)/u);
+  assert.match(bsl, /НайтиСчет\("69\.03\.1"\)/u);
+  assert.match(bsl, /"usesLegacyPayrollAccounts"/u);
 });
 
 test('parseBase0Json: imports Base 0 snapshot, rebinds existing catalogs to already_exists / matched_1c, and carries opening balances into OSV', async () => {
@@ -251,6 +304,8 @@ test('parseBase0Json: imports Base 0 snapshot, rebinds existing catalogs to alre
     ФорматБазы0: 'bp30-base0-v1',
     ОтчетныйГод: 2026,
     ДатаОстатков: '2026-01-01',
+    usesLegacyPayrollAccounts: true,
+    payrollAccounts69: ['69.01', '69.02.7', '69.03.1', '69.11'],
     Организация: {
       Наименование: 'ООО "Альфа-Мебель"',
       ПолноеНаименование: 'Общество с ограниченной ответственностью "Альфа-Мебель"',
@@ -320,6 +375,8 @@ test('parseBase0Json: imports Base 0 snapshot, rebinds existing catalogs to alre
   assert.equal(summary.organizationName, 'ООО "Альфа-Мебель"');
   assert.equal(summary.openingBalanceLinesCount, 3);
   assert.ok(summary.totalCatalogItems >= 7);
+  assert.equal(summary.usesLegacyPayrollAccounts, true);
+  assert.deepEqual(summary.payrollAccounts69, ['69.01', '69.02.7', '69.03.1', '69.11']);
 
   // Import a purchase from ООО "ЛесПромСнаб" of "Плита ПВХ" BEFORE connecting Base 0, then rebind against Base 0
   const csvText = [
@@ -381,4 +438,8 @@ test('parseBase0Json: imports Base 0 snapshot, rebinds existing catalogs to alre
   assert.equal(row1001.startDebit, 100000);
   assert.equal(row1001.turnoverDebit, 100000);
   assert.equal(row1001.endDebit, 200000, '10.01 End Debit = 100 000 opening + 100 000 net purchase');
+
+  // Verify meta.usesLegacyPayrollAccounts propagates into Richthofen_1C_Package.json when Base 0 is pre-ENS
+  const pkgWithLegacyBase0 = build1CTransferPackage(reboundOps, db1C, null);
+  assert.equal(pkgWithLegacyBase0.meta.usesLegacyPayrollAccounts, true);
 });

@@ -353,13 +353,14 @@ export function Tab4Export1C() {
 
               <li className="p-3.5 rounded-xl bg-slate-50/80 dark:bg-slate-950/40 border border-slate-200/70 dark:border-slate-800 space-y-1">
                 <div className="font-semibold text-slate-900 dark:text-white">
-                  Шаг 4. Загрузите пакет и выполните регламентное закрытие
+                  Шаг 4. Загрузите пакет (целиком или помесячно) и закройте месяц
                 </div>
                 <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
-                  Укажите скачанный <code className="font-mono">Richthofen_1C_Package.json</code>,
-                  нажмите «2. Загрузить пакет Richthofen в 1С», проверьте протокол и запустите
-                  штатный помощник «Операции → Закрытие месяца» для периодов с регламентными
-                  шагами.
+                  Укажите <code className="font-mono">Richthofen_1C_Package.json</code>, при
+                  необходимости задайте «Период загрузки с / по» для помесячного шага, нажмите «2.
+                  Загрузить пакет Richthofen в 1С», штатно начислите зарплату и закройте месяц в 1С —
+                  уплата налогов и выплата ЗП подхватят живые остатки базы (включая релизы до ЕНС с
+                  69.01 / 69.02.7 / 69.03.1).
                 </p>
               </li>
             </ol>
@@ -527,6 +528,12 @@ export function Tab4Export1C() {
             </div>
 
             <div className="flex flex-wrap items-center gap-2 text-slate-700 dark:text-slate-300 tabular-nums">
+              {connectedBase0.usesLegacyPayrollAccounts && (
+                <>
+                  <span>Счета взносов: до ЕНС (69.01 / 69.02.7 / 69.03.1)</span>
+                  <span aria-hidden="true">·</span>
+                </>
+              )}
               <span>Элементов справочников: {connectedBase0.totalCatalogItems}</span>
               <span aria-hidden="true">·</span>
               <span>Строк начального сальдо: {connectedBase0.openingBalanceLinesCount}</span>

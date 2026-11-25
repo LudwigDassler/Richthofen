@@ -38,6 +38,8 @@ export interface Base0SummaryStats {
   accountNumber: string;
   totalCatalogItems: number;
   openingBalanceLinesCount: number;
+  usesLegacyPayrollAccounts?: boolean;
+  payrollAccounts69?: string[];
 }
 
 export function isBase0JsonPayload(raw: unknown, fileName = ''): boolean {
@@ -296,6 +298,49 @@ export function parseBase0Json(
     snapshot.balanceModeReason = `База 0 из 1С подключена (${snapshot.organization.name || 'Организация'}): начальные остатки равны 0,00 ₽`;
   }
 
+  // Detect pre-ENS legacy payroll/insurance subaccounts (69.01, 69.02.7, 69.03.1 without 69.09)
+  const rawPayroll69 =
+    payload['payrollAccounts69'] ??
+    payload['Субсчета69'] ??
+    payload['СчетаВзносов69'];
+  const parsedPayroll69: string[] = Array.isArray(rawPayroll69)
+    ? Array.from(
+        new Set(
+          rawPayroll69
+            .map((el) =>
+              typeof el === 'string'
+                ? normalizeAccountCode1C(el)
+                : isRecord(el)
+                  ? normalizeAccountCode1C(pickString(el, ['Код', 'Счет', 'code', 'account']))
+                  : ''
+            )
+            .filter((code) => code.startsWith('69.'))
+        )
+      )
+    : [];
+
+  const opening69Codes = explicitOpeningRows
+    .map((r) => r.account)
+    .filter((code) => code.startsWith('69.'));
+  const combined69 = Array.from(new Set([...parsedPayroll69, ...opening69Codes]));
+
+  const explicitLegacyFlag =
+    payload['usesLegacyPayrollAccounts'] ?? payload['ИспользуютсяСтарыеСчетаВзносов'];
+  const inferredLegacyFlag =
+    typeof explicitLegacyFlag === 'boolean'
+      ? explicitLegacyFlag
+      : combined69.length > 0
+        ? !combined69.includes('69.09') &&
+          combined69.some((c) => c === '69.01' || c.startsWith('69.02') || c.startsWith('69.03'))
+        : undefined;
+
+  if (typeof inferredLegacyFlag === 'boolean') {
+    snapshot.usesLegacyPayrollAccounts = inferredLegacyFlag;
+  }
+  if (combined69.length > 0) {
+    snapshot.payrollAccounts69 = combined69;
+  }
+
   return snapshot;
 }
 
@@ -322,5 +367,7 @@ export function summarizeConnectedBase0(db1C: Database1CSnapshot | null): Base0S
     accountNumber: db1C.organization.bankAccount || '',
     totalCatalogItems,
     openingBalanceLinesCount: db1C.rawBalances.length,
+    usesLegacyPayrollAccounts: db1C.usesLegacyPayrollAccounts,
+    payrollAccounts69: db1C.payrollAccounts69,
   };
 }
