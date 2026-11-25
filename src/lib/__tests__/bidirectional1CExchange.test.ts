@@ -342,6 +342,128 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
   assert.match(bsl, /УстановитьЕслиЕсть\(ГруппаНастроек,\s*"РастягиватьПоГоризонтали",\s*Истина\)/u);
   assert.match(bsl, /УстановитьЕслиЕсть\(ГруппаПериодаЗагрузки,\s*"РастягиватьПоГоризонтали",\s*Истина\)/u);
   assert.match(bsl, /УстановитьЕслиЕсть\(ЭтаФорма,\s*"Ширина",\s*115\)/u);
+
+  // 7. April 1C:BP 3.0 live-run fixes:
+  // (a) ПолучитьВалютуРуб() with exact 3-step priority: Константы.ВалютаРегламентированногоУчета -> НайтиПоКоду("643") -> НайтиПоНаименованию("руб.")
+  const fnRubStart = bsl.indexOf('Функция ПолучитьВалютуРуб()');
+  assert.ok(fnRubStart > 0, 'ПолучитьВалютуРуб() must be defined in generateBslLoader');
+  const fnRubBody = bsl.slice(fnRubStart, bsl.indexOf('КонецФункции', fnRubStart));
+  const idxConstCurr = fnRubBody.indexOf('Константы.ВалютаРегламентированногоУчета.Получить()');
+  const idxCode643 = fnRubBody.indexOf('Справочники.Валюты.НайтиПоКоду("643")');
+  const idxNameRub = fnRubBody.indexOf('Справочники.Валюты.НайтиПоНаименованию("руб.")');
+  assert.ok(
+    idxConstCurr > 0 && idxCode643 > idxConstCurr && idxNameRub > idxCode643,
+    'ПолучитьВалютуРуб() must try ВалютаРегламентированногоУчета -> НайтиПоКоду("643") -> НайтиПоНаименованию("руб.") in order'
+  );
+
+  // (b) Currency & multiplicity (ВалютаДокумента, КурсВзаиморасчетов = 1, КратностьВзаиморасчетов = 1) in native docs, taxes_all, payroll_balance, and РасшифровкаПлатежа
+  assert.match(bsl, /Процедура\s+ЗаполнитьВалютуИКратностьДокумента\(/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(ДокОбъект,\s*"ВалютаДокумента",\s*ВалютаРуб\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(ДокОбъект,\s*"КурсВзаиморасчетов",\s*1\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(ДокОбъект,\s*"КратностьВзаиморасчетов",\s*1\)/u);
+
+  const fnTaxesStart = bsl.indexOf('Функция СоздатьУплатуНалоговПоЖивымОстаткам1С');
+  const fnTaxesBody = bsl.slice(fnTaxesStart, bsl.indexOf('КонецФункции', fnTaxesStart));
+  assert.match(fnTaxesBody, /ВалютаРуб\s*=\s*ПолучитьВалютуРуб\(\)/u);
+  assert.match(fnTaxesBody, /УстановитьЕслиЕсть\(ДокНал,\s*"ВалютаДокумента",\s*ВалютаРуб\)/u);
+  assert.match(fnTaxesBody, /УстановитьЕслиЕсть\(ДокНал,\s*"КурсВзаиморасчетов",\s*1\)/u);
+  assert.match(fnTaxesBody, /УстановитьЕслиЕсть\(ДокНал,\s*"КратностьВзаиморасчетов",\s*1\)/u);
+
+  const procRowCurrStart = bsl.indexOf('Процедура ЗаполнитьВалютуСтрокиРасшифровкиПлатежа');
+  assert.ok(procRowCurrStart > 0, 'ЗаполнитьВалютуСтрокиРасшифровкиПлатежа must be defined');
+  const procRowCurrBody = bsl.slice(procRowCurrStart, bsl.indexOf('КонецПроцедуры', procRowCurrStart));
+  assert.match(procRowCurrBody, /УстановитьЕслиЕсть\(СтрРасш,\s*"КурсВзаиморасчетов",\s*1\)/u);
+  assert.match(procRowCurrBody, /УстановитьЕслиЕсть\(СтрРасш,\s*"КратностьВзаиморасчетов",\s*1\)/u);
+  assert.match(procRowCurrBody, /УстановитьЕслиЕсть\(СтрРасш,\s*"СуммаВзаиморасчетов",\s*СуммаПлатежаСтроки\)/u);
+
+  // (c) НайтиИлиСоздатьПрочиеДоходыРасходы(Наименование) embedded directly in module for Ctrl+F7 compilation
+  const fnPdrStart = bsl.indexOf('Функция НайтиИлиСоздатьПрочиеДоходыРасходы(Наименование)');
+  assert.ok(fnPdrStart > 0, 'НайтиИлиСоздатьПрочиеДоходыРасходы(Наименование) must be defined in module');
+  const fnPdrBody = bsl.slice(fnPdrStart, bsl.indexOf('КонецФункции', fnPdrStart));
+  assert.match(fnPdrBody, /Справочники\.ПрочиеДоходыИРасходы\.НайтиПоНаименованию\([^,]+,\s*Истина\)/u);
+  assert.match(fnPdrBody, /Справочники\.ПрочиеДоходыИРасходы\.СоздатьЭлемент\(\)/u);
+  assert.match(fnPdrBody, /УстановитьЕслиЕсть\(НовыйПДР,\s*"ПринимаетсяКНалоговомуУчету",\s*Истина\)/u);
+
+  // (d) Smart duplicate & unposted draft handling: checks Док.Проведен, skips posted, reopens unposted draft via ПолучитьОбъект() + ОчиститьТабличныеЧастиДокумента
+  assert.match(bsl, /Функция\s+НайтиСтатусДубляПоТегуRichthofen\(/u);
+  assert.match(bsl, /Док\.Проведен\s+КАК\s+Проведен/u);
+  assert.match(bsl, /Процедура\s+ОчиститьТабличныеЧастиДокумента\(/u);
+  assert.match(bsl, /ЧерновикСсылка\.ПолучитьОбъект\(\)/u);
+  assert.match(bsl, /ОчиститьТабличныеЧастиДокумента\(ДокОбъект\)/u);
+
+  // (e) Static Ctrl+F7 compilation guard: every standalone procedure/function call in clean BSL must be either a 1C 8.3 platform built-in or defined in this module
+  const definedRoutines = new Set<string>();
+  for (const m of clean.matchAll(/(?:Процедура|Функция)\s+([\p{L}_][\p{L}\p{N}_]*)\s*\(/giu)) {
+    definedRoutines.add(m[1].toLowerCase());
+  }
+  const platformBuiltins1C83 = new Set(
+    [
+      // Type constructors & platform functions
+      'ОписаниеТипов',
+      'КвалификаторыЧисла',
+      'КвалификаторыДаты',
+      'РеквизитФормы',
+      'ИзменитьРеквизиты',
+      'Тип',
+      'ДиалогВыбораФайла',
+      'ОписаниеОповещения',
+      'ПустаяСтрока',
+      'СокрЛП',
+      'ЗаписьТекста',
+      'ЧтениеТекста',
+      'ДвоичныеДанные',
+      'ПоместитьВоВременноеХранилище',
+      'ПолучитьИзВременногоХранилища',
+      'ПолучитьИмяВременногоФайла',
+      'УдалитьФайлы',
+      'ПоказатьПредупреждение',
+      'Формат',
+      'ТекущаяДата',
+      'ПолучитьСообщенияПользователю',
+      'Строка',
+      'Число',
+      'Булево',
+      'Дата',
+      'Год',
+      'НачалоДня',
+      'КонецДня',
+      'НачалоМесяца',
+      'СтрДлина',
+      'Лев',
+      'Сред',
+      'НРег',
+      'Найти',
+      'Окр',
+      'ЗначениеЗаполнено',
+      'ОписаниеОшибки',
+      'ВызватьИсключение',
+      'Запрос',
+      'Структура',
+      'Соответствие',
+      'Массив',
+      'ЗаписьJSON',
+      'ПараметрыЗаписиJSON',
+      'ЗаписатьJSON',
+      'ЧтениеJSON',
+      'ПрочитатьJSON',
+      // BSL language keywords that can precede parenthesized expressions
+      'Если',
+      'ИначеЕсли',
+      'Пока',
+      'И',
+      'Или',
+      'Не',
+      'Возврат',
+    ].map((s) => s.toLowerCase())
+  );
+  for (const callMatch of clean.matchAll(/(?<![.\p{L}\p{N}_])([\p{L}_][\p{L}\p{N}_]*)\s*\(/gu)) {
+    const fnName = callMatch[1];
+    const lower = fnName.toLowerCase();
+    assert.ok(
+      definedRoutines.has(lower) || platformBuiltins1C83.has(lower),
+      `Undefined BSL procedure/function call "${fnName}(...)" would fail Ctrl+F7 in 1C Configurator!`
+    );
+  }
 });
 
 test('parseBase0Json: imports Base 0 snapshot, rebinds existing catalogs to already_exists / matched_1c, and carries opening balances into OSV', async () => {
