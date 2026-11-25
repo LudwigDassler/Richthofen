@@ -297,6 +297,51 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
   assert.match(bsl, /НайтиСчет\("69\.02\.7"\)/u);
   assert.match(bsl, /НайтиСчет\("69\.03\.1"\)/u);
   assert.match(bsl, /"usesLegacyPayrollAccounts"/u);
+
+  // 6. Live-run 1C:BP 3.0 fixes:
+  // (a) Reserved keyword `Знач` must NEVER be used as a variable or parameter modifier where unexpected
+  assert.equal(
+    countBslKeyword(clean, 'Знач'),
+    0,
+    'Reserved BSL keyword Знач must never be used as an identifier anywhere in RichthofenLoader_1C83.bsl'
+  );
+  assert.match(bsl, /РезЗначение\s*=\s*Карта\.Получить\(Ключ\)/u);
+
+  // (b) Exact BP 3.0 metadata names for cash orders (ПКО/РКО with fallback) and fixed assets tabular section (ДокОбъект.ОС)
+  assert.match(bsl, /Метаданные\.Документы\.Найти\("ПриходныйКассовыйОрдер"\)/u);
+  assert.match(bsl, /Метаданные\.Документы\.Найти\("РасходныйКассовыйОрдер"\)/u);
+  assert.match(bsl, /ДокОбъект\.ОС\.Добавить\(\)/u);
+
+  // (c) Detailed 1C posting diagnostics via ПолучитьСообщенияПользователю(Истина)
+  assert.match(bsl, /Процедура\s+ОчиститьСообщенияПользователю\(\)/u);
+  assert.match(bsl, /Функция\s+СобратьТекстОшибки1С\(/u);
+  assert.match(bsl, /ПолучитьСообщенияПользователю\(Истина\)/u);
+  assert.match(bsl, /ТекстОшибкиДок\s*=\s*СобратьТекстОшибки1С\(ОписаниеОшибки\(\)\)/u);
+
+  // (d) Mandatory accounting accounts & subconto across ПТУ, РТУ, bank, cash, ТребованиеНакладная, and ОперацияБух
+  assert.match(bsl, /"БанковскийСчетОрганизации"/u);
+  assert.match(bsl, /"СтатьяДвиженияДенежныхСредств"/u);
+  assert.match(bsl, /"СтатьяДДС"/u);
+  assert.match(bsl, /"СтатьяРасходов"/u);
+  assert.match(bsl, /"СчетРасчетов"/u);
+  assert.match(bsl, /"СчетАвансов"/u);
+  assert.match(bsl, /"СчетУчетаНДСПоРеализации"/u);
+  assert.match(bsl, /"ПодразделениеЗатрат"/u);
+  assert.match(bsl, /СуммаПроводокИтого/u);
+
+  // Verify ДокОп.Записать(РежимЗаписиДокумента.Запись) strictly precedes НаборДвижений.Записать() inside ЗаписатьОперациюБухИзПроводок
+  const opBuhStart = bsl.indexOf('Функция ЗаписатьОперациюБухИзПроводок');
+  const opBuhEnd = bsl.indexOf('КонецФункции', opBuhStart);
+  const opBuhBody = bsl.slice(opBuhStart, opBuhEnd);
+  const docWriteIdx = opBuhBody.indexOf('ДокОп.Записать(РежимЗаписиДокумента.Запись)');
+  const movWriteIdx = opBuhBody.indexOf('НаборДвижений.Записать()');
+  assert.ok(docWriteIdx > 0 && movWriteIdx > docWriteIdx, 'ДокОп.Записать(Запись) must execute before НаборДвижений.Записать()');
+
+  // (e) Strict duplicate check by non-empty [RichthofenID:<id>] and wide horizontal form groups
+  assert.match(bsl, /ИскомаяПодстрокаТега\s*=\s*"\[RichthofenID:"\s*\+\s*ЧистыйИД\s*\+\s*"\]"/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(ГруппаНастроек,\s*"РастягиватьПоГоризонтали",\s*Истина\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(ГруппаПериодаЗагрузки,\s*"РастягиватьПоГоризонтали",\s*Истина\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(ЭтаФорма,\s*"Ширина",\s*115\)/u);
 });
 
 test('parseBase0Json: imports Base 0 snapshot, rebinds existing catalogs to already_exists / matched_1c, and carries opening balances into OSV', async () => {
