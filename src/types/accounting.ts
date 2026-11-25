@@ -1231,6 +1231,8 @@ export type ExportMode1C = 'incremental' | 'clean_db';
 
 export type ExportFormat1C = 'bsl' | 'xml_edo' | 'json';
 
+export type CalculationProfile1C = 'rf_2026' | 'bp30_legacy_pre2023';
+
 export type WorkspaceTab =
   | 'db_osv'
   | 'import_postings'
@@ -1241,6 +1243,8 @@ export interface PersistedWorkbenchStateV2 {
   version: 2;
   activeTab: WorkspaceTab;
   reportingYear?: number;
+  calculationProfile?: CalculationProfile1C;
+  monthlyProfitTax?: boolean;
   db1C: Database1CSnapshot | null;
   balanceAnchorOverride: BalanceAnchorOverride;
   includeQueuedInOsv: boolean;

@@ -13,6 +13,7 @@ import {
   normalizeSimpleEntityKey1C,
 } from '@/lib/engine/virtual1CState';
 import {
+  CalculationProfile1C,
   Database1CSnapshot,
   DEFAULT_REPORTING_YEAR,
   DEFAULT_SBERBANK_BIK,
@@ -168,6 +169,10 @@ export interface PackageDocumentHeader1C {
   isPaidImmediately: boolean;
   paidAccount: string;
   dynamicBalanceMode?: DynamicBalanceMode1C;
+  writStartDate?: string;
+  writEndDate?: string;
+  alimonyFixedAmount?: number;
+  alimonyRatePercent?: number;
 }
 
 export interface PackageDocumentRow1C {
@@ -937,7 +942,8 @@ function resolveDynamicBalanceMode(
 export function build1CTransferPackage(
   operations: QueuedOperation[],
   db1C?: Database1CSnapshot | null,
-  virtualState?: Virtual1CStateSnapshot | null
+  virtualState?: Virtual1CStateSnapshot | null,
+  options?: { calculationProfile?: CalculationProfile1C; monthlyProfitTax?: boolean }
 ): Richthofen1CPackage {
   const activeOps = operations.filter(
     (op) => op.includeInProcessing !== false && !op.isDuplicateIn1C
@@ -1435,7 +1441,7 @@ export function build1CTransferPackage(
       `${op.rowKey || op.id}|${opDate}|${op.category}|${op.description.slice(0, 80)}`
     )}`;
 
-    const counterpartyKey =
+    let counterpartyKey =
       op.counterpartyName && op.counterpartyName.trim().length >= 2
         ? registerCounterparty({
             name: op.counterpartyName,
@@ -1444,6 +1450,13 @@ export function build1CTransferPackage(
             kind: op.counterpartyKind,
           })
         : '';
+    if (metaType1C === 'ИсполнительныйЛист' && !counterpartyKey && op.alimonyRecipientName) {
+      counterpartyKey = registerCounterparty({
+        name: op.alimonyRecipientName,
+        inn: op.alimonyRecipientInn || '',
+        kind: 'ФизическоеЛицо',
+      });
+    }
 
     const inferredCtrKind: 'СПоставщиком' | 'СПокупателем' | 'Прочее' =
       metaType1C === 'РеализацияТоваровУслуг' ||
@@ -1522,6 +1535,41 @@ export function build1CTransferPackage(
     );
 
     const dynamicBalanceMode = resolveDynamicBalanceMode(op, metaType1C, operationKind1C);
+    const resolveWritPeriodDates = (): { start: string; end: string } => {
+      const yr = opDate.slice(0, 4) || String(reportingYear);
+      const desc = op.description || '';
+      let start = op.writStartDate || '';
+      if (!start) {
+        const mFrom = desc.match(/(?:период\s+)?с\s+(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?(?=$|[^\d])/iu);
+        if (mFrom) {
+          const dd = String(Number(mFrom[1])).padStart(2, '0');
+          const mm = String(Number(mFrom[2])).padStart(2, '0');
+          const rawY = mFrom[3] ? (mFrom[3].length === 2 ? `20${mFrom[3]}` : mFrom[3]) : yr;
+          start = `${rawY}-${mm}-${dd}`;
+        }
+      }
+      let end = '';
+      const mTo = desc.match(/(?:по|до)\s+(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?(?=$|[^\d])/iu);
+      if (mTo) {
+        const dd = String(Number(mTo[1])).padStart(2, '0');
+        const mm = String(Number(mTo[2])).padStart(2, '0');
+        const rawY = mTo[3] ? (mTo[3].length === 2 ? `20${mTo[3]}` : mTo[3]) : yr;
+        end = `${rawY}-${mm}-${dd}`;
+      } else if (/до\s+конца\s+года/iu.test(desc)) {
+        end = `${yr}-12-31`;
+      }
+      return { start: start || opDate, end };
+    };
+    const writPeriod = metaType1C === 'ИсполнительныйЛист' ? resolveWritPeriodDates() : null;
+    const writFields =
+      metaType1C === 'ИсполнительныйЛист' && writPeriod
+        ? {
+            writStartDate: writPeriod.start,
+            writEndDate: writPeriod.end,
+            alimonyFixedAmount: round2(op.alimonyFixedAmount || 0),
+            alimonyRatePercent: round2(op.alimonyRatePercent || 0),
+          }
+        : {};
 
     const header: PackageDocumentHeader1C = {
       counterpartyKey,
@@ -1543,6 +1591,7 @@ export function build1CTransferPackage(
       isPaidImmediately,
       paidAccount: isPaidImmediately ? '51' : '',
       ...(dynamicBalanceMode ? { dynamicBalanceMode } : {}),
+      ...writFields,
     };
 
     // Build rows for multi-item and single-item tabular documents
@@ -1981,6 +2030,13 @@ export function build1CTransferPackage(
     });
   });
 
+  const effectiveLegacyPayroll =
+    options?.calculationProfile === 'bp30_legacy_pre2023'
+      ? true
+      : options?.calculationProfile === 'rf_2026'
+        ? Boolean(db1C?.usesLegacyPayrollAccounts)
+        : Boolean(db1C?.usesLegacyPayrollAccounts);
+
   return {
     meta: {
       schemaVersion: 'bp30-v1',
@@ -1989,8 +2045,8 @@ export function build1CTransferPackage(
       periodFrom,
       periodTo,
       totalDocuments: documents.length,
-      ...(typeof db1C?.usesLegacyPayrollAccounts === 'boolean'
-        ? { usesLegacyPayrollAccounts: db1C.usesLegacyPayrollAccounts }
+      ...(effectiveLegacyPayroll || typeof db1C?.usesLegacyPayrollAccounts === 'boolean'
+        ? { usesLegacyPayrollAccounts: effectiveLegacyPayroll }
         : {}),
     },
     organization,

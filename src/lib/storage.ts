@@ -36,20 +36,36 @@ export function loadWorkbenchState(): PersistedWorkbenchStateV2 | null {
       return null;
     }
     const db1C = parsed.db1C ?? null;
-    const rawOperations = Array.isArray(parsed.operations) ? parsed.operations : [];
-    const sanitizedOperations = sanitizeHydratedOperations(rawOperations, db1C);
-
     const reportingYear =
       typeof parsed.reportingYear === 'number' &&
       parsed.reportingYear >= 2000 &&
       parsed.reportingYear <= 2100
         ? parsed.reportingYear
         : 2026;
+    const calculationProfile =
+      parsed.calculationProfile === 'bp30_legacy_pre2023'
+        ? 'bp30_legacy_pre2023'
+        : db1C?.usesLegacyPayrollAccounts
+          ? 'bp30_legacy_pre2023'
+          : 'rf_2026';
+    const monthlyProfitTax =
+      typeof parsed.monthlyProfitTax === 'boolean'
+        ? parsed.monthlyProfitTax
+        : calculationProfile === 'bp30_legacy_pre2023';
+
+    const rawOperations = Array.isArray(parsed.operations) ? parsed.operations : [];
+    const sanitizedOperations = sanitizeHydratedOperations(rawOperations, db1C, {
+      reportingYear,
+      calculationProfile,
+      monthlyProfitTax,
+    });
 
     return {
       version: 2,
       activeTab: parsed.activeTab ?? 'db_osv',
       reportingYear,
+      calculationProfile,
+      monthlyProfitTax,
       db1C,
       balanceAnchorOverride: parsed.balanceAnchorOverride ?? 'auto',
       includeQueuedInOsv: parsed.includeQueuedInOsv ?? true,

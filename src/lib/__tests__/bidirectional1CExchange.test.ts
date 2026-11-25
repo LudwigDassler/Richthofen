@@ -391,6 +391,37 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
   assert.match(bsl, /ЧерновикСсылка\.ПолучитьОбъект\(\)/u);
   assert.match(bsl, /ОчиститьТабличныеЧастиДокумента\(ДокОбъект\)/u);
 
+  // 8. April log round-2 fixes:
+  // (a) Mandatory СчетУчета ("51" for bank, "50.01" for cash) across native docs, taxes_all, immediate payment, and pre-write guard
+  assert.match(fnTaxesBody, /УстановитьЕслиЕсть\(ДокНал,\s*"СчетУчета",\s*НайтиСчет\("51"\)\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(СписОпл,\s*"СчетУчета",\s*НайтиСчет\("51"\)\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(ДокОбъект,\s*"СчетУчета",\s*НайтиСчет\("51"\)\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(ДокОбъект,\s*"СчетУчета",\s*НайтиСчет\("50\.01"\)\)/u);
+
+  // (b) Correspondent accounts & subconto for all bank/cash operation kinds (no typo РасчетыПоКредитамИЗаумам; ПрочееПоступление/ПрочееСписание set СчетКредита/СчетДебета + Субконто; РКО payroll_balance uses ПрочийРасход + 50.01 + 70)
+  assert.equal(/РасчетыПоКредитамИЗаумам/u.test(bsl), false, 'Must not contain typo РасчетыПоКредитамИЗаумам');
+  assert.match(bsl, /Функция\s+НайтиСчетСДефолтом\(/u);
+  assert.match(bsl, /Функция\s+ИзвлечьКоррСчетБанкаКассыИзJSON\(/u);
+  assert.match(bsl, /Процедура\s+ЗаполнитьСубконтоШапкиБанкаКассы\(/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(ДокОбъект,\s*"СчетКредита",\s*СчПрочП\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(ДокОбъект,\s*"СчетДебета",\s*СчПрочС\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(СтрРасшП,\s*"СчетРасчетов",\s*СчРасчП\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(СтрРасшП,\s*"СчетАвансов",\s*СчАвансП\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(СтрРасшС,\s*"СчетРасчетов",\s*СчРасчС\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(СтрРасшС,\s*"СчетАвансов",\s*СчАвансС\)/u);
+  assert.match(bsl, /Перечисления\.ВидыОперацийРКО\.ПрочийРасход/u);
+  assert.match(bsl, /СчЗПКасса\s*=\s*НайтиСчет\("70"\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(ДокОбъект,\s*"СчетДебета",\s*СчЗПКасса\)/u);
+
+  // (c) Protected live 68/69 balance query in taxes_all: filters Неопределено & ЗначениеЗаполнено before Счет В (&СписокСчетов), queries at НачалоДня(ДатаДок), logs ОписаниеОшибки()
+  assert.match(fnTaxesBody, /ДатаГраницы\s*=\s*НачалоДня\(ДатаДок\)/u);
+  assert.match(fnTaxesBody, /КандСсылка\s*<>\s*Неопределено\s+И\s+ЗначениеЗаполнено\(КандСсылка\)/u);
+  assert.match(
+    fnTaxesBody,
+    /РегистрБухгалтерии\.Хозрасчетный\.Остатки\(&ДатаГраницы,\s*Счет\s+В\s*\(&СписокСчетов\),\s*,\s*Организация\s*=\s*&Организация\)/u
+  );
+  assert.match(fnTaxesBody, /ТекстОшибкиЗапросаНал\s*=\s*ОписаниеОшибки\(\)/u);
+
   // (e) Static Ctrl+F7 compilation guard: every standalone procedure/function call in clean BSL must be either a 1C 8.3 platform built-in or defined in this module
   const definedRoutines = new Set<string>();
   for (const m of clean.matchAll(/(?:Процедура|Функция)\s+([\p{L}_][\p{L}\p{N}_]*)\s*\(/giu)) {

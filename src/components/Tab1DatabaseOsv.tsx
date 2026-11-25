@@ -74,6 +74,10 @@ export function Tab1DatabaseOsv() {
     setOsvSourceMode,
     periodFilter,
     setPeriodFilter,
+    calculationProfile,
+    setCalculationProfile,
+    monthlyProfitTax,
+    setMonthlyProfitTax,
     load1CJsonFile,
     disconnect1CDb,
     syncWith1CEndpoint,
@@ -869,6 +873,48 @@ export function Tab1DatabaseOsv() {
                   />
                   <span className="text-slate-700 dark:text-slate-300 whitespace-nowrap">
                     Забалансовые (МЦ.02, МЦ.04)
+                  </span>
+                </label>
+
+                <div
+                  role="group"
+                  aria-label="Профиль расчёта налогов, взносов и зарплаты"
+                  className="inline-flex items-center gap-1 p-0.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-100/80 dark:bg-slate-900/80"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setCalculationProfile('rf_2026')}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
+                      calculationProfile === 'rf_2026'
+                        ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    РФ 2026
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCalculationProfile('bp30_legacy_pre2023')}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
+                      calculationProfile === 'bp30_legacy_pre2023'
+                        ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    Учебная 1С:БП 3.0 (до 2023)
+                  </button>
+                </div>
+
+                <label className="inline-flex items-center gap-1.5 cursor-pointer select-none px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-900/50">
+                  <input
+                    type="checkbox"
+                    checked={monthlyProfitTax || calculationProfile === 'bp30_legacy_pre2023'}
+                    disabled={calculationProfile === 'bp30_legacy_pre2023'}
+                    onChange={(e) => setMonthlyProfitTax(e.target.checked)}
+                    className="rounded border-slate-300 text-amber-600 focus:ring-amber-500 disabled:opacity-60"
+                  />
+                  <span className="text-slate-700 dark:text-slate-300 whitespace-nowrap shrink-0 tabular-nums">
+                    Ежемесячный налог на прибыль (99.02.1)
                   </span>
                 </label>
 

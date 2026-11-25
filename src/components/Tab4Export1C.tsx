@@ -39,6 +39,8 @@ export function Tab4Export1C() {
     balanceAnchorOverride,
     includeQueuedInOsv,
     periodFilter,
+    calculationProfile,
+    monthlyProfitTax,
     lastImportStats,
     autoFixChanges,
     load1CJsonFile,
@@ -53,8 +55,12 @@ export function Tab4Export1C() {
   const [copiedTarget, setCopiedTarget] = useState<'json' | 'bsl' | null>(null);
 
   const transferPackage = useMemo(
-    () => build1CTransferPackage(operations, db1C, virtual1CState.finalState),
-    [operations, db1C, virtual1CState.finalState]
+    () =>
+      build1CTransferPackage(operations, db1C, virtual1CState.finalState, {
+        calculationProfile,
+        monthlyProfitTax,
+      }),
+    [operations, db1C, virtual1CState.finalState, calculationProfile, monthlyProfitTax]
   );
 
   const packageJsonString = useMemo(
@@ -93,6 +99,8 @@ export function Tab4Export1C() {
           balanceAnchorOverride,
           includeQueuedInOsv,
           periodFilter,
+          calculationProfile,
+          monthlyProfitTax,
           operations,
           resolvedInlineNotes: {},
           exportMode,
@@ -110,6 +118,8 @@ export function Tab4Export1C() {
       balanceAnchorOverride,
       includeQueuedInOsv,
       periodFilter,
+      calculationProfile,
+      monthlyProfitTax,
       lastImportStats,
       autoFixChanges,
     ]

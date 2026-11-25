@@ -9,6 +9,7 @@ import {
   AutoFixChangeRecord,
   AutofixExecutionSummary,
   AutofixRuleId,
+  CalculationProfile1C,
   CounterpartyResolutionSource,
   Database1CSnapshot,
   DEFAULT_SBERBANK_BIK,
@@ -1756,12 +1757,14 @@ export function generatePeriodClosingOperations(params: {
   operations: QueuedOperation[];
   osv: OsvReport;
   periodEndDate: string;
+  calculationProfile?: CalculationProfile1C;
+  monthlyProfitTax?: boolean;
 }): {
   newOperations: QueuedOperation[];
   log: string[];
   structuredChanges: AutoFixChangeRecord[];
 } {
-  const { db1C, operations, osv, periodEndDate } = params;
+  const { db1C, operations, osv, periodEndDate, calculationProfile, monthlyProfitTax } = params;
   const rawCloseDate = periodEndDate || db1C?.periodEnd || new Date().toISOString().slice(0, 10);
   // Prevent premature Dec 31 Balance Reformation & phantom Q4 depreciation when UI passes reporting-year end
   // (e.g. '2026-12-31') while only Q1–Q3 operations (months 01–09) are loaded!
@@ -2650,8 +2653,12 @@ export function generatePeriodClosingOperations(params: {
   // Tax sanctions on 99.02.3 are excluded from 99.01.1 and never reduce taxable profit (ст. 270 п. 2 НК РФ).
   const closeMonthNum = Number((closeDate || '').slice(5, 7)) || 0;
   const isQuarterEnd = [3, 6, 9, 12].includes(closeMonthNum);
+  const shouldAccrueMonthlyProfitTax =
+    Boolean(monthlyProfitTax) ||
+    calculationProfile === 'bp30_legacy_pre2023' ||
+    Boolean(db1C?.usesLegacyPayrollAccounts && calculationProfile !== 'rf_2026');
   const profitTaxRate = db1C?.accountingPolicy.profitTaxRate ?? 20;
-  if (isOsno && isQuarterEnd && profitTaxRate > 0) {
+  if (isOsno && (isQuarterEnd || shouldAccrueMonthlyProfitTax) && profitTaxRate > 0) {
     const existing9901Row = effectiveOsv.leafRows.find((r) => r.code === '99.01.1' || r.code === '99');
     const existingNetCredit9901 = existing9901Row
       ? round2(existing9901Row.endCredit - existing9901Row.endDebit)
@@ -3013,6 +3020,8 @@ export function autoFixAllBy1CDb(params: {
   periodEndDate: string;
   reportingYear?: number;
   defaultBik?: string;
+  calculationProfile?: CalculationProfile1C;
+  monthlyProfitTax?: boolean;
 }): {
   operations: QueuedOperation[];
   fixedCount: number;
@@ -3027,6 +3036,8 @@ export function autoFixAllBy1CDb(params: {
     periodEndDate,
     reportingYear,
     defaultBik = DEFAULT_SBERBANK_BIK,
+    calculationProfile,
+    monthlyProfitTax,
   } = params;
   let fixedCount = 0;
   const log: string[] = [];
@@ -4217,6 +4228,8 @@ export function autoFixAllBy1CDb(params: {
     let chronoSyncedOps = recalculateOperationsChronologically(enrichedOps, db1C, {
       reportingYear,
       defaultBik,
+      calculationProfile,
+      monthlyProfitTax,
     });
 
     // Replace any remaining group accounts -> leaf subaccounts & refresh readinessStatus
@@ -4489,6 +4502,8 @@ export function autoFixAllBy1CDb(params: {
         operations: chronoSyncedOps,
         osv: intermediateOsv,
         periodEndDate,
+        calculationProfile,
+        monthlyProfitTax,
       });
 
     if (newOperations.length > 0) {
@@ -4563,6 +4578,8 @@ export function autoFixSingleOperation(params: {
   periodEndDate: string;
   reportingYear?: number;
   defaultBik?: string;
+  calculationProfile?: CalculationProfile1C;
+  monthlyProfitTax?: boolean;
 }): {
   operations: QueuedOperation[];
   fixedCount: number;
@@ -4576,6 +4593,8 @@ export function autoFixSingleOperation(params: {
     periodEndDate: params.periodEndDate,
     reportingYear: params.reportingYear,
     defaultBik: params.defaultBik,
+    calculationProfile: params.calculationProfile,
+    monthlyProfitTax: params.monthlyProfitTax,
   });
 
   const fixedTarget = full.operations.find((o) => o.id === params.operationId);
@@ -4594,6 +4613,8 @@ export function autoFixSingleOperation(params: {
   const recalcOps = recalculateOperationsChronologically(replacedList, params.db1C, {
     reportingYear: params.reportingYear,
     defaultBik: params.defaultBik,
+    calculationProfile: params.calculationProfile,
+    monthlyProfitTax: params.monthlyProfitTax,
   });
   const opChanges = full.structuredChanges.filter((c) => c.operationId === params.operationId);
   const effectiveChanges =
@@ -4623,6 +4644,8 @@ export function autoFixAuditIssue(params: {
   periodEndDate: string;
   reportingYear?: number;
   defaultBik?: string;
+  calculationProfile?: CalculationProfile1C;
+  monthlyProfitTax?: boolean;
 }): {
   operations: QueuedOperation[];
   fixedCount: number;
@@ -4638,6 +4661,9 @@ export function autoFixAuditIssue(params: {
       calculateCurrentOsv: params.calculateCurrentOsv,
       periodEndDate: params.periodEndDate,
       reportingYear: params.reportingYear,
+      defaultBik: params.defaultBik,
+      calculationProfile: params.calculationProfile,
+      monthlyProfitTax: params.monthlyProfitTax,
     });
     return single;
   }
@@ -4649,6 +4675,8 @@ export function autoFixAuditIssue(params: {
     periodEndDate: params.periodEndDate,
     reportingYear: params.reportingYear,
     defaultBik: params.defaultBik,
+    calculationProfile: params.calculationProfile,
+    monthlyProfitTax: params.monthlyProfitTax,
   });
   return {
     operations: all.operations,

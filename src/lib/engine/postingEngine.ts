@@ -1,6 +1,7 @@
 import {
   AccompanyingAction1C,
   AccountingEntry,
+  CalculationProfile1C,
   CounterpartyResolutionSource,
   Database1CSnapshot,
   DEFAULT_SBERBANK_BIK,
@@ -779,6 +780,8 @@ export interface BatchSequentialContext {
   defaultBik?: string;
   defaultBankName?: string;
   assumeInvoiceOnVatPurchase?: boolean;
+  calculationProfile?: CalculationProfile1C;
+  monthlyProfitTax?: boolean;
 }
 
 export function stemRuItemKey(raw: string): string {
@@ -2343,6 +2346,11 @@ function computeCounterpartyAdvanceBalance(
 
   const matchesText = (text: string, inn?: string): boolean => {
     if (cleanInn && inn && inn.replace(/\D/g, '') === cleanInn) return true;
+    const head = (text || '').split('/')[0]?.trim() || text;
+    const nHead = normalizeEntityKey(head);
+    if (normCp && nHead && (nHead === normCp || nHead.includes(normCp) || normCp.includes(nHead))) {
+      return true;
+    }
     const n = normalizeEntityKey(text);
     return Boolean(normCp && n && (n === normCp || n.includes(normCp) || normCp.includes(n)));
   };
@@ -2385,6 +2393,66 @@ function computeCounterpartyAdvanceBalance(
     : Math.max(0, round2(-netDebitMinusCredit));
 }
 
+export function computeCounterpartyOpenDebtBalance1C(
+  accountCode: '60.01' | '62.01',
+  counterpartyName: string,
+  counterpartyInn: string,
+  db1C: Database1CSnapshot | null,
+  priorOperations: QueuedOperation[]
+): number {
+  const normCp = normalizeEntityKey(counterpartyName);
+  const cleanInn = counterpartyInn.replace(/\D/g, '');
+  if (!normCp && !cleanInn) return 0;
+
+  const matchesText = (text: string, inn?: string): boolean => {
+    if (cleanInn && inn && inn.replace(/\D/g, '') === cleanInn) return true;
+    const head = (text || '').split('/')[0]?.trim() || text;
+    const nHead = normalizeEntityKey(head);
+    if (normCp && nHead && (nHead === normCp || nHead.includes(normCp) || normCp.includes(nHead))) {
+      return true;
+    }
+    const n = normalizeEntityKey(text);
+    return Boolean(normCp && n && (n === normCp || n.includes(normCp) || normCp.includes(n)));
+  };
+
+  let netDebitMinusCredit = 0;
+
+  if (db1C) {
+    for (const b of db1C.rawBalances) {
+      if (b.account === accountCode && b.subconto && matchesText(b.subconto)) {
+        const dt = b.hasExplicitStart ? b.startDebit : b.rawDebit;
+        const kt = b.hasExplicitStart ? b.startCredit : b.rawCredit;
+        netDebitMinusCredit = round2(netDebitMinusCredit + (dt - kt));
+      }
+    }
+    for (const p of db1C.postings) {
+      if (p.debit === accountCode && matchesText(`${p.counterpartyName ?? ''} ${p.debitSubconto.join(' ')}`)) {
+        netDebitMinusCredit = round2(netDebitMinusCredit + p.amount);
+      }
+      if (p.credit === accountCode && matchesText(`${p.counterpartyName ?? ''} ${p.creditSubconto.join(' ')}`)) {
+        netDebitMinusCredit = round2(netDebitMinusCredit - p.amount);
+      }
+    }
+  }
+
+  for (const op of priorOperations) {
+    if (!op.includeInProcessing || op.isDuplicateIn1C) continue;
+    const sameOpCp = matchesText(op.counterpartyName, op.counterpartyInn);
+    for (const e of op.entries) {
+      if (e.debit === accountCode && (sameOpCp || matchesText(e.debitSubconto))) {
+        netDebitMinusCredit = round2(netDebitMinusCredit + e.amount);
+      }
+      if (e.credit === accountCode && (sameOpCp || matchesText(e.creditSubconto))) {
+        netDebitMinusCredit = round2(netDebitMinusCredit - e.amount);
+      }
+    }
+  }
+
+  return accountCode === '60.01'
+    ? Math.max(0, round2(-netDebitMinusCredit))
+    : Math.max(0, round2(netDebitMinusCredit));
+}
+
 function computeCounterparty76AVBalance(
   counterpartyName: string,
   counterpartyInn: string,
@@ -2397,6 +2465,11 @@ function computeCounterparty76AVBalance(
 
   const matchesText = (text: string, inn?: string): boolean => {
     if (cleanInn && inn && inn.replace(/\D/g, '') === cleanInn) return true;
+    const head = (text || '').split('/')[0]?.trim() || text;
+    const nHead = normalizeEntityKey(head);
+    if (normCp && nHead && (nHead === normCp || nHead.includes(normCp) || normCp.includes(nHead))) {
+      return true;
+    }
     const n = normalizeEntityKey(text);
     return Boolean(normCp && n && (n === normCp || n.includes(normCp) || normCp.includes(n)));
   };
@@ -2448,6 +2521,11 @@ export function bindAndGenerateOperation(
   const opId = existingId ?? `op-${Date.now()}-${++opIdSequence}-${Math.random().toString(36).slice(2, 6)}`;
   const policyVatRate = db1C?.accountingPolicy.vatRate ?? 20;
   const isOsno = (db1C?.accountingPolicy.taxSystem ?? 'ОСНО') === 'ОСНО';
+  const effectiveCalcProfile: CalculationProfile1C =
+    batchContext?.calculationProfile ??
+    (db1C?.usesLegacyPayrollAccounts ? 'bp30_legacy_pre2023' : 'rf_2026');
+  const isLegacyBp30 = effectiveCalcProfile === 'bp30_legacy_pre2023';
+  const isMonthlyProfitTax = Boolean(batchContext?.monthlyProfitTax) || isLegacyBp30;
 
   let cpName = (draft.counterpartyName ?? '').trim();
   // Never accept <2-character single-letter fragments as a counterparty name
@@ -4166,11 +4244,20 @@ export function bindAndGenerateOperation(
         const pos = emp.extra?.position || emp.extra?.должность || emp.kind;
         const costAcc = inferEmployeeCostAccount1C(pos, emp.extra?.Подразделение);
         const hireDt = emp.extra?.ДатаПриема || db1C?.periodStart || undefined;
-        const proRata = calculateEmployeeMonthlySalaryProRata2026({
-          monthlySalary: round2(parsedSal),
-          payrollDateIso: draft.date || '2026-01-31',
-          hireDateIso: hireDt,
-        });
+        const payrollIso = draft.date || '2026-01-31';
+        const payrollYm = payrollIso.slice(0, 7);
+        const [pyStr, pmStr] = payrollYm.split('-');
+        const daysInPm = new Date(Date.UTC(Number(pyStr) || 2026, Number(pmStr) || 1, 0)).getUTCDate();
+        const mEndIso = `${payrollYm}-${String(daysInPm).padStart(2, '0')}`;
+        const proRata = isLegacyBp30
+          ? !hireDt || hireDt <= mEndIso
+            ? { accruedSalary: round2(parsedSal), workedDays: 22, totalWorkingDays: 22, isProRata: false }
+            : { accruedSalary: 0, workedDays: 0, totalWorkingDays: 22, isProRata: false }
+          : calculateEmployeeMonthlySalaryProRata2026({
+              monthlySalary: round2(parsedSal),
+              payrollDateIso: payrollIso,
+              hireDateIso: hireDt,
+            });
         if (proRata.accruedSalary > 0) {
           rosterMap.set(key, {
             name: emp.name,
@@ -4194,12 +4281,23 @@ export function bindAndGenerateOperation(
     for (const vEmp of priorVirtualState.employees) {
       const fullSal = round2(vEmp.monthlySalary ?? 0);
       if (fullSal <= 0) continue;
-      const proRata = calculateEmployeeMonthlySalaryProRata2026({
-        monthlySalary: fullSal,
-        payrollDateIso: draft.date || '2026-01-31',
-        hireDateIso: vEmp.hireDate,
-        terminationDateIso: vEmp.terminationDate,
-      });
+      const payrollIso = draft.date || '2026-01-31';
+      const payrollYm = payrollIso.slice(0, 7);
+      const [pyStr, pmStr] = payrollYm.split('-');
+      const daysInPm = new Date(Date.UTC(Number(pyStr) || 2026, Number(pmStr) || 1, 0)).getUTCDate();
+      const mStartIso = `${payrollYm}-01`;
+      const mEndIso = `${payrollYm}-${String(daysInPm).padStart(2, '0')}`;
+      const proRata = isLegacyBp30
+        ? (!vEmp.hireDate || vEmp.hireDate <= mEndIso) &&
+          (!vEmp.terminationDate || vEmp.terminationDate >= mStartIso)
+          ? { accruedSalary: fullSal, workedDays: 22, totalWorkingDays: 22, isProRata: false }
+          : { accruedSalary: 0, workedDays: 0, totalWorkingDays: 22, isProRata: false }
+        : calculateEmployeeMonthlySalaryProRata2026({
+            monthlySalary: fullSal,
+            payrollDateIso: payrollIso,
+            hireDateIso: vEmp.hireDate,
+            terminationDateIso: vEmp.terminationDate,
+          });
       const key = normalizePersonIdentityKey1C(vEmp.fullName) || vEmp.key;
       if (proRata.accruedSalary <= 0) {
         rosterMap.delete(key);
@@ -5343,28 +5441,24 @@ export function bindAndGenerateOperation(
               ? '60.02'
               : '60.01';
 
+        let open6001Debt = 0;
+        let canUseChrono6001 = false;
         if (!isNotePurchasePayment && !isBuyerAdvanceRefund) {
           if (unpaid6001Resolution) {
             dtAcc = '60.01';
-          } else if (!isExplicitAdvance && batchContext && cpName) {
-            const hasPriorReceipt = priorOps.some(
-              (o) =>
-                normalizeEntityKey(o.counterpartyName) === normalizeEntityKey(cpName) &&
-                o.entries.some((e) => e.credit === '60.01')
+          } else if ((batchContext || db1C) && cpName) {
+            canUseChrono6001 = true;
+            open6001Debt = computeCounterpartyOpenDebtBalance1C(
+              '60.01',
+              cpName,
+              cpInn,
+              db1C,
+              priorOps
             );
-            const hasDbDebt = db1C?.postings.some(
-              (p) =>
-                p.credit === '60.01' &&
-                normalizeEntityKey(`${p.counterpartyName ?? ''} ${p.creditSubconto.join(' ')}`).includes(
-                  normalizeEntityKey(cpName)
-                )
-            );
-            if (
-              !hasPriorReceipt &&
-              !hasDbDebt &&
-              !db1C?.rawBalances.some((b) => b.account === '60.01' && b.rawCredit > 0)
-            ) {
+            if (isExplicitAdvance || open6001Debt <= 0.005) {
               dtAcc = '60.02';
+            } else {
+              dtAcc = '60.01';
             }
           }
         }
@@ -5430,6 +5524,29 @@ export function bindAndGenerateOperation(
               `Оплата поставщику «${bucket.cpLabel}» с расчётного счёта`
             );
           }
+        } else if (
+          canUseChrono6001 &&
+          !isExplicitAdvance &&
+          open6001Debt >= 0.01 &&
+          open6001Debt < bankOutAmt - 0.01
+        ) {
+          const advExcess = round2(bankOutAmt - open6001Debt);
+          pushEntry(
+            '60.01',
+            '51',
+            open6001Debt,
+            cpSubconto || cpName || 'Контрагент',
+            bankSubconto,
+            'Оплата текущей задолженности поставщику с расчётного счёта'
+          );
+          pushEntry(
+            '60.02',
+            '51',
+            advExcess,
+            cpSubconto || cpName || 'Контрагент',
+            bankSubconto,
+            'Перечислен аванс поставщику (превышение оплаты над остатком долга на 60.01)'
+          );
         } else {
           pushEntry(
             dtAcc,
@@ -5481,27 +5598,20 @@ export function bindAndGenerateOperation(
           /(?:%%|процент\p{L}*).*(?:от\s+банк|вексел|ценн\p{L}*\s+бумаг)/iu.test(descLower) ||
           /(?:от\s+банк\p{L}*|вексел|ценн\p{L}*\s+бумаг).*(?:%%|процент\p{L}*)/iu.test(descLower) ||
           /задолженност\p{L}*\s+по\s+(?:%%|процент)/iu.test(descLower);
-        let isAdvance = !isNoteInterestReceipt && /аванс|предоплат/i.test(descLower);
-        if (!isNoteInterestReceipt && !isAdvance && batchContext && cpName) {
-          const normCpIn = normalizeEntityKey(cpName);
-          const hasPriorShipment = priorOps.some(
-            (o) =>
-              o.includeInProcessing &&
-              normalizeEntityKey(o.counterpartyName) === normCpIn &&
-              o.entries.some((e) => e.debit === '62.01')
+        const isExplicitBuyerAdvance = !isNoteInterestReceipt && /аванс|предоплат/i.test(descLower);
+        let isAdvance = isExplicitBuyerAdvance;
+        let open6201Debt = 0;
+        let canUseChrono6201 = false;
+        if (!isNoteInterestReceipt && (batchContext || db1C) && cpName) {
+          canUseChrono6201 = true;
+          open6201Debt = computeCounterpartyOpenDebtBalance1C(
+            '62.01',
+            cpName,
+            cpInn,
+            db1C,
+            priorOps
           );
-          const hasDbReceivable = db1C?.postings.some(
-            (p) =>
-              p.debit === '62.01' &&
-              normalizeEntityKey(`${p.counterpartyName ?? ''} ${p.debitSubconto.join(' ')}`).includes(
-                normCpIn
-              )
-          );
-          if (
-            !hasPriorShipment &&
-            !hasDbReceivable &&
-            !db1C?.rawBalances.some((b) => b.account === '62.01' && b.rawDebit > 0)
-          ) {
+          if (!isExplicitBuyerAdvance && open6201Debt <= 0.005) {
             isAdvance = true;
           }
         }
@@ -5520,27 +5630,66 @@ export function bindAndGenerateOperation(
             bankInAmt = row7609.endDebit;
           }
         }
-        pushEntry(
-          '51',
-          ktAcc,
-          bankInAmt,
-          bankSubconto,
-          cpSubconto || cpName || 'Контрагент',
-          isNoteInterestReceipt
-            ? 'Поступили начисленные проценты по ценным бумагам (векселям)'
-            : isAdvance
-              ? 'Получен аванс от покупателя'
-              : 'Поступление оплаты от покупателя'
-        );
-        if (isAdvance && ktAcc === '62.02' && isOsno && vatAmount > 0 && !explicitlyNoSF) {
+
+        if (
+          canUseChrono6201 &&
+          !isExplicitBuyerAdvance &&
+          open6201Debt >= 0.01 &&
+          open6201Debt < bankInAmt - 0.01
+        ) {
+          const advExcess = round2(bankInAmt - open6201Debt);
           pushEntry(
-            '76.АВ',
-            '68.02',
-            vatAmount,
-            cpName || cpSubconto || 'Покупатель по авансу',
-            'Налог (взносы): начислено / уплачено',
-            'Исчислен НДС с полученного аванса (СФ на аванс)'
+            '51',
+            '62.01',
+            open6201Debt,
+            bankSubconto,
+            cpSubconto || cpName || 'Контрагент',
+            'Поступление оплаты от покупателя в погашение задолженности'
           );
+          pushEntry(
+            '51',
+            '62.02',
+            advExcess,
+            bankSubconto,
+            cpSubconto || cpName || 'Контрагент',
+            'Получен аванс от покупателя (превышение оплаты над задолженностью 62.01)'
+          );
+          if (isOsno && vatAmount > 0 && vatRate > 0 && !explicitlyNoSF) {
+            const splitAdvVat = round2((advExcess * vatRate) / (100 + vatRate));
+            if (splitAdvVat >= 0.01) {
+              pushEntry(
+                '76.АВ',
+                '68.02',
+                splitAdvVat,
+                cpName || cpSubconto || 'Покупатель по авансу',
+                'Налог (взносы): начислено / уплачено',
+                'Исчислен НДС с полученного аванса (СФ на аванс)'
+              );
+            }
+          }
+        } else {
+          pushEntry(
+            '51',
+            ktAcc,
+            bankInAmt,
+            bankSubconto,
+            cpSubconto || cpName || 'Контрагент',
+            isNoteInterestReceipt
+              ? 'Поступили начисленные проценты по ценным бумагам (векселям)'
+              : isAdvance
+                ? 'Получен аванс от покупателя'
+                : 'Поступление оплаты от покупателя'
+          );
+          if (isAdvance && ktAcc === '62.02' && isOsno && vatAmount > 0 && !explicitlyNoSF) {
+            pushEntry(
+              '76.АВ',
+              '68.02',
+              vatAmount,
+              cpName || cpSubconto || 'Покупатель по авансу',
+              'Налог (взносы): начислено / уплачено',
+              'Исчислен НДС с полученного аванса (СФ на аванс)'
+            );
+          }
         }
         break;
       }
@@ -5607,7 +5756,10 @@ export function bindAndGenerateOperation(
           if (/ндфл/i.test(descLower)) taxAcc = '68.01';
           else if (/прибыл/i.test(descLower)) taxAcc = '68.04.1';
           else if (/травматизм|нс и пз/i.test(descLower)) taxAcc = '69.11';
-          else if (/страхов\p{L}*\s+взнос|единый тариф|сфр|пфр|фсс/iu.test(descLower)) taxAcc = '69.09';
+          else if (isLegacyBp30 && /фсс|социальн\p{L}*\s+страхован/iu.test(descLower)) taxAcc = '69.01';
+          else if (isLegacyBp30 && /фомс|медицинск/iu.test(descLower)) taxAcc = '69.03.1';
+          else if (/страхов\p{L}*\s+взнос|единый тариф|сфр|пфр|фсс/iu.test(descLower))
+            taxAcc = isLegacyBp30 ? '69.02.7' : '69.09';
           else if (/единый налоговый платеж|(?:^|[^\p{L}])енп(?=$|[^\p{L}])/iu.test(descLower)) taxAcc = '68.90';
           else if (/штраф|пен[ия]/i.test(descLower)) taxAcc = '68.10';
 
@@ -5977,7 +6129,7 @@ export function bindAndGenerateOperation(
           );
         }
         let offsetAmt = 0;
-        if (batchContext && cpName && totalWithVat > 0) {
+        if ((batchContext || db1C) && cpName && totalWithVat > 0) {
           const availAdv = computeCounterpartyAdvanceBalance('60.02', cpName, cpInn, db1C, priorOps);
           offsetAmt = round2(Math.min(totalWithVat, availAdv));
           if (offsetAmt > 0.01) {
@@ -6050,7 +6202,7 @@ export function bindAndGenerateOperation(
           );
         }
         let offsetAmt = 0;
-        if (batchContext && cpName && totalWithVat > 0) {
+        if ((batchContext || db1C) && cpName && totalWithVat > 0) {
           const availAdv = computeCounterpartyAdvanceBalance('60.02', cpName, cpInn, db1C, priorOps);
           offsetAmt = round2(Math.min(totalWithVat, availAdv));
           if (offsetAmt > 0.01) {
@@ -6157,7 +6309,7 @@ export function bindAndGenerateOperation(
           );
         }
         let offsetAmt = 0;
-        if (batchContext && cpName && totalWithVat > 0) {
+        if ((batchContext || db1C) && cpName && totalWithVat > 0) {
           const availAdv = computeCounterpartyAdvanceBalance('60.02', cpName, cpInn, db1C, priorOps);
           offsetAmt = round2(Math.min(totalWithVat, availAdv));
           if (offsetAmt > 0.01) {
@@ -6435,20 +6587,40 @@ export function bindAndGenerateOperation(
 
       case 'insurance_accrual': {
         const costAcc = resolvedCostAccount || '26';
-        pushEntry(
-          costAcc,
-          '69.09',
-          totalWithVat,
+        const insSubDt =
           costAcc === '20.01'
             ? [nomGroup, expenseItemName || 'Страховые взносы'].filter(Boolean).join(' / ')
-            : expenseItemName || 'Страховые взносы',
-          'Страховые взносы по единому тарифу',
-          draft.description || 'Начислены страховые взносы',
-          {
+            : expenseItemName || 'Страховые взносы';
+        if (isLegacyBp30) {
+          const pfrShare = round2((totalWithVat * 26) / 34);
+          const fssShare = round2((totalWithVat * 2.9) / 34);
+          const fomsShare = round2(totalWithVat - pfrShare - fssShare);
+          pushEntry(costAcc, '69.02.7', pfrShare, insSubDt, 'Обязательное пенсионное страхование', 'Начислены взносы в ПФР (26%)', {
             allowZeroCalculated: isCalculatedBy1C,
-            amountRuleNote: '30% от штатного ФОТ за месяц',
-          }
-        );
+            amountRuleNote: '26% от облагаемого ФОТ',
+          });
+          pushEntry(costAcc, '69.01', fssShare, insSubDt, 'Расходы по страхованию', 'Начислены взносы в ФСС (2,9%)', {
+            allowZeroCalculated: isCalculatedBy1C,
+            amountRuleNote: '2,9% от облагаемого ФОТ',
+          });
+          pushEntry(costAcc, '69.03.1', fomsShare, insSubDt, 'Федеральный фонд ОМС', 'Начислены взносы в ФФОМС (5,1%)', {
+            allowZeroCalculated: isCalculatedBy1C,
+            amountRuleNote: '5,1% от облагаемого ФОТ',
+          });
+        } else {
+          pushEntry(
+            costAcc,
+            '69.09',
+            totalWithVat,
+            insSubDt,
+            'Страховые взносы по единому тарифу',
+            draft.description || 'Начислены страховые взносы',
+            {
+              allowZeroCalculated: isCalculatedBy1C,
+              amountRuleNote: '30% от штатного ФОТ за месяц',
+            }
+          );
+        }
         break;
       }
 
@@ -6894,7 +7066,7 @@ export function bindAndGenerateOperation(
               'Начислен НДС при реализации основного средства'
             );
           }
-          if (batchContext && cpName) {
+          if ((batchContext || db1C) && cpName) {
             const availAdv6202 = computeCounterpartyAdvanceBalance(
               '62.02',
               cpName,
@@ -7043,7 +7215,7 @@ export function bindAndGenerateOperation(
           );
         }
         let offsetAmt = 0;
-        if (batchContext && cpName && totalWithVat > 0 && settlementAcc === '60.01') {
+        if ((batchContext || db1C) && cpName && totalWithVat > 0 && settlementAcc === '60.01') {
           const availAdv = computeCounterpartyAdvanceBalance('60.02', cpName, cpInn, db1C, priorOps);
           offsetAmt = round2(Math.min(totalWithVat, availAdv));
           if (offsetAmt > 0.01) {
@@ -7113,7 +7285,7 @@ export function bindAndGenerateOperation(
             'Начислен НДС с реализации'
           );
         }
-        if (batchContext && cpName && totalWithVat > 0) {
+        if ((batchContext || db1C) && cpName && totalWithVat > 0) {
           const availBuyerAdv = computeCounterpartyAdvanceBalance('62.02', cpName, cpInn, db1C, priorOps);
           const offsetAmt = round2(Math.min(totalWithVat, availBuyerAdv));
           if (offsetAmt > 0.01) {
@@ -7281,7 +7453,7 @@ export function bindAndGenerateOperation(
             'Начислен НДС с реализации услуг'
           );
         }
-        if (batchContext && cpName && totalWithVat > 0) {
+        if ((batchContext || db1C) && cpName && totalWithVat > 0) {
           const availBuyerAdv = computeCounterpartyAdvanceBalance('62.02', cpName, cpInn, db1C, priorOps);
           const offsetAmt = round2(Math.min(totalWithVat, availBuyerAdv));
           if (offsetAmt > 0.01) {
@@ -7316,15 +7488,39 @@ export function bindAndGenerateOperation(
       }
 
       case 'cash_in': {
-        const ktCash = /из банка|с расчетного счета/i.test(descLower) ? '51' : '62.01';
-        pushEntry(
-          '50.01',
-          ktCash,
-          totalWithVat,
-          cashFlowItemName,
-          ktCash === '51' ? bankSubconto : cpSubconto,
-          draft.description || 'Поступление наличных в кассу (ПКО)'
-        );
+        const isFromBank = /из банка|с расчетного счета/i.test(descLower);
+        const isExplicitCashAdv = !isFromBank && /аванс|предоплат/i.test(descLower);
+        if (!isFromBank && (batchContext || db1C) && cpName && totalWithVat > 0) {
+          const open6201 = computeCounterpartyOpenDebtBalance1C('62.01', cpName, cpInn, db1C, priorOps);
+          if (isExplicitCashAdv || open6201 <= 0.005) {
+            pushEntry('50.01', '62.02', totalWithVat, cashFlowItemName, cpSubconto || cpName, 'Получен аванс наличными от покупателя (ПКО)');
+            if (isOsno && vatAmount > 0 && !explicitlyNoSF) {
+              pushEntry('76.АВ', '68.02', vatAmount, cpName || cpSubconto, 'Налог (взносы): начислено / уплачено', 'Исчислен НДС с полученного наличного аванса');
+            }
+          } else if (open6201 < totalWithVat - 0.01) {
+            const advPart = round2(totalWithVat - open6201);
+            pushEntry('50.01', '62.01', open6201, cashFlowItemName, cpSubconto || cpName, 'Поступление наличных в погашение долга покупателя (ПКО)');
+            pushEntry('50.01', '62.02', advPart, cashFlowItemName, cpSubconto || cpName, 'Получен аванс наличными от покупателя (превышение над долгом 62.01)');
+            if (isOsno && vatAmount > 0 && vatRate > 0 && !explicitlyNoSF) {
+              const advVat = round2((advPart * vatRate) / (100 + vatRate));
+              if (advVat >= 0.01) {
+                pushEntry('76.АВ', '68.02', advVat, cpName || cpSubconto, 'Налог (взносы): начислено / уплачено', 'Исчислен НДС с полученного наличного аванса');
+              }
+            }
+          } else {
+            pushEntry('50.01', '62.01', totalWithVat, cashFlowItemName, cpSubconto || cpName, draft.description || 'Поступление наличных в кассу (ПКО)');
+          }
+        } else {
+          const ktCash = isFromBank ? '51' : isExplicitCashAdv ? '62.02' : '62.01';
+          pushEntry(
+            '50.01',
+            ktCash,
+            totalWithVat,
+            cashFlowItemName,
+            ktCash === '51' ? bankSubconto : cpSubconto,
+            draft.description || 'Поступление наличных в кассу (ПКО)'
+          );
+        }
         break;
       }
 
@@ -7336,14 +7532,27 @@ export function bindAndGenerateOperation(
             : /зарплат/i.test(descLower)
               ? '70'
               : '60.01';
-        pushEntry(
-          dtCash,
-          '50.01',
-          totalWithVat,
-          dtCash === '71.01' || dtCash === '70' ? employeeName || 'Сотрудник' : cpSubconto,
-          cashFlowItemName,
-          draft.description || 'Выдача наличных из кассы (РКО)'
-        );
+        if (dtCash === '60.01' && (batchContext || db1C) && cpName && totalWithVat > 0) {
+          const isExpCashAdv = /аванс|предоплат/i.test(descLower);
+          const open6001 = computeCounterpartyOpenDebtBalance1C('60.01', cpName, cpInn, db1C, priorOps);
+          if (isExpCashAdv || open6001 <= 0.005) {
+            pushEntry('60.02', '50.01', totalWithVat, cpSubconto || cpName, cashFlowItemName, 'Выдан аванс поставщику из кассы (РКО)');
+          } else if (open6001 < totalWithVat - 0.01) {
+            pushEntry('60.01', '50.01', open6001, cpSubconto || cpName, cashFlowItemName, 'Оплата задолженности поставщику из кассы (РКО)');
+            pushEntry('60.02', '50.01', round2(totalWithVat - open6001), cpSubconto || cpName, cashFlowItemName, 'Выдан аванс поставщику из кассы (превышение над долгом 60.01)');
+          } else {
+            pushEntry('60.01', '50.01', totalWithVat, cpSubconto || cpName, cashFlowItemName, draft.description || 'Выдача наличных из кассы (РКО)');
+          }
+        } else {
+          pushEntry(
+            dtCash,
+            '50.01',
+            totalWithVat,
+            dtCash === '71.01' || dtCash === '70' ? employeeName || 'Сотрудник' : cpSubconto,
+            cashFlowItemName,
+            draft.description || 'Выдача наличных из кассы (РКО)'
+          );
+        }
         break;
       }
 
@@ -7460,14 +7669,21 @@ export function bindAndGenerateOperation(
           );
         }
 
-        // Compute exact 2026 employee-by-employee НДФЛ 13% with standard child deductions (1400/2800/6000 up to 450k YTD, doubled for single parent),
-        // property tax deduction (2 000 000 ₽), and 4 000 ₽ material aid exemption (п. 28 ст. 217 НК РФ)
-        const computeMonthlyChildDeduction2026 = (children: number, singleParent: boolean): number => {
+        // Compute employee-by-employee НДФЛ 13% with standard child deductions
+        // (rf_2026: 1400/2800/6000 up to 450k YTD; bp30_legacy_pre2023: 1400/1400/3000 up to 350k YTD; doubled for single parent)
+        const childYtdLimit = isLegacyBp30 ? 350_000 : 450_000;
+        const computeMonthlyChildDeduction = (children: number, singleParent: boolean): number => {
           if (!children || children <= 0) return 0;
           let base = 0;
-          if (children >= 1) base += 1400;
-          if (children >= 2) base += 2800;
-          if (children >= 3) base += (children - 2) * 6000;
+          if (isLegacyBp30) {
+            if (children >= 1) base += 1400;
+            if (children >= 2) base += 1400;
+            if (children >= 3) base += (children - 2) * 3000;
+          } else {
+            if (children >= 1) base += 1400;
+            if (children >= 2) base += 2800;
+            if (children >= 3) base += (children - 2) * 6000;
+          }
           return singleParent ? base * 2 : base;
         };
 
@@ -7635,14 +7851,14 @@ export function bindAndGenerateOperation(
             );
 
             let childDed = 0;
-            // Apply monthly child deduction once per calendar month up to 450 000 ₽ YTD (ст. 218 НК РФ)
+            // Apply monthly child deduction once per calendar month up to profile YTD limit (ст. 218 НК РФ)
             if (
               !isMaterialAid &&
               (vEmp?.childCount ?? 0) > 0 &&
-              ytdTaxableIncomeForChildLimit <= 450_000 &&
+              ytdTaxableIncomeForChildLimit <= childYtdLimit &&
               !hasPriorPayrollInSameMonthForEmp(pKey)
             ) {
-              childDed = computeMonthlyChildDeduction2026(
+              childDed = computeMonthlyChildDeduction(
                 vEmp!.childCount!,
                 Boolean(vEmp?.isSingleParent)
               );
@@ -7802,37 +8018,92 @@ export function bindAndGenerateOperation(
         // Per Art. 422 p. 1 subp. 1 NK RF, state temporary disability benefits (больничный, включая первые 3 дня за счёт работодателя)
         // are EXEMPT from insurance contributions (69.09 / 69.11). Material aid up to 4 000 ₽/yr is also exempt (subp. 11 p. 1 Art. 422 NK RF).
         if (!isSickLeaveOnly) {
+          const pushInsuranceForBase = (
+            costAccTarget: string,
+            baseAmt: number,
+            subDtLabel: string,
+            contextLabel2026: string,
+            ruleContextLabel: string
+          ) => {
+            if (isLegacyBp30) {
+              pushEntry(
+                costAccTarget,
+                '69.02.7',
+                round2(baseAmt * 0.26),
+                subDtLabel,
+                'Обязательное пенсионное страхование',
+                `Начислены страховые взносы в ПФР (26%) — ${ruleContextLabel}`,
+                {
+                  allowZeroCalculated: isCalculatedBy1C,
+                  amountRuleNote: `26% от ${ruleContextLabel}`,
+                }
+              );
+              pushEntry(
+                costAccTarget,
+                '69.01',
+                round2(baseAmt * 0.029),
+                subDtLabel,
+                'Расходы по страхованию',
+                `Начислены страховые взносы в ФСС (2,9%) — ${ruleContextLabel}`,
+                {
+                  allowZeroCalculated: isCalculatedBy1C,
+                  amountRuleNote: `2,9% от ${ruleContextLabel}`,
+                }
+              );
+              pushEntry(
+                costAccTarget,
+                '69.03.1',
+                round2(baseAmt * 0.051),
+                subDtLabel,
+                'Федеральный фонд ОМС',
+                `Начислены страховые взносы в ФФОМС (5,1%) — ${ruleContextLabel}`,
+                {
+                  allowZeroCalculated: isCalculatedBy1C,
+                  amountRuleNote: `5,1% от ${ruleContextLabel}`,
+                }
+              );
+            } else {
+              pushEntry(
+                costAccTarget,
+                '69.09',
+                round2(baseAmt * 0.3),
+                subDtLabel,
+                'Страховые взносы по единому тарифу',
+                contextLabel2026,
+                {
+                  allowZeroCalculated: isCalculatedBy1C,
+                  amountRuleNote: `30% от ${ruleContextLabel}`,
+                }
+              );
+            }
+            pushEntry(
+              costAccTarget,
+              '69.11',
+              round2(baseAmt * (injRate / 100)),
+              subDtLabel,
+              'Взносы от НС и ПЗ',
+              `Начислены взносы на травматизм (${injRate}%)`,
+              {
+                allowZeroCalculated: isCalculatedBy1C,
+                amountRuleNote: `${injRate}% от ${ruleContextLabel}`,
+              }
+            );
+          };
+
           if (useSplitRosterPostings && wageBuckets.size > 0 && !isMaterialAid) {
             for (const bucket of wageBuckets.values()) {
               const subDt =
                 bucket.costAcc === '20.01'
                   ? [bucket.groupLabel || nomGroup, 'Страховые взносы'].filter(Boolean).join(' / ')
                   : 'Страховые взносы';
-              pushEntry(
+              pushInsuranceForBase(
                 bucket.costAcc,
-                '69.09',
-                round2(bucket.amount * 0.3),
+                bucket.amount,
                 subDt,
-                'Страховые взносы по единому тарифу',
                 bucket.costAcc === '20.01'
                   ? `Начислены страховые взносы 30% с ФОТ рабочих (${bucket.groupLabel || nomGroup})`
                   : 'Начислены страховые взносы 30% с ФОТ АУП',
-                {
-                  allowZeroCalculated: isCalculatedBy1C,
-                  amountRuleNote: '30% от начисленного ФОТ подразделения',
-                }
-              );
-              pushEntry(
-                bucket.costAcc,
-                '69.11',
-                round2(bucket.amount * (injRate / 100)),
-                subDt,
-                'Взносы от НС и ПЗ',
-                `Начислены взносы на травматизм (${injRate}%)`,
-                {
-                  allowZeroCalculated: isCalculatedBy1C,
-                  amountRuleNote: `${injRate}% от начисленного ФОТ подразделения`,
-                }
+                'начисленного ФОТ подразделения'
               );
             }
           } else {
@@ -7844,37 +8115,18 @@ export function bindAndGenerateOperation(
                   : activeRosterForTax.length === 1 && activeRosterForTax[0].costAccount
                     ? activeRosterForTax[0].costAccount
                     : fallbackWageCostAcc;
-              pushEntry(
-                targetInsAcc,
-                '69.09',
-                round2(insurableBase * 0.3),
+              const subDt =
                 targetInsAcc === '91.02'
                   ? 'Материальная помощь сотрудникам (страховые взносы)'
                   : targetInsAcc === '20.01'
                     ? [nomGroup, 'Страховые взносы'].filter(Boolean).join(' / ')
-                    : 'Страховые взносы',
-                'Страховые взносы по единому тарифу',
+                    : 'Страховые взносы';
+              pushInsuranceForBase(
+                targetInsAcc,
+                insurableBase,
+                subDt,
                 'Начислены страховые взносы по единому тарифу (30%)',
-                {
-                  allowZeroCalculated: isCalculatedBy1C,
-                  amountRuleNote: '30% от облагаемой базы (ст. 422, 425 НК РФ)',
-                }
-              );
-              pushEntry(
-                targetInsAcc,
-                '69.11',
-                round2(insurableBase * (injRate / 100)),
-                targetInsAcc === '91.02'
-                  ? 'Материальная помощь сотрудникам (страховые взносы)'
-                  : targetInsAcc === '20.01'
-                    ? [nomGroup, 'Страховые взносы'].filter(Boolean).join(' / ')
-                    : 'Страховые взносы',
-                'Взносы от НС и ПЗ',
-                `Начислены взносы на травматизм (${injRate}%)`,
-                {
-                  allowZeroCalculated: isCalculatedBy1C,
-                  amountRuleNote: `${injRate}% от облагаемой базы`,
-                }
+                'облагаемой базы (ст. 422, 425 НК РФ)'
               );
             }
           }
@@ -8609,7 +8861,11 @@ export function bindAndGenerateOperation(
         );
         const taxBaseYtd = Math.max(0, round2(preTaxCumulativeProfit + nonDeductibleYtd));
 
-        if (isOsno && ['03', '06', '09', '12'].includes(closeMonth) && profitTaxRate > 0) {
+        if (
+          isOsno &&
+          (['03', '06', '09', '12'].includes(closeMonth) || isMonthlyProfitTax) &&
+          profitTaxRate > 0
+        ) {
           const targetTaxTotal =
             taxBaseYtd > 0.01 ? round2(taxBaseYtd * (profitTaxRate / 100)) : 0;
           const taxDelta = round2(targetTaxTotal - alreadyAccruedTax);
@@ -9180,14 +9436,41 @@ export function bindAndGenerateOperation(
             );
           }
           if (ndflTaxable >= 0.01) {
-            pushEntry(
-              '91.02',
-              '69.09',
-              round2(ndflTaxable * 0.3),
-              'Материальная помощь сотрудникам (страховые взносы)',
-              'Страховые взносы по единому тарифу',
-              'Начислены страховые взносы 30% с материальной помощи свыше 4 000 ₽ (пп. 11 п. 1 ст. 422 НК РФ)'
-            );
+            if (isLegacyBp30) {
+              pushEntry(
+                '91.02',
+                '69.02.7',
+                round2(ndflTaxable * 0.26),
+                'Материальная помощь сотрудникам (страховые взносы)',
+                'Обязательное пенсионное страхование',
+                'Начислены взносы в ПФР 26% с материальной помощи свыше 4 000 ₽'
+              );
+              pushEntry(
+                '91.02',
+                '69.01',
+                round2(ndflTaxable * 0.029),
+                'Материальная помощь сотрудникам (страховые взносы)',
+                'Расходы по страхованию',
+                'Начислены взносы в ФСС 2,9% с материальной помощи свыше 4 000 ₽'
+              );
+              pushEntry(
+                '91.02',
+                '69.03.1',
+                round2(ndflTaxable * 0.051),
+                'Материальная помощь сотрудникам (страховые взносы)',
+                'Федеральный фонд ОМС',
+                'Начислены взносы в ФФОМС 5,1% с материальной помощи свыше 4 000 ₽'
+              );
+            } else {
+              pushEntry(
+                '91.02',
+                '69.09',
+                round2(ndflTaxable * 0.3),
+                'Материальная помощь сотрудникам (страховые взносы)',
+                'Страховые взносы по единому тарифу',
+                'Начислены страховые взносы 30% с материальной помощи свыше 4 000 ₽ (пп. 11 п. 1 ст. 422 НК РФ)'
+              );
+            }
             pushEntry(
               '91.02',
               '69.11',
@@ -9330,6 +9613,20 @@ export function bindAndGenerateOperation(
             cpLabel,
             `Приняты к учёту расходы будущих периодов (${rbpSub})`
           );
+          if (settlementAcc === '60.01' && !paidVia && (batchContext || db1C) && cpName && totalWithVat > 0) {
+            const availAdv = computeCounterpartyAdvanceBalance('60.02', cpName, cpInn, db1C, priorOps);
+            const rpbAdvOffset = round2(Math.min(totalWithVat, availAdv));
+            if (rpbAdvOffset > 0.01) {
+              pushEntry(
+                '60.01',
+                '60.02',
+                rpbAdvOffset,
+                cpLabel,
+                cpLabel,
+                'Зачёт ранее выданного аванса поставщику по РБП'
+              );
+            }
+          }
           if (vatAmount > 0) {
             pushEntry(
               '19.04',
@@ -9979,7 +10276,12 @@ export function attachVirtualStateStep00ToOperations(
 export function recalculateOperationsChronologically(
   operations: QueuedOperation[],
   db1C: Database1CSnapshot | null,
-  options?: { reportingYear?: number; defaultBik?: string }
+  options?: {
+    reportingYear?: number;
+    defaultBik?: string;
+    calculationProfile?: CalculationProfile1C;
+    monthlyProfitTax?: boolean;
+  }
 ): QueuedOperation[] {
   const manualAndImported = operations.filter(
     (o) => !o.autoGeneratedKind && !o.id.startsWith('op-cash-cover')
@@ -10128,6 +10430,8 @@ export function recalculateOperationsChronologically(
           defaultBik: options?.defaultBik ?? DEFAULT_SBERBANK_BIK,
           defaultBankName: DEFAULT_SBERBANK_NAME,
           assumeInvoiceOnVatPurchase: true,
+          calculationProfile: options?.calculationProfile,
+          monthlyProfitTax: options?.monthlyProfitTax,
         }
       );
 
@@ -10248,7 +10552,12 @@ export function isMisclassifiedLegacyOperation(op: QueuedOperation): boolean {
 
 export function rebindOperationsAgainst1CDb(
   operations: QueuedOperation[],
-  db1C: Database1CSnapshot | null
+  db1C: Database1CSnapshot | null,
+  options?: {
+    reportingYear?: number;
+    calculationProfile?: CalculationProfile1C;
+    monthlyProfitTax?: boolean;
+  }
 ): QueuedOperation[] {
   const filteredOps = operations.filter((o) => !o.id.startsWith('op-cash-cover'));
   const canonicalCounterpartyMap = buildCanonicalCounterpartyRegistry1C(db1C, filteredOps);
@@ -10353,7 +10662,10 @@ export function rebindOperationsAgainst1CDb(
         currentOpNumber: idx + 1,
         virtualStateBefore: runningState,
         canonicalCounterpartyMap,
+        reportingYear: options?.reportingYear,
         assumeInvoiceOnVatPurchase: true,
+        calculationProfile: options?.calculationProfile,
+        monthlyProfitTax: options?.monthlyProfitTax,
       }
     );
 
@@ -10374,7 +10686,12 @@ export function rebindOperationsAgainst1CDb(
  */
 export function sanitizeHydratedOperations(
   operations: QueuedOperation[],
-  db1C: Database1CSnapshot | null
+  db1C: Database1CSnapshot | null,
+  options?: {
+    reportingYear?: number;
+    calculationProfile?: CalculationProfile1C;
+    monthlyProfitTax?: boolean;
+  }
 ): QueuedOperation[] {
   const withoutSynthetic = operations.filter(
     (op) => !op.id.startsWith('op-cash-cover') && !op.autoGeneratedKind
@@ -10465,7 +10782,7 @@ export function sanitizeHydratedOperations(
     };
   });
 
-  return recalculateOperationsChronologically(preCleaned, db1C);
+  return recalculateOperationsChronologically(preCleaned, db1C, options);
 }
 
 /**
