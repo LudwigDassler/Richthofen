@@ -31,6 +31,7 @@ import {
   VirtualEntityUsageRef1C,
 } from '@/types/accounting';
 import { formatDateRu, formatMoney, formatMoneyWithCurrency } from '@/lib/formatters';
+import { summarizeConnectedBase0 } from '@/lib/import1c';
 
 type SubView = 'osv' | 'virtual_clot' | 'explorer';
 type ExplorerSection = 'org_policy' | 'directories' | 'documents' | 'postings' | 'raw_balances';
@@ -74,6 +75,7 @@ export function Tab1DatabaseOsv() {
     periodFilter,
     setPeriodFilter,
     load1CJsonFile,
+    disconnect1CDb,
     syncWith1CEndpoint,
     runSmartAutoFixAll,
     jumpToOperation,
@@ -500,9 +502,75 @@ export function Tab1DatabaseOsv() {
     osvReport.totals.isEndBalanced;
 
   const auditorHints = osvReport.auditorHints ?? [];
+  const connectedBase0 = summarizeConnectedBase0(db1C);
 
   return (
     <div className="space-y-4">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".json,application/json"
+        onChange={async (e) => {
+          const f = e.target.files?.[0];
+          if (f) await load1CJsonFile(f);
+          e.target.value = '';
+        }}
+        className="hidden"
+      />
+
+      {/* Connected Base 0 Green Status Strip */}
+      {connectedBase0 && (
+        <div
+          data-testid="osv-connected-base0-banner"
+          className="rounded-2xl border border-emerald-200/90 dark:border-emerald-800/70 bg-emerald-50/50 dark:bg-emerald-950/20 px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs"
+        >
+          <div className="flex flex-wrap items-center gap-2 text-slate-800 dark:text-slate-200 min-w-0">
+            <CheckCircle2
+              className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0"
+              strokeWidth={1.7}
+            />
+            <span className="font-semibold text-emerald-900 dark:text-emerald-300">
+              Подключена База 0 из 1С: {connectedBase0.organizationName}
+            </span>
+            <span aria-hidden="true" className="text-emerald-600/60">
+              ·
+            </span>
+            <span className="tabular-nums text-slate-700 dark:text-slate-300">
+              ИНН {connectedBase0.inn}
+            </span>
+            <span aria-hidden="true" className="text-emerald-600/60">
+              ·
+            </span>
+            <span className="tabular-nums text-slate-700 dark:text-slate-300">
+              Справочники: {connectedBase0.totalCatalogItems} эл.
+            </span>
+            <span aria-hidden="true" className="text-emerald-600/60">
+              ·
+            </span>
+            <span className="tabular-nums text-slate-700 dark:text-slate-300">
+              Строк начального сальдо: {connectedBase0.openingBalanceLinesCount}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="px-3 py-1.5 rounded-xl border border-emerald-300/80 dark:border-emerald-800 bg-white dark:bg-slate-900 hover:bg-emerald-50 dark:hover:bg-slate-800 font-medium text-slate-800 dark:text-slate-200 whitespace-nowrap transition-colors"
+            >
+              Обновить JSON
+            </button>
+            <button
+              type="button"
+              onClick={() => void disconnect1CDb()}
+              className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 font-medium text-slate-600 dark:text-slate-300 whitespace-nowrap transition-colors"
+            >
+              Отключить Базу 0
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Summary KPI Strip */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3.5">
         <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.04)] p-4">

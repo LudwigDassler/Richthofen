@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import { AlertCircle, CheckCircle2, Info, X } from 'lucide-react';
 import { useAccountant } from '@/context/AccountantContext';
 import { Header } from '@/components/Header';
@@ -12,6 +12,12 @@ import { Tab4Export1C } from '@/components/Tab4Export1C';
 
 export function WorkspaceShell() {
   const { hydrated, activeTab, notice, dismissNotice } = useAccountant();
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0 });
+    }
+  }, [activeTab]);
 
   if (!hydrated) {
     return (

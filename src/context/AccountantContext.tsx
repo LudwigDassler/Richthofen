@@ -75,12 +75,15 @@ import {
 } from '@/lib/engine';
 import {
   BatchImportResult,
+  isBase0JsonPayload,
   normalize1CDatabaseExport,
   normalizeOperationDateToReportingYear,
+  parseBase0Json,
   parseFreeTextOrDelimitedOperations,
   parseRussianNumber,
   processBatchFilesAsync,
   reparseSingleOperationWithAI,
+  summarizeConnectedBase0,
 } from '@/lib/import1c';
 import {
   AiBatchProgressState1C,
@@ -228,6 +231,7 @@ interface AccountantContextValue {
   // Actions
   syncWith1CEndpoint: (silent?: boolean) => Promise<void>;
   load1CJsonFile: (file: File) => Promise<void>;
+  disconnect1CDb: () => Promise<void>;
   importOperationFiles: (files: File[]) => Promise<BatchImportResult>;
   importOperationsFromText: (text: string, sourceLabel?: string) => Promise<number>;
   probeAiConnection: () => Promise<AiProviderStatus1C>;
@@ -979,12 +983,20 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
         const rawText = await file.text();
         const cleanText = rawText.replace(/^\uFEFF/, '');
         const parsed = JSON.parse(cleanText);
-        const snapshot = normalize1CDatabaseExport(parsed, file.name);
+        const isBase0 = isBase0JsonPayload(parsed, file.name);
+        const snapshot = isBase0
+          ? parseBase0Json(parsed as Record<string, unknown>, file.name, reportingYear)
+          : normalize1CDatabaseExport(parsed, file.name);
 
         setDb1C(snapshot);
         setBalanceAnchorOverride('auto');
         setPeriodFilter(buildDefaultPeriodForYear(snapshot, reportingYear));
-        setOperations((prev) => rebindOperationsAgainst1CDb(prev, snapshot));
+        setOperations((prev) =>
+          attachVirtualStateStep00ToOperations(
+            rebindOperationsAgainst1CDb(prev, snapshot),
+            snapshot
+          )
+        );
         setSyncStatus('connected');
 
         try {
@@ -997,13 +1009,16 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
           // Local state is already updated
         }
 
+        const base0Summary = summarizeConnectedBase0(snapshot);
         pushNotice(
           'success',
-          `Загружена база 1С «${snapshot.organization.name || file.name}»: ИНН ${
-            snapshot.organization.inn || 'не указан'
-          }, проводок ${snapshot.postings.length}, справочников ${
-            Object.keys(snapshot.rawDirectories).length
-          }`
+          isBase0 && base0Summary
+            ? `Подключена База 0 из 1С «${base0Summary.organizationName}»: ИНН ${base0Summary.inn} · элементов справочников: ${base0Summary.totalCatalogItems} · строк начального сальдо: ${base0Summary.openingBalanceLinesCount}`
+            : `Загружена база 1С «${snapshot.organization.name || file.name}»: ИНН ${
+                snapshot.organization.inn || 'не указан'
+              }, проводок ${snapshot.postings.length}, справочников ${
+                Object.keys(snapshot.rawDirectories).length
+              }`
         );
       } catch (err) {
         const msg =
@@ -1015,6 +1030,25 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
     },
     [db1C, reportingYear, pushNotice]
   );
+
+  const disconnect1CDb = useCallback(async () => {
+    setDb1C(null);
+    setSyncError(null);
+    setSyncStatus('disconnected');
+    setBalanceAnchorOverride('auto');
+    setOperations((prev) =>
+      attachVirtualStateStep00ToOperations(rebindOperationsAgainst1CDb(prev, null), null)
+    );
+    try {
+      await fetch('/api/1c-sync', { method: 'DELETE' });
+    } catch {
+      // Local state is already disconnected
+    }
+    pushNotice(
+      'info',
+      'База 0 отключена. Справочники и входящее сальдо пересчитаны в автономном режиме по операциям периода.'
+    );
+  }, [pushNotice]);
 
   const probeAiConnection = useCallback(async (): Promise<AiProviderStatus1C> => {
     setIsProbingAi(true);
@@ -3359,6 +3393,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       dismissNotice,
       syncWith1CEndpoint,
       load1CJsonFile,
+      disconnect1CDb,
       importOperationFiles,
       importOperationsFromText,
       probeAiConnection,
@@ -3437,6 +3472,7 @@ export function AccountantProvider({ children }: { children: React.ReactNode }) 
       dismissNotice,
       syncWith1CEndpoint,
       load1CJsonFile,
+      disconnect1CDb,
       importOperationFiles,
       importOperationsFromText,
       probeAiConnection,

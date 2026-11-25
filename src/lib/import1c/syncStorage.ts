@@ -3,6 +3,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { Database1CSnapshot } from '@/types/accounting';
 import { normalize1CDatabaseExport } from './json1CSyncNormalizer';
+import { isBase0JsonPayload, parseBase0Json } from './parseBase0Json';
 
 export interface SyncCachePaths {
   cacheDir: string;
@@ -147,6 +148,11 @@ export function parseAndNormalize1CPayload(
         snapshot: normalize1CDatabaseExport(rec.data, sourceLabel),
       };
     }
+  }
+
+  if (isBase0JsonPayload(parsed, sourceLabel)) {
+    const snapshot = parseBase0Json(parsed as Record<string, unknown>, sourceLabel);
+    return { cleanJsonText, snapshot };
   }
 
   const snapshot = normalize1CDatabaseExport(parsed, sourceLabel);
