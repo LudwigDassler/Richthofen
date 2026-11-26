@@ -449,12 +449,11 @@ test('Part B BSL Generator & Package: metadata ВидОперации before Р�
   // Verify all Part B + anti-hang mechanisms in BSL
   assert.equal(countBslKeyword(cleanBsl, 'Пока'), 0, 'Must contain zero Пока loops in BSL');
   assert.ok(bsl.includes('ПропускатьСуществующиеРучныеДокументы'), 'Missing form flag ПропускатьСуществующиеРучныеДокументы');
-  assert.ok(bsl.includes('Функция УстановитьВидОперацииНапрямую('), 'Missing direct ВидОперации helper');
-  assert.equal(
-    bsl.includes('ЗначенияПеречисления'),
-    false,
-    'ВидОперации must NOT iterate metadata ЗначенияПеречисления collections'
-  );
+  assert.ok(bsl.includes('Функция НайтиВидОперацииПоМетаданным(Док, КандидатыИменИСинонимов)'), 'Missing metadata ВидОперации helper');
+  assert.ok(bsl.includes('Функция УстановитьВидОперацииДокумента(ДокОбъект, КаноническийВид)'), 'Missing УстановитьВидОперацииДокумента helper');
+  assert.ok(bsl.includes('Функция НайтиПогашениеЗадолженностиАвтоматически(Док)'), 'Missing ПогашениеЗадолженности helper');
+  assert.ok(bsl.includes('Функция ЗаполнитьРасшифровкуПлатежаКонтрагента('), 'Missing РасшифровкаПлатежа helper');
+  assert.ok(bsl.includes('Функция СформироватьДампПолейДокумента(Док)'), 'Missing draft field dump helper');
   assert.ok(bsl.includes('Процедура УстановитьАвтоЗачетАвансовДокумента('), 'Missing СпособЗачетаАвансов helper');
   assert.ok(bsl.includes('Функция НайтиСуществующийРучнойДубльДокумента('), 'Missing manual duplicate lookup helper');
   assert.ok(
@@ -485,20 +484,38 @@ test('Part B BSL Generator & Package: metadata ВидОперации before Р�
     'ПериодС..ПериодПо cutoff must precede tag duplicate check, catalog lookup/creation, and manual duplicate check'
   );
 
-  // Ensure in cash receipt/disbursement branches УстановитьВидОперацииНапрямую comes BEFORE РасшифровкаПлатежа.Очистить()
-  const pkoSectionIdx = bsl.indexOf('ВидМета = "ПриходныйКассовыйОрдер"');
-  assert.ok(pkoSectionIdx > 0);
-  const cashSlice = bsl.slice(pkoSectionIdx, bsl.indexOf('ВидМета = "АвансовыйОтчет"'));
-  const firstProchPrihod = cashSlice.indexOf('УстановитьВидОперацииНапрямую(ДокОбъект, ВидМета, "ПрочийПриход")');
-  const afterProchPrihodClear = cashSlice.indexOf('ДокОбъект.РасшифровкаПлатежа.Очистить()', firstProchPrihod);
+  // Ensure in bank and cash branches УстановитьВидОперацииДокумента comes strictly BEFORE СчетОрганизации / СчетУчета and BEFORE РасшифровкаПлатежа
+  const createNativeStart = bsl.indexOf('Функция СоздатьНативныйДокумент1С(');
+  assert.ok(createNativeStart > 0);
+  const bankInIdx = bsl.indexOf('ИначеЕсли ВидМета = "ПоступлениеНаРасчетныйСчет" Тогда', createNativeStart);
+  const bankOutIdx = bsl.indexOf('ИначеЕсли ВидМета = "СписаниеСРасчетногоСчета" Тогда', bankInIdx);
+  const pkoSectionIdx = bsl.indexOf('ИначеЕсли ВидМета = "ПриходныйКассовыйОрдер"', bankOutIdx);
+  const aoSectionIdx = bsl.indexOf('ИначеЕсли ВидМета = "АвансовыйОтчет" Тогда', pkoSectionIdx);
+  assert.ok(bankInIdx > 0 && bankOutIdx > bankInIdx && pkoSectionIdx > bankOutIdx && aoSectionIdx > pkoSectionIdx);
+
+  const bankOutSlice = bsl.slice(bankOutIdx, pkoSectionIdx);
+  const bankOutSetVO = bankOutSlice.indexOf('УстановитьВидОперацииДокумента(ДокОбъект,');
+  const bankOutSetAccOrg = bankOutSlice.indexOf('УстановитьЕслиЕсть(ДокОбъект, "СчетОрганизации"');
+  const bankOutFillRassh = bankOutSlice.indexOf('ЗаполнитьРасшифровкуПлатежаКонтрагента(ДокОбъект,');
   assert.ok(
-    firstProchPrihod > 0 && afterProchPrihodClear > firstProchPrihod,
-    'ПрочийПриход ВидОперации must be set BEFORE РасшифровкаПлатежа.Очистить()'
+    bankOutSetVO > 0 && bankOutSetAccOrg > bankOutSetVO && bankOutFillRassh > bankOutSetAccOrg,
+    'СписаниеСРасчетногоСчета must set ВидОперации BEFORE СчетОрганизации and BEFORE ЗаполнитьРасшифровкуПлатежаКонтрагента'
   );
-  const firstProchRashod = cashSlice.indexOf('УстановитьВидОперацииНапрямую(ДокОбъект, ВидМета, "ПрочийРасход")');
-  const afterProchRashodClear = cashSlice.indexOf('ДокОбъект.РасшифровкаПлатежа.Очистить()', firstProchRashod);
+
+  const cashSlice = bsl.slice(pkoSectionIdx, aoSectionIdx);
+  const pkoSetVO = cashSlice.indexOf('УстановитьВидОперацииДокумента(ДокОбъект, РежимВидПКО)');
+  const pkoSetAcc = cashSlice.indexOf('УстановитьЕслиЕсть(ДокОбъект, "СчетУчета", НайтиСчет("50.01"))');
+  const pkoClearRassh = cashSlice.indexOf('ДокОбъект.РасшифровкаПлатежа.Очистить()', pkoSetVO);
   assert.ok(
-    firstProchRashod > 0 && afterProchRashodClear > firstProchRashod,
-    'ПрочийРасход ВидОперации must be set BEFORE РасшифровкаПлатежа.Очистить()'
+    pkoSetVO > 0 && pkoSetAcc > pkoSetVO && pkoClearRassh > pkoSetAcc,
+    'ПКО must set ВидОперации BEFORE СчетУчета and BEFORE РасшифровкаПлатежа'
+  );
+
+  const rkoSetVO = cashSlice.indexOf('УстановитьВидОперацииДокумента(ДокОбъект, РежимВидРКО)');
+  const rkoSetAcc = cashSlice.indexOf('УстановитьЕслиЕсть(ДокОбъект, "СчетУчета", НайтиСчет("50.01"))', rkoSetVO);
+  const rkoClearRassh = cashSlice.indexOf('ДокОбъект.РасшифровкаПлатежа.Очистить()', rkoSetVO);
+  assert.ok(
+    rkoSetVO > 0 && rkoSetAcc > rkoSetVO && rkoClearRassh > rkoSetAcc,
+    'РКО must set ВидОперации BEFORE СчетУчета and BEFORE РасшифровкаПлатежа'
   );
 });
