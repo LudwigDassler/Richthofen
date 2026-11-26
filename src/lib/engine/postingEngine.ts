@@ -1976,7 +1976,14 @@ export function detectOperationClassification(
     matchedNomKind === 'Материал' ||
     /включен\p{L}*\s+в\s+стоимост\p{L}*\s+материал|доставк\p{L}*.*материал.*поступление\s+доп\.?\s*расход/iu.test(
       itemAndDescText
-    )
+    ) ||
+    (!/акт\p{L}*\s+(?:выполненн|оказанн)|на\s+основании\s+(?:счета[,\s]+)?акт|(?:выполнен|оказан)\p{L}*\s+(?:работ|услуг)|доставк|перевозк|транспортн|аренд/iu.test(
+      itemAndDescText
+    ) &&
+      /(?:накладн|торг-12)\p{L}*/iu.test(fullText) &&
+      /газонн\p{L}*\s+трав|материал|сырь[её]|канцтовар|хозтовар|инвентар|спецодежд|кирпич|цемент|бетон|раствор|арматур|песок|щебен|пиломатериал|брус|фанер|плит\p{L}*\s+пвх|потолочн\p{L}*\s+плит|керамогранит|металлопрофил|заготовк\p{L}*\s+мдф|стеклопакет|фурнитур|клей|герметик|гипсокартон|утеплител|штукатурк|шпаклевк|грунтовк|краск|лак|обо[ий]|паркет|рейк|плинтус|стройматериал/iu.test(
+        itemAndDescText
+      ))
   ) {
     return { category: 'purchase_materials', docType1C: 'ПоступлениеТоваровУслуг', documentSubKind1C: 'Материалы (накладная, УПД)' };
   }
@@ -10479,6 +10486,18 @@ export function isMisclassifiedLegacyOperation(op: QueuedOperation): boolean {
     op.docType1C === 'ОперацияБух' &&
     op.entries.length > 0 &&
     (Boolean(op.explicitCorrespondences?.length) || natural.category === 'manual')
+  ) {
+    return false;
+  }
+  if (
+    [
+      'ВозвратТоваровПоставщику',
+      'ВозвратТоваровОтПокупателя',
+      'КорректировкаДолга',
+      'СписаниеТоваров',
+      'СписаниеОС',
+      'Увольнение',
+    ].includes(op.docType1C)
   ) {
     return false;
   }

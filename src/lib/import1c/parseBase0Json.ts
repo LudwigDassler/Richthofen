@@ -162,8 +162,10 @@ export function parseBase0Json(
     ['individuals', 'ФизическиеЛица'],
     ['fixedAssets', 'ОсновныеСредства'],
     ['deferredExpenses', 'РасходыБудущихПериодов'],
+    ['securities', 'ЦенныеБумаги'],
     ['ОсновныеСредства', 'ОсновныеСредства'],
     ['РасходыБудущихПериодов', 'РасходыБудущихПериодов'],
+    ['ЦенныеБумаги', 'ЦенныеБумаги'],
   ];
   for (const [src, dst] of aliasPairs) {
     const candidate = mergedDirs[src] ?? payload[src];
@@ -218,10 +220,14 @@ export function parseBase0Json(
               'СпособПризнанияРасходов',
               'writeOffMethod',
             ]);
+            const rpbCostAcc = normalizeAccountCode1C(
+              pickString(item, ['СчетЗатрат', 'СчетСписания', 'costAccount', 'writeOffAccount'])
+            );
             if (rpbStart) mapped['ДатаНачалаСписания'] = rpbStart;
             if (rpbEnd) mapped['ДатаОкончанияСписания'] = rpbEnd;
             if (rpbSum > 0 && !mapped['Сумма']) mapped['Сумма'] = rpbSum;
             if (rpbMethod && !mapped['СпособСписания']) mapped['СпособСписания'] = rpbMethod;
+            if (rpbCostAcc && !mapped['СчетЗатрат']) mapped['СчетЗатрат'] = rpbCostAcc;
           }
           return mapped;
         }

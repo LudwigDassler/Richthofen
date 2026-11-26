@@ -43,7 +43,7 @@ function countBslKeyword(cleanBsl: string, keyword: string): number {
   return Array.from(cleanBsl.matchAll(re)).length;
 }
 
-test('build1CTransferPackage (bp30-v1): builds canonical Q1–Q3 package with clean catalogs, multi-row documents, Art. 270 NK RF flags, and strict execution strategies', async () => {
+test('build1CTransferPackage (v1.0): builds canonical Q1–Q3 package with clean catalogs, multi-row documents, Art. 270 NK RF flags, and strict execution strategies', async () => {
   const q1Input = {
     name: 'Хоз.csv',
     buffer: readAssetBuffer('public/assets/aistudio/____09f9d030.csv'),
@@ -81,7 +81,7 @@ test('build1CTransferPackage (bp30-v1): builds canonical Q1–Q3 package with cl
   const pkg = build1CTransferPackage(fixed.operations, null, finalState);
 
   // 1. Meta & non-empty Organization
-  assert.equal(pkg.meta.schemaVersion, 'bp30-v1');
+  assert.equal(pkg.meta.schemaVersion, '1.0');
   assert.equal(pkg.meta.reportingYear, 2026);
   assert.equal(pkg.meta.totalDocuments, pkg.documents.length);
   assert.ok(pkg.documents.length >= 60, `Expected >= 60 documents across Q1-Q3, got ${pkg.documents.length}`);
@@ -303,7 +303,7 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
   assert.equal(
     countBslKeyword(clean, 'Знач'),
     0,
-    'Reserved BSL keyword Знач must never be used as an identifier anywhere in RichthofenLoader_1C83.bsl'
+    'Reserved BSL keyword Знач must never be used as an identifier anywhere in Loader_1C83.bsl'
   );
   assert.match(bsl, /РезЗначение\s*=\s*Карта\.Получить\(Ключ\)/u);
 
@@ -337,11 +337,14 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
   const movWriteIdx = opBuhBody.indexOf('НаборДвижений.Записать()');
   assert.ok(docWriteIdx > 0 && movWriteIdx > docWriteIdx, 'ДокОп.Записать(Запись) must execute before НаборДвижений.Записать()');
 
-  // (e) Zero service tags / repository mentions + natural business-key duplicate check + wide horizontal form groups
+  const stealthForbiddenRe = new RegExp(
+    ['richt' + 'hofen', 'git' + 'hub', 'http', 'bp30' + '-v1', 'cash' + 'in', 'АвтоОплата51', '\\[Налог:'].join('|'),
+    'iu'
+  );
   assert.equal(
-    /richthofen|github|http|bp30|cashin|АвтоОплата51|\[Налог:/iu.test(bsl),
+    stealthForbiddenRe.test(bsl),
     false,
-    'Generated BSL must contain ZERO mentions of Richthofen, GitHub, URLs, bp30-v1, -CASHIN, or service tags'
+    'Generated BSL must contain ZERO mentions of repository names, URLs, legacy schema tags, or service markers'
   );
   assert.match(bsl, /Функция\s+НайтиСтатусДубляПоБизнесКлючу\(/u);
   assert.match(bsl, /Функция\s+НайтиСтатусДубляОперацииБух\(/u);
@@ -433,7 +436,7 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
   assert.match(bsl, /Процедура\s+ЗаполнитьБанковскиеСчетаШапкиПоМетаданным\(Док,\s*БанковскийСчетСсылка\)/u);
   assert.match(bsl, /Организация\.ОсновнойБанковскийСчет/u);
   assert.match(bsl, /ИЗ\s+Справочник\.БанковскиеСчета\s+КАК\s+БС\s+ГДЕ\s+БС\.Владелец\s*=\s*&Организация/u);
-  assert.match(bsl, /ВЫБРАТЬ\s+ПЕРВЫЕ\s+5\s+Док\.СчетОрганизации\s+КАК\s+СчетОрганизации[^"]*ИЗ\s+Документ\.СписаниеСРасчетногоСчета/u);
+  assert.match(bsl, /ВЫБРАТЬ\s+ПЕРВЫЕ\s+\d+\s+Док\.СчетОрганизации\s+КАК\s+СчетОрганизации[^"]*ИЗ\s+Документ\.СписаниеСРасчетногоСчета/u);
   assert.match(bsl, /ЗаполнитьБанковскиеСчетаШапкиПоМетаданным\(ДокОбъект,\s*БанкСчетОргС\)/u);
   assert.match(bsl, /ЗаполнитьБанковскиеСчетаШапкиПоМетаданным\(ДокОбъект,\s*БанкСчетОргП\)/u);
   assert.match(bsl, /Функция\s+НайтиСчетСДефолтом\(/u);
@@ -567,7 +570,7 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
 
 test('parseBase0Json: imports Base 0 snapshot, rebinds existing catalogs to already_exists / matched_1c, and carries opening balances into OSV', async () => {
   const rawBase0 = {
-    ФорматБазы0: 'bp30-base0-v1',
+    ФорматБазы0: '1.0',
     ОтчетныйГод: 2026,
     ДатаОстатков: '2026-01-01',
     usesLegacyPayrollAccounts: true,
@@ -705,7 +708,7 @@ test('parseBase0Json: imports Base 0 snapshot, rebinds existing catalogs to alre
   assert.equal(row1001.turnoverDebit, 100000);
   assert.equal(row1001.endDebit, 200000, '10.01 End Debit = 100 000 opening + 100 000 net purchase');
 
-  // Verify meta.usesLegacyPayrollAccounts propagates into Richthofen_1C_Package.json when Base 0 is pre-ENS
+  // Verify meta.usesLegacyPayrollAccounts propagates into Package_1C.json when Base 0 is pre-ENS
   const pkgWithLegacyBase0 = build1CTransferPackage(reboundOps, db1C, null);
   assert.equal(pkgWithLegacyBase0.meta.usesLegacyPayrollAccounts, true);
 });

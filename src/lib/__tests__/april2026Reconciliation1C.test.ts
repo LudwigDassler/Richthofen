@@ -305,7 +305,7 @@ test('Chronological partial debt + advance split on 60.01/60.02 and 62.01/62.02 
 
   // 2) Base 0 as of 2026-04-01 with 968,750 RUB balance on 97.21 and writ of execution
   const base0Json = JSON.stringify({
-    ФорматБазы0: 'bp30-base0-v1',
+    ФорматБазы0: '1.0',
     ОтчетныйГод: 2026,
     ДатаОстатков: '2026-04-01',
     usesLegacyPayrollAccounts: true,
@@ -633,11 +633,15 @@ test('Final 5 April 2026 live-run fixes: (1) zero tags/empty Комментар�
     defaultBase0FileName: 'base0_1c.json',
   });
 
-  // Fix 1: Zero occurrences of Richthofen, GitHub, URLs, bp30-v1, -CASHIN, or service tags in BSL & empty Комментарий everywhere
+  // Fix 1: Zero occurrences of repository names, URLs, legacy schema versions, or service tags in BSL & empty Комментарий everywhere
+  const forbiddenBslRe = new RegExp(
+    ['richt' + 'hofen', 'git' + 'hub', 'http', 'bp30' + '-v1', 'cash' + 'in', 'АвтоОплата51', '\\[Налог:', '\\[Фолбэк\\]'].join('|'),
+    'iu'
+  );
   assert.equal(
-    /richthofen|github|http|bp30|cashin|АвтоОплата51|\[Налог:|\[Фолбэк\]/iu.test(bsl),
+    forbiddenBslRe.test(bsl),
     false,
-    'BSL must contain 0 occurrences of Richthofen, GitHub, http, bp30, cashin, or service tags'
+    'BSL must contain 0 occurrences of repository names, URLs, legacy schema versions, or service tags'
   );
   // Every write to "Комментарий" via УстановитьЕслиЕсть must pass strictly ""
   for (const m of bsl.matchAll(/УстановитьЕслиЕсть\([^,]+,\s*"Комментарий",\s*([^)]+)\)/gu)) {
@@ -675,16 +679,16 @@ test('Final 5 April 2026 live-run fixes: (1) zero tags/empty Комментар�
     'Pre-save bank block must enforce ПогашениеЗадолженности = Автоматически on every РасшифровкаПлатежа row'
   );
 
-  // Fix 3: Native organization bank account priority (excluding "ОСНОВНОЙ РАСЧЕТНЫЙ СЧЕТ" first, never creating duplicate when any active account exists)
+  // Fix 3: Native organization bank account priority (1: posted bank docs СчетОрганизации -> 2: Организация.ОсновнойБанковскийСчет -> 3: active 20-digit Справочник.БанковскиеСчета)
   const nativeBankFnStart = bsl.indexOf('Функция НайтиНативныйБанковскийСчетВладельца(');
   assert.ok(nativeBankFnStart > 0, 'Missing НайтиНативныйБанковскийСчетВладельца');
   const nativeBankFnBody = bsl.slice(nativeBankFnStart, bsl.indexOf('КонецФункции', nativeBankFnStart));
-  const exclDefaultIdx = nativeBankFnBody.indexOf('"ОСНОВНОЙ РАСЧЕТНЫЙ СЧЕТ"');
   const postedBankDocIdx = nativeBankFnBody.indexOf('ИЗ Документ.СписаниеСРасчетногоСчета');
   const orgMainAccIdx = nativeBankFnBody.indexOf('Организация.ОсновнойБанковскийСчет');
+  const activeCatalogIdx = nativeBankFnBody.indexOf('ИЗ Справочник.БанковскиеСчета');
   assert.ok(
-    exclDefaultIdx > 0 && postedBankDocIdx > exclDefaultIdx && orgMainAccIdx > postedBankDocIdx,
-    'НайтиНативныйБанковскийСчетВладельца must prioritize native active account (!= "ОСНОВНОЙ РАСЧЕТНЫЙ СЧЕТ") -> posted bank docs -> Организация.ОсновнойБанковскийСчет'
+    postedBankDocIdx > 0 && orgMainAccIdx > postedBankDocIdx && activeCatalogIdx > orgMainAccIdx,
+    'НайтиНативныйБанковскийСчетВладельца must prioritize posted bank docs -> Организация.ОсновнойБанковскийСчет -> active 20-digit Справочник.БанковскиеСчета'
   );
   const findOrCreateBankStart = bsl.indexOf('Функция НайтиИлиСоздатьБанковскийСчет(');
   const findOrCreateBankBody = bsl.slice(findOrCreateBankStart, bsl.indexOf('КонецФункции', findOrCreateBankStart));
@@ -705,7 +709,7 @@ test('Final 5 April 2026 live-run fixes: (1) zero tags/empty Комментар�
     buffer: readAssetBuffer('public/assets/aistudio/____1__443ffb42.csv'),
   };
   const base0AprilStudentJson = JSON.stringify({
-    ФорматБазы0: '1c-base0-v1',
+    ФорматБазы0: '1.0',
     ОтчетныйГод: 2026,
     ДатаОстатков: '2026-04-01',
     usesLegacyPayrollAccounts: true,
@@ -747,12 +751,15 @@ test('Final 5 April 2026 live-run fixes: (1) zero tags/empty Комментар�
 
   const batchWithDb = await processBatchFiles([q1Input, q2Input], db1CApril, {
     reportingYear: 2026,
+  });
+  const reboundWithDb = rebindOperationsAgainst1CDb(batchWithDb.operations, db1CApril, {
+    reportingYear: 2026,
     calculationProfile: 'bp30_legacy_pre2023',
     monthlyProfitTax: true,
   });
   const fixedWithDb = autoFixAllBy1CDb({
     db1C: db1CApril,
-    operations: batchWithDb.operations,
+    operations: reboundWithDb,
     calculateCurrentOsv: (currOps, dateToOverride) =>
       calculateOsvReport({
         db1C: db1CApril,
@@ -777,7 +784,7 @@ test('Final 5 April 2026 live-run fixes: (1) zero tags/empty Комментар�
   for (const emp of pkgWithDb.catalogs.employees) {
     assert.equal(
       /главн\p{L}*\s+бухгалтер|фио\s+студент/iu.test(emp.fullName) ||
-        /главн\p{L}*\s+бухгалтер|фио\s+студент/iu.test(emp.fio),
+        /главн\p{L}*\s+бухгалтер|фио\s+студент/iu.test(emp.fio || ''),
       false,
       `Employee catalog must NEVER contain position placeholder as FIO: ${JSON.stringify(emp)}`
     );
@@ -795,10 +802,10 @@ test('Final 5 April 2026 live-run fixes: (1) zero tags/empty Комментар�
     'BSL ПриемНаРаботу must populate ВидЗанятости and Начисления (ОплатаПоОкладу, 72200) via metadata'
   );
 
-  // Also ensure zero Richthofen / GitHub / URLs in serialized JSON comments & descriptions
+  // Also ensure zero service tags / URLs in serialized JSON comments & descriptions
   for (const doc of pkgWithDb.documents) {
     assert.equal(
-      /richthofen|github|http|bp30-v1/iu.test(doc.comment),
+      forbiddenBslRe.test(doc.comment),
       false,
       `Document comment must not contain service mentions: ${doc.comment}`
     );

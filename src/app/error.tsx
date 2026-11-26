@@ -19,7 +19,7 @@ export default function GlobalRouteError({
 
     if (isChunkError && typeof window !== 'undefined') {
       try {
-        const key = 'richthofen_chunk_reload_once';
+        const key = 'app_chunk_reload_once';
         const lastReload = Number(window.sessionStorage.getItem(key) || '0');
         if (Date.now() - lastReload > 15000) {
           window.sessionStorage.setItem(key, String(Date.now()));

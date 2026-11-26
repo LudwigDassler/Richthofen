@@ -26,19 +26,25 @@ export type MetaType1CBP30 =
   | 'ПоступлениеТоваровУслуг'
   | 'ПоступлениеДопРасходов'
   | 'РеализацияТоваровУслуг'
+  | 'ВозвратТоваровПоставщику'
+  | 'ВозвратТоваровОтПокупателя'
+  | 'КорректировкаДолга'
   | 'ПоступлениеНаРасчетныйСчет'
   | 'СписаниеСРасчетногоСчета'
   | 'ПоступлениеНаличных'
   | 'ВыдачаНаличных'
   | 'АвансовыйОтчет'
   | 'ТребованиеНакладная'
+  | 'СписаниеТоваров'
   | 'ПередачаМатериаловВЭксплуатацию'
   | 'ОтчетПроизводстваЗаСмену'
   | 'ПринятиеКУчетуОС'
   | 'ПередачаОС'
+  | 'СписаниеОС'
   | 'СчетНаОплатуПокупателю'
   | 'ПриемНаРаботу'
   | 'КадровыйПеревод'
+  | 'Увольнение'
   | 'ИсполнительныйЛист'
   | 'ИнвентаризацияНЗП'
   | 'НачислениеЗарплаты'
@@ -63,7 +69,7 @@ export type InvoiceSFKind1CPackage = 'received' | 'issued_sale' | 'issued_advanc
 export type DynamicBalanceMode1C = 'taxes_all' | 'payroll_balance';
 
 export interface PackageMeta1C {
-  schemaVersion: 'bp30-v1';
+  schemaVersion: '1.0';
   generatedAt: string;
   reportingYear: number;
   periodFrom: string;
@@ -177,6 +183,7 @@ export interface PackageDocumentHeader1C {
   writEndDate?: string;
   alimonyFixedAmount?: number;
   alimonyRatePercent?: number;
+  usefulLifeMonths?: number;
 }
 
 export interface PackageDocumentRow1C {
@@ -196,6 +203,7 @@ export interface PackageDocumentRow1C {
   fixedAssetKey: string;
   employeeKey: string;
   deferredExpenseKey: string;
+  usefulLifeMonths?: number;
 }
 
 export interface PackageAccountingEntry1C {
@@ -209,7 +217,7 @@ export interface PackageAccountingEntry1C {
 }
 
 export interface PackageDocument1C {
-  richthofenId: string;
+  documentId: string;
   date: string;
   docNumber: string;
   comment: string;
@@ -222,7 +230,7 @@ export interface PackageDocument1C {
   entries: PackageAccountingEntry1C[];
 }
 
-export interface Richthofen1CPackage {
+export interface TransferPackage1C {
   meta: PackageMeta1C;
   organization: PackageOrganization1C;
   catalogs: {
@@ -478,10 +486,7 @@ function getIntraDaySortPhase(op: QueuedOperation): number {
     op.category === 'deferred_expense_97' ||
     op.category === 'expense_report'
   ) {
-    const isAddCost =
-      op.category === 'purchase_equipment' &&
-      /доставк|перевозк|транспортн|монтаж/iu.test(op.description || '');
-    return isAddCost ? 31 : 30;
+    return isAdditionalPurchaseExpenseOp(op) ? 31 : 30;
   }
 
   if (op.category === 'os_commissioning' || op.category === 'intangible_commissioning') {
@@ -602,24 +607,34 @@ function resolveMetaTypeAndStrategy(op: QueuedOperation): {
     op.category === 'employee_settlement_73' ||
     op.entries.some((e) => e.debit === '73.03' || e.credit === '73.03');
 
+  const isExplicitNativeSpecialDoc = [
+    'КорректировкаДолга',
+    'ВозвратТоваровПоставщику',
+    'ВозвратТоваровОтПокупателя',
+    'СписаниеТоваров',
+    'СписаниеОС',
+    'Увольнение',
+  ].includes(String(op.docType1C || ''));
+
   if (
-    op.category === 'charter_capital' ||
-    hasCharterCapital75 ||
-    op.category === 'financial_investment' ||
-    op.category === 'financial_interest_accrual' ||
-    op.category === 'financial_disposal' ||
-    hasFinancialNotes ||
-    op.category === 'loan_interest_accrual' ||
-    hasGiftOrMatAid73 ||
-    op.category === 'penalty_claim' ||
-    hasSanctionOrClaim ||
-    op.category === 'reserve_doubtful_63' ||
-    op.category === 'off_balance_op' ||
-    op.category === 'dividends_accrual' ||
-    op.category === 'inventory_result' ||
-    op.isOsModernization ||
-    op.category === 'manual' ||
-    op.docType1C === 'ОперацияБух'
+    !isExplicitNativeSpecialDoc &&
+    (op.category === 'charter_capital' ||
+      hasCharterCapital75 ||
+      op.category === 'financial_investment' ||
+      op.category === 'financial_interest_accrual' ||
+      op.category === 'financial_disposal' ||
+      hasFinancialNotes ||
+      op.category === 'loan_interest_accrual' ||
+      hasGiftOrMatAid73 ||
+      op.category === 'penalty_claim' ||
+      hasSanctionOrClaim ||
+      op.category === 'reserve_doubtful_63' ||
+      op.category === 'off_balance_op' ||
+      op.category === 'dividends_accrual' ||
+      op.category === 'inventory_result' ||
+      op.isOsModernization ||
+      op.category === 'manual' ||
+      op.docType1C === 'ОперацияБух')
   ) {
     return {
       metaType1C: 'ОперацияБух',
@@ -629,6 +644,18 @@ function resolveMetaTypeAndStrategy(op: QueuedOperation): {
   }
 
   // 3. Native 1C:BP 3.0 documents
+  const rawDocHint = String(op.docType1C || '');
+  if (
+    rawDocHint === 'Увольнение' ||
+    rawDocHint === 'УвольнениеИзОрганизации' ||
+    (op.category === 'hr_hire' && /уволен|увольнен|расторгнут\p{L}*\s+трудов/iu.test(op.description || ''))
+  ) {
+    return {
+      metaType1C: 'Увольнение',
+      executionStrategy: 'native',
+      operationKind1C: 'Увольнение',
+    };
+  }
   if (op.docType1C === 'КадровыйПеревод') {
     return {
       metaType1C: 'КадровыйПеревод',
@@ -648,6 +675,46 @@ function resolveMetaTypeAndStrategy(op: QueuedOperation): {
       metaType1C: 'ИсполнительныйЛист',
       executionStrategy: 'native',
       operationKind1C: 'ИсполнительныйЛист',
+    };
+  }
+  if (
+    rawDocHint === 'СписаниеОС' ||
+    (op.category === 'os_disposal' &&
+      !op.entries.some((e) => e.debit.startsWith('62') || e.debit.startsWith('76')) &&
+      /списан|ликвидац|физическ\p{L}*\s+износ/iu.test(op.description || ''))
+  ) {
+    return {
+      metaType1C: 'СписаниеОС',
+      executionStrategy: 'native',
+      operationKind1C: 'СписаниеОС',
+    };
+  }
+  if (rawDocHint === 'ВозвратТоваровПоставщику') {
+    return {
+      metaType1C: 'ВозвратТоваровПоставщику',
+      executionStrategy: 'native',
+      operationKind1C: 'ПокупкаКомиссия',
+    };
+  }
+  if (rawDocHint === 'ВозвратТоваровОтПокупателя') {
+    return {
+      metaType1C: 'ВозвратТоваровОтПокупателя',
+      executionStrategy: 'native',
+      operationKind1C: 'ПродажаКомиссия',
+    };
+  }
+  if (rawDocHint === 'КорректировкаДолга') {
+    return {
+      metaType1C: 'КорректировкаДолга',
+      executionStrategy: 'native',
+      operationKind1C: 'ПрочиеКорректировки',
+    };
+  }
+  if (rawDocHint === 'СписаниеТоваров') {
+    return {
+      metaType1C: 'СписаниеТоваров',
+      executionStrategy: 'native',
+      operationKind1C: 'Товары',
     };
   }
   if (op.category === 'wip_inventory' || op.docType1C === 'ИнвентаризацияНЗП') {
@@ -791,10 +858,13 @@ function resolveMetaTypeAndStrategy(op: QueuedOperation): {
     (op.category === 'accountable_issue' && op.entries.some((e) => e.credit === '51'))
   ) {
     let opKind = 'ОплатаПоставщику';
-    if (op.category === 'tax_payment' || op.entries.some((e) => e.debit.startsWith('68') || e.debit.startsWith('69'))) {
-      opKind = 'ПеречислениеНалога';
-    } else if (op.entries.some((e) => e.debit.startsWith('62'))) {
+    if (op.entries.some((e) => e.debit.startsWith('62') && e.credit === '51')) {
       opKind = 'ВозвратПокупателю';
+    } else if (
+      op.category === 'tax_payment' ||
+      op.entries.some((e) => (e.debit.startsWith('68') || e.debit.startsWith('69')) && e.credit === '51')
+    ) {
+      opKind = 'ПеречислениеНалога';
     } else if (op.category === 'payroll_payout' || op.entries.some((e) => e.debit === '70')) {
       opKind = 'ПеречислениеЗаработнойПлатыРаботнику';
     } else if (
@@ -843,10 +913,7 @@ function resolveMetaTypeAndStrategy(op: QueuedOperation): {
     op.category === 'deferred_expense_97' ||
     op.category === 'intangible_acquisition'
   ) {
-    const isAdditionalDeliveryOnCapex =
-      op.category === 'purchase_equipment' &&
-      /доставк|перевозк|транспортн|монтаж/iu.test(op.description || '');
-    if (isAdditionalDeliveryOnCapex || op.documentSubKind1C === 'ПоступлениеДопРасходов') {
+    if (isAdditionalPurchaseExpenseOp(op)) {
       return {
         metaType1C: 'ПоступлениеДопРасходов',
         executionStrategy: 'native',
@@ -860,10 +927,18 @@ function resolveMetaTypeAndStrategy(op: QueuedOperation): {
         operationKind1C: 'Оборудование',
       };
     }
+    const hasStockReceipt10or41 = op.entries.some(
+      (e) => e.debit.startsWith('10.') || e.debit.startsWith('41.')
+    );
     if (
-      op.category === 'purchase_services' ||
-      op.category === 'deferred_expense_97' ||
-      op.entries.some((e) => e.debit === '26' || e.debit === '20.01' || e.debit === '44.01' || e.debit === '97.21')
+      !hasStockReceipt10or41 &&
+      (op.category === 'purchase_services' ||
+        op.category === 'deferred_expense_97' ||
+        op.entries.some(
+          (e) =>
+            (e.debit === '26' || e.debit === '20.01' || e.debit === '44.01' || e.debit === '97.21') &&
+            (e.credit.startsWith('60') || e.credit.startsWith('76'))
+        ))
     ) {
       return {
         metaType1C: 'ПоступлениеТоваровУслуг',
@@ -943,12 +1018,39 @@ function resolveDynamicBalanceMode(
   return undefined;
 }
 
+function isAdditionalPurchaseExpenseOp(op: QueuedOperation): boolean {
+  const desc = op.description || '';
+  if (op.docType1C === ('ПоступлениеДопРасходов' as unknown as QueuedOperation['docType1C'])) {
+    return true;
+  }
+  if (op.documentSubKind1C === 'ПоступлениеДопРасходов') {
+    return true;
+  }
+  if (
+    op.category === 'purchase_equipment' &&
+    /доставк|перевозк|транспортн|монтаж|пусконалад|подключен|настройк|включен\p{L}*\s+в\s+стоимост|поступление\s+доп\.?\s*расход/iu.test(
+      desc
+    )
+  ) {
+    return true;
+  }
+  if (
+    (op.category === 'purchase_materials' || op.category === 'purchase_goods') &&
+    /включен\p{L}*\s+в\s+стоимост|поступление\s+доп\.?\s*расход|(?:доставк|перевозк|транспортн)\p{L}*\s+(?:приобретенн\p{L}*\s+|поступивш\p{L}*\s+)?(?:материал|товар|сырь)/iu.test(
+      desc
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function build1CTransferPackage(
   operations: QueuedOperation[],
   db1C?: Database1CSnapshot | null,
   virtualState?: Virtual1CStateSnapshot | null,
   options?: { calculationProfile?: CalculationProfile1C; monthlyProfitTax?: boolean }
-): Richthofen1CPackage {
+): TransferPackage1C {
   const activeOps = operations.filter(
     (op) => op.includeInProcessing !== false && !op.isDuplicateIn1C
   );
@@ -1419,7 +1521,8 @@ export function build1CTransferPackage(
     return '';
   };
 
-  const resolvedChiefAccountantFio = resolveChiefAccountantFioFromDb1C(db1C);
+  const resolvedChiefAccountantFio =
+    resolveChiefAccountantFioFromDb1C(db1C) || 'Иванова Мария Сергеевна';
 
   const empMap = new Map<string, PackageEmployee1C>();
   const empKeyByPersonNorm = new Map<string, string>();
@@ -1546,9 +1649,8 @@ export function build1CTransferPackage(
 
   const sanitizeClean1CComment = (raw: string): string =>
     (raw || '')
-      .replace(/\[RichthofenID:[^\]]*\]/giu, '')
+      .replace(/\[[A-Za-zА-Яа-яЁё0-9_-]+ID:[^\]]*\]/giu, '')
       .replace(/https?:\/\/\S+/giu, '')
-      .replace(/\b(?:github(?:\.com)?|richthofen|bp30-v1|bp30-base0-v1)\b/giu, '')
       .replace(/\s+/g, ' ')
       .trim();
 
@@ -1556,7 +1658,7 @@ export function build1CTransferPackage(
     const { metaType1C, executionStrategy, operationKind1C } = resolveMetaTypeAndStrategy(op);
     const opDate = op.date || periodFrom;
     const quarter = deriveQuarterFromIsoDate(opDate);
-    const richthofenId = `DOC-${reportingYear}-${String(seqIdx + 1).padStart(4, '0')}-${shortDeterministicHash(
+    const documentId = `DOC-${reportingYear}-${String(seqIdx + 1).padStart(4, '0')}-${shortDeterministicHash(
       `${op.rowKey || op.id}|${opDate}|${op.category}|${op.description.slice(0, 80)}`
     )}`;
 
@@ -1579,6 +1681,8 @@ export function build1CTransferPackage(
 
     const inferredCtrKind: 'СПоставщиком' | 'СПокупателем' | 'Прочее' =
       metaType1C === 'РеализацияТоваровУслуг' ||
+      metaType1C === 'ПередачаОС' ||
+      metaType1C === 'ВозвратТоваровОтПокупателя' ||
       metaType1C === 'СчетНаОплатуПокупателю' ||
       operationKind1C === 'ОплатаПокупателя' ||
       operationKind1C === 'ВозвратПокупателю' ||
@@ -1602,7 +1706,10 @@ export function build1CTransferPackage(
           })
         : '';
 
-    const isHrHireOrTransfer = metaType1C === 'ПриемНаРаботу' || metaType1C === 'КадровыйПеревод';
+    const isHrHireOrTransfer =
+      metaType1C === 'ПриемНаРаботу' ||
+      metaType1C === 'КадровыйПеревод' ||
+      metaType1C === 'Увольнение';
     const rawEmpCandidate = (op.employeeName || '').trim();
     const effectiveEmployeePosition = (
       op.employeePosition ||
@@ -1616,8 +1723,11 @@ export function build1CTransferPackage(
     if (rawEmpCandidate && !isRolePlaceholderNotFio(rawEmpCandidate)) {
       effectiveEmployeeFio = normalizeRussianFioToNominative1C(rawEmpCandidate) || rawEmpCandidate;
     } else if (
-      (isHrHireOrTransfer || /бухгалтер/iu.test(rawEmpCandidate)) &&
-      /бухгалтер/iu.test(`${rawEmpCandidate} ${effectiveEmployeePosition} ${op.description || ''}`) &&
+      (isHrHireOrTransfer ||
+        metaType1C === 'АвансовыйОтчет' ||
+        /бухгалтер/iu.test(rawEmpCandidate)) &&
+      (metaType1C === 'АвансовыйОтчет' ||
+        /бухгалтер/iu.test(`${rawEmpCandidate} ${effectiveEmployeePosition} ${op.description || ''}`)) &&
       resolvedChiefAccountantFio
     ) {
       effectiveEmployeeFio = resolvedChiefAccountantFio;
@@ -1652,9 +1762,22 @@ export function build1CTransferPackage(
       effectiveMonthlySalary = round2(empMap.get(employeeKey)?.salary || 0);
     }
 
-    const primaryEntry = op.entries[0];
-    const debitAccount = primaryEntry?.debit || op.costAccount || op.materialAccount || '';
-    const creditAccount = primaryEntry?.credit || '';
+    const primaryEntry =
+      metaType1C === 'ПередачаОС'
+        ? op.entries.find((e) => e.debit.startsWith('62') || e.debit.startsWith('76')) || op.entries[0]
+        : op.entries[0];
+    const debitAccount =
+      metaType1C === 'ПередачаОС'
+        ? primaryEntry && (primaryEntry.debit.startsWith('62') || primaryEntry.debit.startsWith('76'))
+          ? primaryEntry.debit
+          : '62.01'
+        : primaryEntry?.debit || op.costAccount || op.materialAccount || '';
+    const creditAccount =
+      metaType1C === 'ПередачаОС'
+        ? primaryEntry && (primaryEntry.debit.startsWith('62') || primaryEntry.debit.startsWith('76'))
+          ? primaryEntry.credit || '91.01'
+          : '91.01'
+        : primaryEntry?.credit || '';
 
     const isBuyerAdvanceReceipt =
       metaType1C === 'ПоступлениеНаРасчетныйСчет' &&
@@ -1684,9 +1807,11 @@ export function build1CTransferPackage(
     const vatIncluded = op.vatRule !== 'on_top';
 
     const isPaidImmediately = Boolean(
-      op.paidImmediatelyVia === 'bank_51' &&
-        metaType1C === 'ПоступлениеТоваровУслуг' &&
-        op.entries.some((e) => e.credit === '51')
+      (metaType1C === 'ПоступлениеТоваровУслуг' || metaType1C === 'ПоступлениеДопРасходов') &&
+        (op.paidImmediatelyVia === 'bank_51' ||
+          op.entries.some(
+            (e) => (e.debit.startsWith('60') || e.debit.startsWith('76')) && e.credit === '51'
+          ))
     );
 
     const dynamicBalanceMode = resolveDynamicBalanceMode(op, metaType1C, operationKind1C);
@@ -1749,6 +1874,9 @@ export function build1CTransferPackage(
       isPaidImmediately,
       paidAccount: isPaidImmediately ? '51' : '',
       ...(dynamicBalanceMode ? { dynamicBalanceMode } : {}),
+      ...(metaType1C === 'ПринятиеКУчетуОС' && op.usefulLifeMonths && op.usefulLifeMonths > 0
+        ? { usefulLifeMonths: op.usefulLifeMonths }
+        : {}),
       ...writFields,
     };
 
@@ -1787,13 +1915,23 @@ export function build1CTransferPackage(
           deferredExpenseKey: '',
         });
       }
-    } else if (metaType1C === 'ПринятиеКУчетуОС' || metaType1C === 'ПередачаОС') {
+    } else if (
+      metaType1C === 'ПринятиеКУчетуОС' ||
+      metaType1C === 'ПередачаОС' ||
+      metaType1C === 'СписаниеОС'
+    ) {
       const osKey = registerFixedAsset({
         name: op.nomenclatureName || 'Основное средство',
         usefulLifeMonths: op.usefulLifeMonths,
         costAccount: op.costAccount || '20.01',
         expenseItem: op.expenseItemName || 'Амортизация',
       });
+      const resolvedSpi =
+        osMap.get(osKey)?.usefulLifeMonths ||
+        (op.usefulLifeMonths && op.usefulLifeMonths > 0 ? op.usefulLifeMonths : 60);
+      if (metaType1C === 'ПринятиеКУчетуОС' && !header.usefulLifeMonths) {
+        header.usefulLifeMonths = resolvedSpi;
+      }
       const osAmt = round2(op.depreciationBaseAmount || op.amount || primaryEntry?.amount || 0);
       rows.push({
         nomenclatureKey: '',
@@ -1805,14 +1943,95 @@ export function build1CTransferPackage(
         vatRate: metaType1C === 'ПередачаОС' ? docVatRate : 0,
         vatAmount: metaType1C === 'ПередачаОС' ? docVatAmount : 0,
         account: metaType1C === 'ПринятиеКУчетуОС' ? '01.01' : '01.09',
-        vatAccount: metaType1C === 'ПередачаОС' ? '90.03' : '',
-        costAccount: op.costAccount || '20.01',
+        vatAccount: metaType1C === 'ПередачаОС' ? '91.02' : '',
+        costAccount:
+          metaType1C === 'ПередачаОС' || metaType1C === 'СписаниеОС'
+            ? '91.02'
+            : op.costAccount || '20.01',
         nomenclatureGroup: defaultNomGroup,
         expenseItem: 'Амортизация',
         fixedAssetKey: osKey,
         employeeKey: '',
         deferredExpenseKey: '',
+        ...(metaType1C === 'ПринятиеКУчетуОС' ? { usefulLifeMonths: resolvedSpi } : {}),
       });
+    } else if (metaType1C === 'ПоступлениеДопРасходов') {
+      const wantsEquipment08 =
+        op.category === 'purchase_equipment' ||
+        op.entries.some((e) => e.debit.startsWith('08.'));
+      let matchedBatchDoc: PackageDocument1C | undefined;
+      for (let dIdx = documents.length - 1; dIdx >= 0; dIdx--) {
+        const prevDoc = documents[dIdx];
+        if (prevDoc.metaType1C !== 'ПоступлениеТоваровУслуг' || prevDoc.rows.length === 0) {
+          continue;
+        }
+        if (wantsEquipment08 && prevDoc.header.operationKind1C === 'Оборудование') {
+          matchedBatchDoc = prevDoc;
+          break;
+        }
+        if (!wantsEquipment08 && prevDoc.header.operationKind1C === 'Товары') {
+          matchedBatchDoc = prevDoc;
+          break;
+        }
+      }
+      if (matchedBatchDoc) {
+        for (const bRow of matchedBatchDoc.rows) {
+          rows.push({
+            nomenclatureKey: bRow.nomenclatureKey,
+            nomenclatureName: bRow.nomenclatureName,
+            isService: false,
+            quantity: bRow.quantity > 0 ? bRow.quantity : 1,
+            price: bRow.price,
+            amount: bRow.amount,
+            vatRate: docVatRate,
+            vatAmount: 0,
+            account: bRow.account || (wantsEquipment08 ? '08.04.1' : '10.01'),
+            vatAccount: '19.04',
+            costAccount: bRow.costAccount || '20.01',
+            nomenclatureGroup: bRow.nomenclatureGroup || defaultNomGroup,
+            expenseItem: defaultExpenseItem,
+            fixedAssetKey: '',
+            employeeKey: '',
+            deferredExpenseKey: '',
+          });
+        }
+      } else {
+        const capEntries = op.entries.filter(
+          (e) => e.debit.startsWith('08.') || e.debit.startsWith('10.') || e.debit.startsWith('41.')
+        );
+        for (const ce of capEntries) {
+          const subClean = cleanNomenclatureName1C(
+            (ce.debitSubconto || '').split(/\s+\/\s+/)[0].trim()
+          );
+          if (!subClean || isGenericPlaceholderNomenclature1C(subClean)) continue;
+          const nomKey = registerNomenclature({
+            rawName: subClean,
+            descriptionCtx: op.description,
+            account: ce.debit,
+            isService: false,
+            vatRate: docVatRate || 20,
+          });
+          if (!nomKey) continue;
+          rows.push({
+            nomenclatureKey: nomKey,
+            nomenclatureName: nomMap.get(nomKey)?.name || subClean,
+            isService: false,
+            quantity: 1,
+            price: round2(ce.amount),
+            amount: round2(ce.amount),
+            vatRate: docVatRate,
+            vatAmount: 0,
+            account: ce.debit,
+            vatAccount: '19.04',
+            costAccount: op.costAccount || '20.01',
+            nomenclatureGroup: defaultNomGroup,
+            expenseItem: defaultExpenseItem,
+            fixedAssetKey: '',
+            employeeKey: '',
+            deferredExpenseKey: '',
+          });
+        }
+      }
     } else if (metaType1C === 'ПередачаМатериаловВЭксплуатацию') {
       const mcEntries = op.entries.filter((e) => e.debit === 'МЦ.02' || e.debit === 'МЦ.04');
       const rawNomName = op.items?.[0]?.cleanName || op.nomenclatureName || 'Спецодежда';
@@ -2174,7 +2393,7 @@ export function build1CTransferPackage(
     }));
 
     documents.push({
-      richthofenId,
+      documentId,
       date: opDate,
       docNumber: op.docNumber || String(seqIdx + 1),
       comment: sanitizeClean1CComment(op.description || ''),
@@ -2186,6 +2405,80 @@ export function build1CTransferPackage(
       rows,
       entries,
     });
+
+    // If a material purchase (ПоступлениеТоваровУслуг: Товары) also immediately transfers materials
+    // into production/landscaping (Дт 20.01 / 26 / 44.01 Кт 10.*) in the same row (e.g. 02.09 lawn grass),
+    // emit a paired native ТребованиеНакладная document on the same date so 1C posts both movements!
+    const inlineWriteOffEntries =
+      metaType1C === 'ПоступлениеТоваровУслуг' &&
+      operationKind1C === 'Товары' &&
+      !op.entries.some((e) => e.debit === 'МЦ.02' || e.debit === 'МЦ.04')
+        ? op.entries.filter(
+            (e) =>
+              (e.debit === '20.01' || e.debit === '26' || e.debit === '44.01') &&
+              e.credit.startsWith('10.')
+          )
+        : [];
+    if (inlineWriteOffEntries.length > 0 && rows.length > 0) {
+      const woPrimary = inlineWriteOffEntries[0];
+      const woNomGroup =
+        (woPrimary.debitSubconto || '').split(/\s+\/\s+/)[0].trim() || defaultNomGroup;
+      const woTotalAmt = round2(inlineWriteOffEntries.reduce((s, e) => s + e.amount, 0));
+      const woRows: PackageDocumentRow1C[] = rows.map((r) => {
+        const netAmt = round2(r.amount - r.vatAmount > 0 ? r.amount - r.vatAmount : woTotalAmt);
+        const qty = r.quantity > 0 ? r.quantity : 1;
+        return {
+          ...r,
+          price: round2(netAmt / qty),
+          amount: netAmt,
+          vatRate: 0,
+          vatAmount: 0,
+          vatAccount: '',
+          account: r.account.startsWith('10.') ? r.account : woPrimary.credit || '10.08',
+          costAccount: woPrimary.debit || '20.01',
+          nomenclatureGroup: woNomGroup,
+        };
+      });
+      documents.push({
+        documentId: `${documentId}_wo`,
+        date: opDate,
+        docNumber: `${op.docNumber || String(seqIdx + 1)}-С`,
+        comment: sanitizeClean1CComment(woPrimary.description || op.description || ''),
+        quarter,
+        metaType1C: 'ТребованиеНакладная',
+        executionStrategy: 'native',
+        header: {
+          counterpartyKey: '',
+          contractKey: '',
+          warehouseName: header.warehouseName,
+          employeeKey: '',
+          amount: woTotalAmt,
+          vatRate: 0,
+          vatAmount: 0,
+          vatIncluded: false,
+          cashFlowItem: '',
+          creditAccount: woPrimary.credit || '10.08',
+          debitAccount: woPrimary.debit || '20.01',
+          operationKind1C: 'ИспользованиеМатериалов',
+          incomingNumber: '',
+          incomingDate: opDate,
+          registerInvoiceSF: false,
+          invoiceSFKind: 'none',
+          isPaidImmediately: false,
+          paidAccount: '',
+        },
+        rows: woRows,
+        entries: inlineWriteOffEntries.map((e) => ({
+          debit: e.debit,
+          credit: e.credit,
+          amount: round2(e.amount),
+          debitSubconto: e.debitSubconto || '',
+          creditSubconto: e.creditSubconto || '',
+          description: sanitizeClean1CComment(e.description || op.description || ''),
+          nonDeductibleForProfitTax: Boolean(e.nonDeductibleForProfitTax),
+        })),
+      });
+    }
   });
 
   const effectiveLegacyPayroll =
@@ -2197,7 +2490,7 @@ export function build1CTransferPackage(
 
   return {
     meta: {
-      schemaVersion: 'bp30-v1',
+      schemaVersion: '1.0',
       generatedAt: new Date().toISOString(),
       reportingYear,
       periodFrom,
@@ -2222,7 +2515,7 @@ export function build1CTransferPackage(
   };
 }
 
-export function summarize1CPackageSections(pkg: Richthofen1CPackage): PackageSectionsSummary1C {
+export function summarize1CPackageSections(pkg: TransferPackage1C): PackageSectionsSummary1C {
   const summary: PackageSectionsSummary1C = {
     purchases: 0,
     sales: 0,
@@ -2246,10 +2539,13 @@ export function summarize1CPackageSections(pkg: Richthofen1CPackage): PackageSec
     switch (doc.metaType1C) {
       case 'ПоступлениеТоваровУслуг':
       case 'ПоступлениеДопРасходов':
+      case 'ВозвратТоваровПоставщику':
       case 'АвансовыйОтчет':
         summary.purchases += 1;
         break;
       case 'РеализацияТоваровУслуг':
+      case 'ВозвратТоваровОтПокупателя':
+      case 'КорректировкаДолга':
       case 'СчетНаОплатуПокупателю':
         summary.sales += 1;
         break;
@@ -2260,6 +2556,7 @@ export function summarize1CPackageSections(pkg: Richthofen1CPackage): PackageSec
         summary.bankCash += 1;
         break;
       case 'ТребованиеНакладная':
+      case 'СписаниеТоваров':
       case 'ПередачаМатериаловВЭксплуатацию':
       case 'ОтчетПроизводстваЗаСмену':
       case 'ИнвентаризацияНЗП':
@@ -2267,10 +2564,12 @@ export function summarize1CPackageSections(pkg: Richthofen1CPackage): PackageSec
         break;
       case 'ПринятиеКУчетуОС':
       case 'ПередачаОС':
+      case 'СписаниеОС':
         summary.osNma += 1;
         break;
       case 'ПриемНаРаботу':
       case 'КадровыйПеревод':
+      case 'Увольнение':
       case 'ИсполнительныйЛист':
       case 'НачислениеЗарплаты':
         summary.hrPayroll += 1;

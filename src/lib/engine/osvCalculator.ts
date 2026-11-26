@@ -588,7 +588,8 @@ export function calculateOsvReport(params: {
       const sumQTurnDt = round2(children.reduce((s, c) => s + c.queuedTurnoverDebit, 0));
       const sumQTurnKt = round2(children.reduce((s, c) => s + c.queuedTurnoverCredit, 0));
 
-      const isCollapsedFinancialRoot = root === '90' || root === '91' || root === '99';
+      const isCollapsedFinancialRoot =
+        root === '90' || root === '91' || root === '99' || root === '68' || root === '69';
 
       let gStartDt = 0;
       let gStartKt = 0;
@@ -671,7 +672,7 @@ export function calculateOsvReport(params: {
   const balanceLeafRows = leafRows.filter((r) => !isOffBalanceAccountCode(r.code));
   const isFinancialResultCode = (code: string) => {
     const root = code.split('.')[0];
-    return root === '90' || root === '91' || root === '99';
+    return root === '90' || root === '91' || root === '99' || root === '68' || root === '69';
   };
   const nonFinancialBalanceLeaves = balanceLeafRows.filter((r) => !isFinancialResultCode(r.code));
 
@@ -680,7 +681,7 @@ export function calculateOsvReport(params: {
   let collapsedFinEndDebit = 0;
   let collapsedFinEndCredit = 0;
 
-  for (const finRoot of ['90', '91', '99'] as const) {
+  for (const finRoot of ['68', '69', '90', '91', '99'] as const) {
     const finLeaves = balanceLeafRows.filter(
       (r) => r.code === finRoot || r.code.startsWith(`${finRoot}.`)
     );

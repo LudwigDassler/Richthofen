@@ -878,6 +878,9 @@ export function createInitialVirtual1CState(
         const dirMethod = String(
           matchedRpbRow?.['СпособСписания'] ?? matchedRpbRow?.['ПорядокСписания'] ?? matchedRpbRow?.['writeOffMethod'] ?? ''
         ).trim();
+        const dirCostAcc = String(
+          matchedRpbRow?.['СчетЗатрат'] ?? matchedRpbRow?.['СчетСписания'] ?? matchedRpbRow?.['costAccount'] ?? ''
+        ).trim();
 
         const isSroRpb =
           /саморегулируем|(?:^|[^\p{L}])сро(?=$|[^\p{L}])/iu.test(label) ||
@@ -973,6 +976,15 @@ export function createInitialVirtual1CState(
           anchorOriginDate = `${(db1C.periodStart || '2026-01-01').slice(0, 4)}-04-01`;
         }
 
+        const normalizedWriteOffAcc: '26' | '20.01' | '44.01' =
+          dirCostAcc === '20.01' || dirCostAcc === '44.01' || dirCostAcc === '26'
+            ? dirCostAcc
+            : dirCostAcc.startsWith('20')
+              ? '20.01'
+              : dirCostAcc.startsWith('44')
+                ? '44.01'
+                : '26';
+
         state.deferredExpenses.push({
           key,
           name: label,
@@ -985,7 +997,7 @@ export function createInitialVirtual1CState(
           startDate,
           endDate,
           base0EndYm,
-          writeOffAccount: '26',
+          writeOffAccount: normalizedWriteOffAcc,
           startMonth,
           source: 'from_1c_base',
           originDate: anchorOriginDate,
@@ -1016,6 +1028,74 @@ export function createInitialVirtual1CState(
       const label = sub || 'Финансовое вложение из базы 1С';
       const key = `fin:${normalizeSimpleEntityKey1C(label)}`;
       if (!state.financialInvestments.some((f) => f.key === key)) {
+        const cutOffIso = db1C.balanceDate || db1C.periodStart || '';
+        let prevCutOffDate = cutOffIso;
+        if (/^\d{4}-\d{2}-\d{2}$/.test(cutOffIso) && !cutOffIso.endsWith('-01-01')) {
+          const [cy, cm, cd] = cutOffIso.split('-').map(Number);
+          const prevUtc = new Date(Date.UTC(cy, cm - 1, cd - 1));
+          prevCutOffDate = prevUtc.toISOString().slice(0, 10);
+        }
+
+        // Resolve interestRatePercent from Base 0 ЦенныеБумаги directory or inline % in label
+        let seededRate: number | undefined;
+        let seededAcqDate = prevCutOffDate;
+        const rawSecDir = db1C.rawDirectories?.['ЦенныеБумаги'];
+        if (Array.isArray(rawSecDir)) {
+          const normSub = normalizeCounterpartyKey1C(label);
+          const matchedSec = rawSecDir.find((item) => {
+            const cpStr = String(item['Контрагент'] ?? item['Эмитент'] ?? '');
+            const nmStr = String(item['Наименование'] ?? '');
+            const sumNum = Number(item['Сумма'] ?? item['Номинал'] ?? 0);
+            return (
+              (normSub &&
+                (normalizeCounterpartyKey1C(cpStr) === normSub ||
+                  normalizeCounterpartyKey1C(nmStr) === normSub)) ||
+              (sumNum > 0 && Math.abs(sumNum - debitBal) < 1)
+            );
+          });
+          if (matchedSec) {
+            const explicitPct = Number(
+              matchedSec['ПроцентнаяСтавка'] ??
+                matchedSec['Ставка'] ??
+                matchedSec['interestRatePercent'] ??
+                NaN
+            );
+            if (Number.isFinite(explicitPct) && explicitPct > 0) {
+              seededRate = explicitPct;
+            } else {
+              const textBlob = `${String(matchedSec['Содержание'] ?? '')} ${String(matchedSec['Наименование'] ?? '')}`;
+              const mPct = textBlob.match(/(\d+(?:[.,]\d+)?)\s*%/u);
+              if (mPct) {
+                const parsedPct = Number(mPct[1].replace(',', '.'));
+                if (Number.isFinite(parsedPct) && parsedPct > 0) seededRate = parsedPct;
+              }
+            }
+            const rawAcq = String(matchedSec['Дата'] ?? '').slice(0, 10);
+            if (/^\d{4}-\d{2}-\d{2}$/.test(rawAcq)) {
+              seededAcqDate = rawAcq;
+            }
+          }
+        }
+        if (seededRate === undefined) {
+          const mLabelPct = label.match(/(\d+(?:[.,]\d+)?)\s*%/u);
+          if (mLabelPct) {
+            const parsedPct = Number(mLabelPct[1].replace(',', '.'));
+            if (Number.isFinite(parsedPct) && parsedPct > 0) seededRate = parsedPct;
+          }
+        }
+
+        const normCpLabel = normalizeCounterpartyKey1C(label);
+        const open7609 = db1C.rawBalances
+          .filter(
+            (b) =>
+              b.account === '76.09' &&
+              b.startDebit >= 0.01 &&
+              (!normCpLabel ||
+                !b.subconto ||
+                normalizeCounterpartyKey1C(b.subconto) === normCpLabel)
+          )
+          .reduce((s, b) => s + b.startDebit, 0);
+
         state.financialInvestments.push({
           key,
           name: label,
@@ -1023,11 +1103,12 @@ export function createInitialVirtual1CState(
           paperIndex: state.financialInvestments.length + 1,
           principalAmount: debitBal,
           totalAmount: debitBal,
+          interestRatePercent: seededRate,
           status: 'active',
-          accruedInterestAmount: 0,
-          lastInterestDate: db1C.periodStart || '',
+          accruedInterestAmount: round2(open7609),
+          lastInterestDate: prevCutOffDate,
           notesBreakdown: `${label}: ${debitBal.toLocaleString('ru-RU')} ₽`,
-          acquisitionDate: db1C.periodStart || '',
+          acquisitionDate: seededAcqDate,
           source: 'from_1c_base',
           usages: [],
         });

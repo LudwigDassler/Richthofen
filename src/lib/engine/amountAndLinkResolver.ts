@@ -1362,9 +1362,21 @@ function resolveOperationAmountAndLinksCore(
           )
         : [];
     const openBuyer = stemFilteredBuyer.length > 0 ? stemFilteredBuyer : openBuyerAll;
-    if (openBuyer.length > 0) {
-      const total = round2(openBuyer.reduce((acc, s) => acc + s.remainingAmount, 0));
-      const first = openBuyer[0];
+    const fallbackUniqueBase0Buyer =
+      openBuyer.length === 0 && !cpNorm && targetAcc === '62.02'
+        ? stateBefore.openSettlements.filter(
+            (s) => s.account === '62.02' && s.remainingAmount >= 0.01 && s.source === 'from_1c_base'
+          )
+        : [];
+    const effectiveOpenBuyer =
+      openBuyer.length > 0
+        ? openBuyer
+        : fallbackUniqueBase0Buyer.length === 1
+          ? fallbackUniqueBase0Buyer
+          : [];
+    if (effectiveOpenBuyer.length > 0) {
+      const total = round2(effectiveOpenBuyer.reduce((acc, s) => acc + s.remainingAmount, 0));
+      const first = effectiveOpenBuyer[0];
       return {
         resolvedAmount: total,
         amountMode: 'from_related_doc',
@@ -1381,7 +1393,7 @@ function resolveOperationAmountAndLinksCore(
               ? `Покупатель «${first.counterpartyName}» погашает дебиторскую задолженность за ранее отгруженную продукцию / ОС / услуги по счёту 62.01 (${fmtMoney(total)}).`
               : `Отгрузка выполняется в счёт полученной ранее предоплаты от «${first.counterpartyName}» на счёте 62.02 (${fmtMoney(total)}).`,
           ],
-          sourceLinks: openBuyer.map((s) => ({
+          sourceLinks: effectiveOpenBuyer.map((s) => ({
             opId: s.originOpId,
             opNumber: s.originOpNumber,
             date: s.originDate,
