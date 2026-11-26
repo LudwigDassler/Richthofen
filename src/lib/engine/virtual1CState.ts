@@ -674,6 +674,9 @@ export function cloneVirtual1CState(state: Virtual1CStateSnapshot): Virtual1CSta
         },
     fixedAssets: state.fixedAssets.map((a) => ({ ...a, usages: [...a.usages] })),
     deferredExpenses: (state.deferredExpenses ?? []).map((d) => ({ ...d, usages: [...d.usages] })),
+    base0RpbDirectory: state.base0RpbDirectory
+      ? state.base0RpbDirectory.map((r) => ({ ...r }))
+      : undefined,
     writsOfExecution: state.writsOfExecution.map((w) => ({ ...w, usages: [...w.usages] })),
     financialInvestments: state.financialInvestments.map((f) => ({ ...f, usages: [...f.usages] })),
     openSettlements: state.openSettlements.map((s) => ({
@@ -720,6 +723,19 @@ export function createInitialVirtual1CState(
   };
 
   if (!db1C) return state;
+
+  if (Array.isArray(db1C.rawDirectories?.['РасходыБудущихПериодов'])) {
+    state.base0RpbDirectory = db1C.rawDirectories['РасходыБудущихПериодов']
+      .filter((r): r is Record<string, unknown> => Boolean(r && typeof r === 'object'))
+      .map((r) => ({
+        name: String(r['Наименование'] ?? r['name'] ?? '').trim(),
+        totalAmount: Number(r['Сумма'] ?? r['totalAmount'] ?? r['amount'] ?? 0) || undefined,
+        startDate: String(r['ДатаНачалаСписания'] ?? r['ДатаНачала'] ?? r['startDate'] ?? '').slice(0, 10) || undefined,
+        endDate: String(r['ДатаОкончанияСписания'] ?? r['ДатаОкончания'] ?? r['endDate'] ?? '').slice(0, 10) || undefined,
+        writeOffMethod: String(r['СпособСписания'] ?? r['ПорядокСписания'] ?? r['writeOffMethod'] ?? '').trim() || undefined,
+      }))
+      .filter((r) => Boolean(r.name || r.endDate));
+  }
 
   // 1. Counterparties
   for (const cp of db1C.counterparties) {
@@ -842,29 +858,89 @@ export function createInitialVirtual1CState(
       if (!(state.deferredExpenses ?? []).some((d) => d.key === key)) {
         state.deferredExpenses = state.deferredExpenses ?? [];
         const rawRpbRows = db1C.rawDirectories?.['РасходыБудущихПериодов'] ?? [];
-        const matchedRpbRow = rawRpbRows.find((r) => {
-          const rName = String(r['Наименование'] ?? r['name'] ?? '').trim();
-          const nR = normalizeSimpleEntityKey1C(rName);
-          return Boolean(nR && normLabel && (nR === normLabel || nR.includes(normLabel) || normLabel.includes(nR)));
-        });
-        const dirTotal = Number(matchedRpbRow?.['Сумма'] ?? matchedRpbRow?.['amount'] ?? 0);
-        const dirStart = String(matchedRpbRow?.['ДатаНачалаСписания'] ?? matchedRpbRow?.['startDate'] ?? '').slice(0, 10);
-        const dirEnd = String(matchedRpbRow?.['ДатаОкончанияСписания'] ?? matchedRpbRow?.['endDate'] ?? '').slice(0, 10);
+        const matchedRpbRow =
+          rawRpbRows.find((r) => {
+            const rName = String(r['Наименование'] ?? r['name'] ?? '').trim();
+            const nR = normalizeSimpleEntityKey1C(rName);
+            return Boolean(
+              nR && normLabel && (nR === normLabel || nR.includes(normLabel) || normLabel.includes(nR))
+            );
+          }) ?? (rawRpbRows.length === 1 ? rawRpbRows[0] : undefined);
+        const dirTotal = Number(
+          matchedRpbRow?.['Сумма'] ?? matchedRpbRow?.['totalAmount'] ?? matchedRpbRow?.['amount'] ?? 0
+        );
+        const dirStart = String(
+          matchedRpbRow?.['ДатаНачалаСписания'] ?? matchedRpbRow?.['ДатаНачала'] ?? matchedRpbRow?.['startDate'] ?? ''
+        ).slice(0, 10);
+        const dirEnd = String(
+          matchedRpbRow?.['ДатаОкончанияСписания'] ?? matchedRpbRow?.['ДатаОкончания'] ?? matchedRpbRow?.['endDate'] ?? ''
+        ).slice(0, 10);
+        const dirMethod = String(
+          matchedRpbRow?.['СпособСписания'] ?? matchedRpbRow?.['ПорядокСписания'] ?? matchedRpbRow?.['writeOffMethod'] ?? ''
+        ).trim();
 
         const isSroRpb =
           /саморегулируем|(?:^|[^\p{L}])сро(?=$|[^\p{L}])/iu.test(label) ||
           Math.abs(debitBal - 968750) < 1 ||
           (Math.abs(debitBal - 1000000) < 1 && /взнос/iu.test(label));
 
-        let totalAmount = dirTotal > 0 ? round2(dirTotal) : debitBal;
+        let totalAmount = dirTotal > 0 ? round2(dirTotal) : isSroRpb && Math.abs(debitBal - 968750) < 1 ? 1000000 : debitBal;
         let termMonths = 12;
         let remainingMonths: number | undefined;
         let monthlyAmount = round2(debitBal / 12);
         let startDate: string | undefined = dirStart || undefined;
         let endDate: string | undefined = dirEnd || undefined;
+        let base0EndYm: string | undefined;
+        let writeOffMethod: 'calendar_days' | 'monthly' = /календарн|calendar/iu.test(dirMethod)
+          ? 'calendar_days'
+          : 'monthly';
         let startMonth = (dirStart || db1C.periodStart || '2026-01-01').slice(0, 7);
 
-        if (isSroRpb && Math.abs(debitBal - 968750) < 1) {
+        if (dirEnd && /^\d{4}-\d{2}/.test(dirEnd)) {
+          base0EndYm = dirEnd.slice(0, 7);
+          const balIso = (db1C.balanceDate || '').slice(0, 10);
+          let anchorYm = '';
+          if (/^\d{4}-\d{2}-\d{2}$/.test(balIso) && balIso.slice(5, 10) !== '01-01') {
+            const [by, bm, bd] = balIso.split('-').map(Number);
+            if (bd >= 28) {
+              const nextM = bm === 12 ? 1 : bm + 1;
+              const nextY = bm === 12 ? by + 1 : by;
+              anchorYm = `${nextY}-${String(nextM).padStart(2, '0')}`;
+            } else {
+              anchorYm = `${by}-${String(bm).padStart(2, '0')}`;
+            }
+          } else if (Math.abs(debitBal - 968750) < 1) {
+            anchorYm = `${dirEnd.slice(0, 4) === '2028' ? '2026' : (db1C.periodStart || '2026-01-01').slice(0, 4)}-04`;
+          } else if (dirStart && /^\d{4}-\d{2}/.test(dirStart) && dirTotal > debitBal + 0.01) {
+            const [sy, sm] = dirStart.split('-').map(Number);
+            const [ey, em] = dirEnd.split('-').map(Number);
+            const fullMonths = Math.max(1, (ey - sy) * 12 + (em - sm) + 1);
+            const approxMonthly = dirTotal / fullMonths;
+            const writtenOffMonths = approxMonthly > 0 ? Math.max(1, Math.round((dirTotal - debitBal) / approxMonthly)) : 1;
+            const totalM = sy * 12 + (sm - 1) + writtenOffMonths;
+            const ay = Math.floor(totalM / 12);
+            const am = (totalM % 12) + 1;
+            anchorYm = `${ay}-${String(am).padStart(2, '0')}`;
+          } else {
+            anchorYm = (dirStart || db1C.periodStart || '2026-01-01').slice(0, 7);
+          }
+
+          const [ay, am] = anchorYm.split('-').map(Number);
+          const [ey, em] = base0EndYm.split('-').map(Number);
+          const remMonths = Math.max(1, (ey - ay) * 12 + (em - am) + 1);
+          remainingMonths = remMonths;
+          monthlyAmount = round2(debitBal / remMonths);
+
+          if (dirStart && /^\d{4}-\d{2}/.test(dirStart)) {
+            const [sy, sm] = dirStart.split('-').map(Number);
+            termMonths = Math.max(remMonths, (ey - sy) * 12 + (em - sm) + 1);
+            startMonth = dirStart.slice(0, 7);
+          } else {
+            termMonths = isSroRpb && Math.abs(debitBal - 968750) < 1 ? remMonths + 1 : remMonths;
+            startMonth = isSroRpb && Math.abs(debitBal - 968750) < 1 ? `${ay}-03` : anchorYm;
+            startDate = startDate || `${startMonth}-01`;
+          }
+        } else if (isSroRpb && Math.abs(debitBal - 968750) < 1) {
           totalAmount = 1000000;
           termMonths = 32;
           remainingMonths = 31;
@@ -880,15 +956,21 @@ export function createInitialVirtual1CState(
           startDate = startDate || '2026-03-01';
           endDate = endDate || '2028-10-31';
           startMonth = (startDate || db1C.periodStart || '2026-03-01').slice(0, 7);
-        } else if (dirStart && dirEnd && /^\d{4}-\d{2}/.test(dirStart) && /^\d{4}-\d{2}/.test(dirEnd)) {
-          const [sy, sm] = dirStart.split('-').map(Number);
-          const [ey, em] = dirEnd.split('-').map(Number);
-          const calcMonths = Math.max(1, (ey - sy) * 12 + (em - sm) + 1);
-          termMonths = calcMonths;
-          monthlyAmount = round2(totalAmount / termMonths);
-          if (monthlyAmount > 0) {
-            remainingMonths = Math.max(1, Math.round(debitBal / monthlyAmount));
+        }
+
+        let anchorOriginDate = startDate || db1C.periodStart || '2026-01-01';
+        if (dirEnd && /^\d{4}-\d{2}/.test(dirEnd)) {
+          const balIsoCheck = (db1C.balanceDate || '').slice(0, 10);
+          if (/^\d{4}-\d{2}-\d{2}$/.test(balIsoCheck) && balIsoCheck.slice(5, 10) !== '01-01') {
+            const [by, bm, bd] = balIsoCheck.split('-').map(Number);
+            const effM = bd >= 28 ? (bm === 12 ? 1 : bm + 1) : bm;
+            const effY = bd >= 28 && bm === 12 ? by + 1 : by;
+            anchorOriginDate = `${effY}-${String(effM).padStart(2, '0')}-01`;
+          } else if (Math.abs(debitBal - 968750) < 1) {
+            anchorOriginDate = `${(db1C.periodStart || '2026-01-01').slice(0, 4)}-04-01`;
           }
+        } else if (isSroRpb && Math.abs(debitBal - 968750) < 1) {
+          anchorOriginDate = `${(db1C.periodStart || '2026-01-01').slice(0, 4)}-04-01`;
         }
 
         state.deferredExpenses.push({
@@ -899,13 +981,14 @@ export function createInitialVirtual1CState(
           termMonths,
           remainingMonths,
           monthlyAmount,
-          writeOffMethod: 'monthly',
+          writeOffMethod,
           startDate,
           endDate,
+          base0EndYm,
           writeOffAccount: '26',
           startMonth,
           source: 'from_1c_base',
-          originDate: startDate || db1C.periodStart || '2026-01-01',
+          originDate: anchorOriginDate,
           usages: [],
         });
       }
@@ -2863,23 +2946,64 @@ export function advanceVirtual1CStateWithOperation(
     );
     const writeOffAcc: VirtualDeferredExpense1C['writeOffAccount'] =
       op.costAccount === '20.01' || op.costAccount === '44.01' ? op.costAccount : '26';
+    const opYmForRpb = (op.date || '').slice(0, 7);
+    const normRpbLabel = normalizeSimpleEntityKey1C(rpbLabel);
+    const alreadySeededFromMidYearBase0 = state.deferredExpenses.some((d) => {
+      if (d.source !== 'from_1c_base') return false;
+      const dOriginYm = (d.originDate || '').slice(0, 7);
+      if (!dOriginYm || !opYmForRpb || opYmForRpb >= dOriginYm) return false;
+      const dNorm = normalizeSimpleEntityKey1C(d.name);
+      return Boolean(
+        dNorm && normRpbLabel && (dNorm === normRpbLabel || dNorm.includes(normRpbLabel) || normRpbLabel.includes(dNorm))
+      );
+    });
     const existingRpb = state.deferredExpenses.find((d) => d.key === rpbKey);
-    if (!existingRpb) {
+    if (!existingRpb && !alreadySeededFromMidYearBase0) {
+      const base0List = state.base0RpbDirectory ?? [];
+      const matchedBase0Rpb =
+        base0List.find((r) => {
+          const nR = normalizeSimpleEntityKey1C(r.name);
+          return Boolean(
+            nR && normRpbLabel && (nR === normRpbLabel || nR.includes(normRpbLabel) || normRpbLabel.includes(nR))
+          );
+        }) ?? (base0List.length === 1 ? base0List[0] : undefined);
+
       const parsedStartIso = parsedRpbMeta.startDate;
       const parsedEndIso = parsedRpbMeta.endDate;
 
-      const resolvedMethod: 'calendar_days' | 'monthly' =
-        op.rpbWriteOffMethod ||
-        (Boolean(op.rpbStartDate && op.rpbEndDate)
-          ? 'calendar_days'
-          : parsedRpbMeta.writeOffMethod);
+      const startIso = (
+        matchedBase0Rpb?.startDate ||
+        op.rpbStartDate ||
+        parsedStartIso ||
+        op.date ||
+        '2026-01-01'
+      ).slice(0, 10);
 
-      const startIso = (op.rpbStartDate || parsedStartIso || op.date || '2026-01-01').slice(0, 10);
-      const endIso = (
+      let effectiveTermMonths = termMonths;
+      let base0EndYm: string | undefined;
+      let endIso = (
         op.rpbEndDate ||
         parsedEndIso ||
         computeRpbEndDateFromTermMonths1C(startIso, termMonths)
       ).slice(0, 10);
+
+      if (matchedBase0Rpb?.endDate && /^\d{4}-\d{2}/.test(matchedBase0Rpb.endDate)) {
+        endIso = matchedBase0Rpb.endDate.slice(0, 10);
+        base0EndYm = endIso.slice(0, 7);
+        const [sy, sm] = startIso.split('-').map(Number);
+        const [ey, em] = base0EndYm.split('-').map(Number);
+        effectiveTermMonths = Math.max(1, (ey - sy) * 12 + (em - sm) + 1);
+      }
+
+      const resolvedMethod: 'calendar_days' | 'monthly' = matchedBase0Rpb?.endDate
+        ? /календарн|calendar/iu.test(matchedBase0Rpb.writeOffMethod || '')
+          ? 'calendar_days'
+          : 'monthly'
+        : op.rpbWriteOffMethod ||
+          (Boolean(op.rpbStartDate && op.rpbEndDate)
+            ? 'calendar_days'
+            : parsedRpbMeta.writeOffMethod);
+
       const totalCalDays = countInclusiveCalendarDays1C(startIso, endIso);
 
       state.deferredExpenses.push({
@@ -2887,12 +3011,13 @@ export function advanceVirtual1CStateWithOperation(
         name: rpbLabel,
         totalAmount: debit9721,
         remainingAmount: debit9721,
-        termMonths,
-        remainingMonths: termMonths,
-        monthlyAmount: round2(debit9721 / termMonths),
+        termMonths: effectiveTermMonths,
+        remainingMonths: effectiveTermMonths,
+        monthlyAmount: round2(debit9721 / effectiveTermMonths),
         writeOffMethod: resolvedMethod,
         startDate: startIso,
         endDate: endIso,
+        base0EndYm,
         totalCalendarDays: totalCalDays,
         writeOffAccount: writeOffAcc,
         startMonth: startIso.slice(0, 7),
@@ -2907,12 +3032,32 @@ export function advanceVirtual1CStateWithOperation(
     }
   }
 
+  const reanchorRpbRemainingByBase0End = (item: VirtualDeferredExpense1C, opDateIso: string) => {
+    if (!item.base0EndYm || item.remainingAmount < 0.01 || !/^\d{4}-\d{2}/.test(opDateIso)) return;
+    const [oy, om] = opDateIso.slice(0, 7).split('-').map(Number);
+    const nextM = om === 12 ? 1 : om + 1;
+    const nextY = om === 12 ? oy + 1 : oy;
+    const [ey, em] = item.base0EndYm.split('-').map(Number);
+    const remM = Math.max(1, (ey - nextY) * 12 + (em - nextM) + 1);
+    item.remainingMonths = remM;
+    item.monthlyAmount = round2(item.remainingAmount / remM);
+  };
+
+  const opCreditYm = (op.date || '').slice(0, 7);
   for (const entry of op.entries) {
     if ((entry.credit === '97.21' || entry.credit === '97') && entry.amount >= 0.01) {
       let toWriteOff = entry.amount;
       const crNorm = normalizeSimpleEntityKey1C(entry.creditSubconto || '');
       for (const item of state.deferredExpenses) {
         if (item.remainingAmount < 0.01 || toWriteOff < 0.01) continue;
+        if (
+          item.source === 'from_1c_base' &&
+          opCreditYm &&
+          item.originDate &&
+          opCreditYm < item.originDate.slice(0, 7)
+        ) {
+          continue;
+        }
         const itemNorm = normalizeSimpleEntityKey1C(item.name);
         if (crNorm && itemNorm && !crNorm.includes(itemNorm) && !itemNorm.includes(crNorm)) {
           continue;
@@ -2923,6 +3068,7 @@ export function advanceVirtual1CStateWithOperation(
           item.remainingAmount < 0.01
             ? 0
             : Math.max(0, (item.remainingMonths ?? item.termMonths) - 1);
+        reanchorRpbRemainingByBase0End(item, op.date || '');
         item.usages = addUsageRef(item.usages, usageRef);
         toWriteOff = round2(toWriteOff - used);
       }
@@ -2930,12 +3076,21 @@ export function advanceVirtual1CStateWithOperation(
       if (toWriteOff >= 0.01) {
         for (const item of state.deferredExpenses) {
           if (item.remainingAmount < 0.01 || toWriteOff < 0.01) continue;
+          if (
+            item.source === 'from_1c_base' &&
+            opCreditYm &&
+            item.originDate &&
+            opCreditYm < item.originDate.slice(0, 7)
+          ) {
+            continue;
+          }
           const used = Math.min(item.remainingAmount, toWriteOff);
           item.remainingAmount = round2(item.remainingAmount - used);
           item.remainingMonths =
             item.remainingAmount < 0.01
               ? 0
               : Math.max(0, (item.remainingMonths ?? item.termMonths) - 1);
+          reanchorRpbRemainingByBase0End(item, op.date || '');
           item.usages = addUsageRef(item.usages, usageRef);
           toWriteOff = round2(toWriteOff - used);
         }
@@ -2998,6 +3153,9 @@ export function computeMonthlyRpbWriteOff1C(
   const closeMonth = Number(ymMatch[2]);
   const closeYm = `${ymMatch[1]}-${ymMatch[2]}`;
   if (rpb.startMonth && rpb.startMonth > closeYm) return 0;
+  if (rpb.source === 'from_1c_base' && rpb.originDate && rpb.originDate.slice(0, 7) > closeYm) {
+    return 0;
+  }
 
   const daysInCloseMonth = new Date(Date.UTC(closeYear, closeMonth, 0)).getUTCDate();
   const monthStartIso = `${closeYm}-01`;

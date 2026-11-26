@@ -457,8 +457,8 @@ test('Part B BSL Generator & Package: metadata ВидОперации before Р�
   assert.ok(bsl.includes('Процедура УстановитьАвтоЗачетАвансовДокумента('), 'Missing СпособЗачетаАвансов helper');
   assert.ok(bsl.includes('Функция НайтиСуществующийРучнойДубльДокумента('), 'Missing manual duplicate lookup helper');
   assert.ok(
-    bsl.includes('ВЫБРАТЬ ПЕРВЫЕ 1 Док.Ссылка КАК Ссылка ИЗ Документ.'),
-    'Manual duplicate check must use targeted ВЫБРАТЬ ПЕРВЫЕ 1 Док.Ссылка query'
+    bsl.includes('ВЫБРАТЬ ПЕРВЫЕ 20 Док.Ссылка КАК Ссылка') && bsl.includes('ИЗ Документ.'),
+    'Business-key & manual duplicate check must use bounded ВЫБРАТЬ ПЕРВЫЕ 20 Док.Ссылка query'
   );
   assert.ok(bsl.includes('Функция НормализоватьИмяКонтрагентаДляПоиска('), 'Missing counterparty normalizer helper');
   assert.ok(bsl.includes('ОсновнойДоговорКонтрагента'), 'Missing contract reuse check');
@@ -468,23 +468,23 @@ test('Part B BSL Generator & Package: metadata ВидОперации before Р�
   );
   assert.ok(bsl.includes('alimonyFixedAmount'), 'Missing ИсполнительныйЛист fixed amount mapping');
 
-  // Verify period cutoff executes strictly BEFORE Richthofen duplicate check, catalog preparation, and manual duplicate check
+  // Verify period cutoff executes strictly BEFORE catalog preparation and natural business-key duplicate checks
   const loadProcStart = bsl.indexOf('Процедура ЗагрузитьПакетНаСервере(');
   const loadLoopStart = bsl.indexOf('Для Каждого ДокЭл Из МассивДокументов Цикл', loadProcStart);
   const loadLoopSlice = bsl.slice(loadLoopStart);
   const periodCutoffIdx = loadLoopSlice.indexOf('ДатаДокПроверка > ДатаОкончанияЗагрузки');
-  const tagDupIdx = loadLoopSlice.indexOf('НайтиСтатусДубляПоТегуRichthofen(ЦелевойВидДляПроверки');
   const prepCatIdx = loadLoopSlice.indexOf('ПодготовитьСправочникиДляДокументаПакета(');
+  const bizDupIdx = loadLoopSlice.indexOf('НайтиСтатусДубляПоБизнесКлючу(ЦелевойВидДляПроверки');
   const manualDupIdx = loadLoopSlice.indexOf('НайтиСуществующийРучнойДубльДокумента(');
   assert.ok(
     periodCutoffIdx > 0 &&
-      tagDupIdx > periodCutoffIdx &&
-      prepCatIdx > tagDupIdx &&
-      manualDupIdx > prepCatIdx,
-    'ПериодС..ПериодПо cutoff must precede tag duplicate check, catalog lookup/creation, and manual duplicate check'
+      prepCatIdx > periodCutoffIdx &&
+      bizDupIdx > prepCatIdx &&
+      manualDupIdx > bizDupIdx,
+    'ПериодС..ПериодПо cutoff must precede catalog preparation, business-key duplicate check, and manual duplicate check'
   );
 
-  // Ensure in bank and cash branches УстановитьВидОперацииДокумента comes strictly BEFORE СчетОрганизации / СчетУчета and BEFORE РасшифровкаПлатежа
+  // Ensure in bank and cash branches УстановитьВидОперацииДокумента comes strictly BEFORE bank account / СчетУчета and BEFORE РасшифровкаПлатежа
   const createNativeStart = bsl.indexOf('Функция СоздатьНативныйДокумент1С(');
   assert.ok(createNativeStart > 0);
   const bankInIdx = bsl.indexOf('ИначеЕсли ВидМета = "ПоступлениеНаРасчетныйСчет" Тогда', createNativeStart);
@@ -495,18 +495,17 @@ test('Part B BSL Generator & Package: metadata ВидОперации before Р�
 
   const bankOutSlice = bsl.slice(bankOutIdx, pkoSectionIdx);
   const bankOutSetVO = bankOutSlice.indexOf('УстановитьВидОперацииДокумента(ДокОбъект,');
-  const bankOutSetAccOrg = bankOutSlice.indexOf('УстановитьЕслиЕсть(ДокОбъект, "СчетОрганизации"');
+  const bankOutSetAccOrg = bankOutSlice.indexOf('ЗаполнитьБанковскиеСчетаШапкиПоМетаданным(ДокОбъект, БанкСчетОргС)');
   const bankOutFillRassh = bankOutSlice.indexOf('ЗаполнитьРасшифровкуПлатежаКонтрагента(ДокОбъект,');
   assert.ok(
     bankOutSetVO > 0 && bankOutSetAccOrg > bankOutSetVO && bankOutFillRassh > bankOutSetAccOrg,
-    'СписаниеСРасчетногоСчета must set ВидОперации BEFORE СчетОрганизации and BEFORE ЗаполнитьРасшифровкуПлатежаКонтрагента'
+    'СписаниеСРасчетногоСчета must set ВидОперации BEFORE ЗаполнитьБанковскиеСчетаШапкиПоМетаданным and BEFORE ЗаполнитьРасшифровкуПлатежаКонтрагента'
   );
 
   const cashSlice = bsl.slice(pkoSectionIdx, aoSectionIdx);
-  assert.equal(
-    cashSlice.includes('"СчетОрганизации"'),
-    false,
-    'Cash orders (ПКО/РКО) must NOT touch СчетОрганизации'
+  assert.ok(
+    cashSlice.includes('ЗаполнитьБанковскиеСчетаШапкиПоМетаданным(ДокОбъект, БанкСчетПКО)'),
+    'ПКО (ПолучениеНаличныхВБанке) must populate bank account attributes via ЗаполнитьБанковскиеСчетаШапкиПоМетаданным'
   );
   assert.ok(
     cashSlice.includes('ЗаполнитьКассуОрганизацииЕслиЕсть(ДокОбъект, ОргСсылка)'),
@@ -545,7 +544,7 @@ test('Part B BSL Generator & Package: metadata ВидОперации before Р�
   assert.match(opDupBody, /СумБД\s*<\s*\(СумЖ\s*-\s*1\)\s+Или\s+СумБД\s*>\s*\(СумЖ\s*\+\s*1\)/u);
   assert.equal(opDupBody.includes('.Проведен'), false, 'ОперацияБух duplicate check must not access .Проведен');
 
-  // 1) Verify payroll RKO checks live 50.01 debit balance and auto-posts paired ПКО (ПолучениеНаличныхВБанке, Дт 50.01 Кт 51) at -1 min with -CASHIN tag
+  // 1) Verify payroll RKO checks live 50.01 debit balance and auto-posts paired ПКО (ПолучениеНаличныхВБанке, Дт 50.01 Кт 51) at -1 min with clean Комментарий = "" and metadata bank account
   const cashReplStart = bsl.indexOf('Функция ОбеспечитьНаличныеВКассеПодВыплатуЗП(');
   assert.ok(cashReplStart > 0, 'Missing ОбеспечитьНаличныеВКассеПодВыплатуЗП');
   const cashReplBody = bsl.slice(cashReplStart, bsl.indexOf('КонецФункции', cashReplStart));
@@ -555,17 +554,17 @@ test('Part B BSL Generator & Package: metadata ВидОперации before Р�
   );
   assert.ok(cashReplBody.includes('"ПолучениеНаличныхВБанке"'), 'Cash replenishment PKO must search ПолучениеНаличныхВБанке');
   assert.ok(cashReplBody.includes('"Получение наличных в банке"'), 'Cash replenishment PKO must search synonym Получение наличных в банке');
-  assert.ok(cashReplBody.includes('НайтиВидОперацииПоМетаданным(ПКО, КандВОПКО)'), 'Cash replenishment PKO must use НайтиВидОперацииПоМетаданным');
+  assert.ok(cashReplBody.includes('НайтиВидОперацииПоМетаданным(ШаблонПКО, КандВОПКО)'), 'Cash replenishment PKO must use НайтиВидОперацииПоМетаданным');
   assert.ok(cashReplBody.includes('ДатаПКО = ДатаРКО - 60;'), 'Cash replenishment PKO must be created 1 minute earlier than RKO');
-  assert.ok(cashReplBody.includes('БазИдКэш + "-CASHIN"'), 'Cash replenishment PKO must carry unique -CASHIN RichthofenID tag');
+  assert.ok(cashReplBody.includes('ПКО.Комментарий = "";'), 'Cash replenishment PKO must set ПКО.Комментарий = ""');
   assert.ok(cashReplBody.includes('УстановитьСчетУчетаДенежныхСредствПоМетаданным(ПКО, Счет5001)'), 'Cash replenishment PKO must set 50.01');
   assert.ok(cashReplBody.includes('УстановитьЕслиЕсть(ПКО, "СчетКредита", Счет51)'), 'Cash replenishment PKO must set СчетКредита = 51');
-  assert.ok(cashReplBody.includes('УстановитьЕслиЕсть(ПКО, "СчетОрганизации", ОсновнойБанковскийСчет)'), 'Cash replenishment PKO must set ОсновнойБанковскийСчет');
+  assert.ok(cashReplBody.includes('ЗаполнитьБанковскиеСчетаШапкиПоМетаданным(ПКО, ОсновнойБанковскийСчет)'), 'Cash replenishment PKO must populate bank account fields via metadata');
   assert.ok(cashReplBody.includes('ЗаполнитьКассуОрганизацииЕслиЕсть(ПКО, ОргСсылка)'), 'Cash replenishment PKO must set Касса');
   assert.ok(cashReplBody.includes('УстановитьЕслиЕсть(ПКО, "ВалютаДокумента", ВалютаРуб)'), 'Cash replenishment PKO must set ВалютаДокумента');
   assert.ok(cashReplBody.includes('ПКО.Записать(РежимЗаписиДокумента.Проведение)'), 'Cash replenishment PKO must be posted');
   assert.ok(
-    bsl.includes('ОбеспечитьНаличныеВКассеПодВыплатуЗП(ОргСсылка, ДокОбъект.Дата, СуммаШапки, ИдРихтгофен'),
+    bsl.includes('ОбеспечитьНаличныеВКассеПодВыплатуЗП(ОргСсылка, ДокОбъект.Дата, СуммаШапки'),
     'СоздатьНативныйДокумент1С must invoke ОбеспечитьНаличныеВКассеПодВыплатуЗП before posting payroll RKO'
   );
 
@@ -626,4 +625,196 @@ test('Part B BSL Generator & Package: metadata ВидОперации before Р�
     'ЗагрузитьПакетНаСервере must invoke ПерепровестиПоступленияИРеализацииПериода after main document loop'
   );
 });
+
+test('Final 5 April 2026 live-run fixes: (1) zero tags/empty Комментарий, (2) ПогашениеЗадолженности=Автоматически, (3) native БанковскийСчет priority, (4) ПриемНаРаботу FIO/Должность/ВидЗанятости/Начисления 72200, (5) Base 0 RBP 2026-12-31 = 107,638.89 RUB', async () => {
+  const bsl = generateBslLoader({
+    defaultReportingYear: 2026,
+    defaultPackageFileName: 'Package_1C.json',
+    defaultBase0FileName: 'base0_1c.json',
+  });
+
+  // Fix 1: Zero occurrences of Richthofen, GitHub, URLs, bp30-v1, -CASHIN, or service tags in BSL & empty Комментарий everywhere
+  assert.equal(
+    /richthofen|github|http|bp30|cashin|АвтоОплата51|\[Налог:|\[Фолбэк\]/iu.test(bsl),
+    false,
+    'BSL must contain 0 occurrences of Richthofen, GitHub, http, bp30, cashin, or service tags'
+  );
+  // Every write to "Комментарий" via УстановитьЕслиЕсть must pass strictly ""
+  for (const m of bsl.matchAll(/УстановитьЕслиЕсть\([^,]+,\s*"Комментарий",\s*([^)]+)\)/gu)) {
+    assert.equal(
+      m[1].trim(),
+      '""',
+      `Every Комментарий assignment in BSL must be strictly empty string "", got: ${m[0]}`
+    );
+  }
+  // Every direct property assignment `.Комментарий = ...` must also pass strictly ""
+  for (const m of bsl.matchAll(/\.Комментарий\s*=\s*([^;]+);/gu)) {
+    assert.equal(
+      m[1].trim(),
+      '""',
+      `Every direct .Комментарий assignment in BSL must be strictly "", got: ${m[0]}`
+    );
+  }
+
+  // Fix 2: ПогашениеЗадолженности = Автоматически via metadata, and NO ДокументРасчетовСКонтрагентом when auto-settlement is set
+  const applyAutoStart = bsl.indexOf('Процедура ПрименитьПогашениеЗадолженностиАвтоматически(');
+  assert.ok(applyAutoStart > 0, 'Missing ПрименитьПогашениеЗадолженностиАвтоматически');
+  const applyAutoBody = bsl.slice(applyAutoStart, bsl.indexOf('КонецПроцедуры', applyAutoStart));
+  assert.match(applyAutoBody, /НайтиПогашениеЗадолженностиАвтоматически\(Док\)/u);
+  assert.equal(
+    applyAutoBody.includes('ДокументРасчетовСКонтрагентом'),
+    false,
+    'ПрименитьПогашениеЗадолженностиАвтоматически must NEVER set ДокументРасчетовСКонтрагентом'
+  );
+  // Also ensure the pre-save bank block calls ПрименитьПогашениеЗадолженностиАвтоматически(ДокОбъект)
+  const preSaveIdx = bsl.indexOf('// Повторно фиксируем СчетОрганизации (банк и ПКО из банка)');
+  assert.ok(preSaveIdx > 0);
+  const preSaveSlice = bsl.slice(preSaveIdx, preSaveIdx + 1500);
+  assert.ok(
+    preSaveSlice.includes('ПрименитьПогашениеЗадолженностиАвтоматически(ДокОбъект)'),
+    'Pre-save bank block must enforce ПогашениеЗадолженности = Автоматически on every РасшифровкаПлатежа row'
+  );
+
+  // Fix 3: Native organization bank account priority (excluding "ОСНОВНОЙ РАСЧЕТНЫЙ СЧЕТ" first, never creating duplicate when any active account exists)
+  const nativeBankFnStart = bsl.indexOf('Функция НайтиНативныйБанковскийСчетВладельца(');
+  assert.ok(nativeBankFnStart > 0, 'Missing НайтиНативныйБанковскийСчетВладельца');
+  const nativeBankFnBody = bsl.slice(nativeBankFnStart, bsl.indexOf('КонецФункции', nativeBankFnStart));
+  const exclDefaultIdx = nativeBankFnBody.indexOf('"ОСНОВНОЙ РАСЧЕТНЫЙ СЧЕТ"');
+  const postedBankDocIdx = nativeBankFnBody.indexOf('ИЗ Документ.СписаниеСРасчетногоСчета');
+  const orgMainAccIdx = nativeBankFnBody.indexOf('Организация.ОсновнойБанковскийСчет');
+  assert.ok(
+    exclDefaultIdx > 0 && postedBankDocIdx > exclDefaultIdx && orgMainAccIdx > postedBankDocIdx,
+    'НайтиНативныйБанковскийСчетВладельца must prioritize native active account (!= "ОСНОВНОЙ РАСЧЕТНЫЙ СЧЕТ") -> posted bank docs -> Организация.ОсновнойБанковскийСчет'
+  );
+  const findOrCreateBankStart = bsl.indexOf('Функция НайтиИлиСоздатьБанковскийСчет(');
+  const findOrCreateBankBody = bsl.slice(findOrCreateBankStart, bsl.indexOf('КонецФункции', findOrCreateBankStart));
+  assert.ok(
+    findOrCreateBankBody.indexOf('НайтиНативныйБанковскийСчетВладельца(ВладелецСсылка)') > 0 &&
+      findOrCreateBankBody.indexOf('НайтиНативныйБанковскийСчетВладельца(ВладелецСсылка)') <
+        findOrCreateBankBody.indexOf('Справочники.БанковскиеСчета.СоздатьЭлемент()'),
+    'НайтиИлиСоздатьБанковскийСчет must return existing native bank account BEFORE ever calling СоздатьЭлемент()'
+  );
+
+  // Fix 4: ПриемНаРаботу with real Chief Accountant FIO from Base 0 (never "Главный бухгалтер (ФИО студента)"), Должность, ВидЗанятости, and Начисления (72,200 RUB)
+  const q1Input = {
+    name: 'Хоз.csv',
+    buffer: readAssetBuffer('public/assets/aistudio/____09f9d030.csv'),
+  };
+  const q2Input = {
+    name: 'Хоз(1).csv',
+    buffer: readAssetBuffer('public/assets/aistudio/____1__443ffb42.csv'),
+  };
+  const base0AprilStudentJson = JSON.stringify({
+    ФорматБазы0: '1c-base0-v1',
+    ОтчетныйГод: 2026,
+    ДатаОстатков: '2026-04-01',
+    usesLegacyPayrollAccounts: true,
+    payrollAccounts69: ['69.01', '69.02.7', '69.03.1', '69.11'],
+    Организация: {
+      Наименование: 'ООО «Вектор»',
+      ИНН: '7810000001',
+      КПП: '781001001',
+      ГлавныйБухгалтер: 'Смирнова Анна Сергеевна',
+    },
+    ВсеСправочники: {
+      Сотрудники: [
+        { Код: '000000001', Наименование: 'Директоров И.И.', Должность: 'Генеральный директор', Оклад: 95000 },
+        { Код: '000000005', Наименование: 'Смирнова Анна Сергеевна' },
+      ],
+      РасходыБудущихПериодов: [
+        {
+          Код: '000000001',
+          Наименование: 'Взнос в компенсационный фонд СРО',
+          Сумма: 1000000,
+          ДатаНачалаСписания: '2026-03-01',
+          ДатаОкончанияСписания: '2026-12-31',
+          СпособСписания: 'По месяцам',
+        },
+      ],
+    },
+    НачальныеОстатки: [
+      {
+        Счет: '97.21',
+        НаименованиеСчета: 'Прочие расходы будущих периодов',
+        Субконто1: 'Взнос в компенсационный фонд СРО',
+        СальдоНачДт: 968750,
+        СальдоНачКт: 0,
+      },
+    ],
+  });
+  const db1CApril = parseBase0Json(base0AprilStudentJson, 'base0_april_student.json', 2026);
+  assert.equal(db1CApril.organization.chiefAccountant, 'Смирнова Анна Сергеевна');
+
+  const batchWithDb = await processBatchFiles([q1Input, q2Input], db1CApril, {
+    reportingYear: 2026,
+    calculationProfile: 'bp30_legacy_pre2023',
+    monthlyProfitTax: true,
+  });
+  const fixedWithDb = autoFixAllBy1CDb({
+    db1C: db1CApril,
+    operations: batchWithDb.operations,
+    calculateCurrentOsv: (currOps, dateToOverride) =>
+      calculateOsvReport({
+        db1C: db1CApril,
+        operations: currOps,
+        dateFrom: '2026-04-01',
+        dateTo: dateToOverride || '2026-04-30',
+        reportingYear: 2026,
+        includeQueuedOperations: true,
+      }),
+    periodEndDate: '2026-04-30',
+    reportingYear: 2026,
+    calculationProfile: 'bp30_legacy_pre2023',
+    monthlyProfitTax: true,
+  });
+  const { finalState: finalStateWithDb } = buildVirtual1CStateTimeline(db1CApril, fixedWithDb.operations);
+  const pkgWithDb = build1CTransferPackage(fixedWithDb.operations, db1CApril, finalStateWithDb, {
+    calculationProfile: 'bp30_legacy_pre2023',
+    monthlyProfitTax: true,
+  });
+
+  // Ensure NO employee in catalogs has placeholder role name as fullName/fio
+  for (const emp of pkgWithDb.catalogs.employees) {
+    assert.equal(
+      /главн\p{L}*\s+бухгалтер|фио\s+студент/iu.test(emp.fullName) ||
+        /главн\p{L}*\s+бухгалтер|фио\s+студент/iu.test(emp.fio),
+      false,
+      `Employee catalog must NEVER contain position placeholder as FIO: ${JSON.stringify(emp)}`
+    );
+  }
+  const hireDoc = pkgWithDb.documents.find(
+    (d) => d.metaType1C === 'ПриемНаРаботу' && d.date.startsWith('2026-04')
+  );
+  assert.ok(hireDoc, 'Expected April ПриемНаРаботу document in package');
+  assert.equal(hireDoc.header.employeeName, 'Смирнова Анна Сергеевна');
+  assert.equal(hireDoc.header.employeePosition, 'Главный бухгалтер');
+  assert.equal(hireDoc.header.monthlySalary, 72200);
+  assert.ok(
+    bsl.includes('НайтиВидЗанятостиОсновноеПоМетаданным(ДокОбъект)') &&
+      bsl.includes('ЗаполнитьНачисленияПриемаНаРаботуПоМетаданным(ДокОбъект, СотрСсылкаПрием, ОкладШапки)'),
+    'BSL ПриемНаРаботу must populate ВидЗанятости and Начисления (ОплатаПоОкладу, 72200) via metadata'
+  );
+
+  // Also ensure zero Richthofen / GitHub / URLs in serialized JSON comments & descriptions
+  for (const doc of pkgWithDb.documents) {
+    assert.equal(
+      /richthofen|github|http|bp30-v1/iu.test(doc.comment),
+      false,
+      `Document comment must not contain service mentions: ${doc.comment}`
+    );
+  }
+
+  // Fix 5: RBP 97.21 write-off in April 2026 when Base 0 ДатаОкончанияСписания = "2026-12-31" and residual = 968,750 RUB -> 968,750 / 9 = 107,638.89 RUB/mo
+  const aprilRbpEntry2026End = fixedWithDb.operations
+    .filter((o) => o.category === 'closing' && o.date === '2026-04-30')
+    .flatMap((o) => o.entries)
+    .find((e) => e.credit === '97.21');
+  assert.ok(aprilRbpEntry2026End, 'Expected April 97.21 write-off entry with Base 0 end date 2026-12-31');
+  assert.equal(
+    aprilRbpEntry2026End.amount.toFixed(2),
+    '107638.89',
+    `Expected 968,750 / 9 months (Apr–Dec 2026) = 107,638.89 RUB/mo, got ${aprilRbpEntry2026End.amount.toFixed(2)}`
+  );
+});
+
 

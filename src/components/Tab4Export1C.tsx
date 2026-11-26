@@ -77,7 +77,7 @@ export function Tab4Export1C() {
     () =>
       generateBslLoader({
         defaultReportingYear: reportingYear,
-        defaultPackageFileName: 'Richthofen_1C_Package.json',
+        defaultPackageFileName: 'Package_1C.json',
         defaultBase0FileName: 'base0_1c.json',
       }),
     [reportingYear]
@@ -187,14 +187,12 @@ export function Tab4Export1C() {
               01. Основной экспорт в 1С:Бухгалтерия 8.3 (ред. 3.0) — все разделы через .epf
             </h2>
             <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-              Канонический JSON-пакет <code className="font-mono">Richthofen_1C_Package.json</code> и
-              самособираемая управляемая обработка <code className="font-mono">RichthofenLoader_1C83.bsl</code>{' '}
+              Канонический JSON-пакет <code className="font-mono">Package_1C.json</code> и
+              самособираемая управляемая обработка <code className="font-mono">Loader_1C83.bsl</code>{' '}
               переносят чистые справочники, нативные документы БП 3.0 со счетами-фактурами, а также
               точные бухгалтерские и налоговые движения (включая постоянные разницы ст. 270 НК РФ).
             </p>
             <div className="pt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-              <span>Схема {transferPackage.meta.schemaVersion}</span>
-              <span aria-hidden="true">·</span>
               <span>
                 Организация: {transferPackage.organization.name} (ИНН{' '}
                 {transferPackage.organization.inn || '—'})
@@ -215,7 +213,7 @@ export function Tab4Export1C() {
               onClick={() =>
                 triggerDownload(
                   packageJsonString,
-                  'Richthofen_1C_Package.json',
+                  'Package_1C.json',
                   'application/json'
                 )
               }
@@ -228,7 +226,7 @@ export function Tab4Export1C() {
             <button
               type="button"
               onClick={() =>
-                triggerDownload(bslLoaderCode, 'RichthofenLoader_1C83.bsl', 'text/plain')
+                triggerDownload(bslLoaderCode, 'Loader_1C83.bsl', 'text/plain')
               }
               className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-900 dark:text-slate-100 text-xs font-semibold whitespace-nowrap transition-colors"
             >
@@ -343,10 +341,10 @@ export function Tab4Export1C() {
                 </div>
                 <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
                   В Конфигураторе выберите «Файл → Новый → Внешняя обработка», задайте имя{' '}
-                  <code className="font-mono">RichthofenLoader</code>, добавьте управляемую форму,
+                  <code className="font-mono">Loader1C</code>, добавьте управляемую форму,
                   откройте вкладку «Модуль», вставьте код из{' '}
-                  <code className="font-mono">RichthofenLoader_1C83.bsl</code> и сохраните{' '}
-                  <code className="font-mono">RichthofenLoader.epf</code> (реквизиты и кнопки не
+                  <code className="font-mono">Loader_1C83.bsl</code> и сохраните{' '}
+                  <code className="font-mono">Loader1C.epf</code> (реквизиты и кнопки не
                   рисуем вручную — они создаются сами).
                 </p>
               </li>
@@ -357,7 +355,7 @@ export function Tab4Export1C() {
                 </div>
                 <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
                   В пользовательском режиме нажмите «Файл → Открыть» (или «Главное меню → Файл →
-                  Открыть») и выберите <code className="font-mono">RichthofenLoader.epf</code>.
+                  Открыть») и выберите <code className="font-mono">Loader1C.epf</code>.
                 </p>
               </li>
 
@@ -366,9 +364,9 @@ export function Tab4Export1C() {
                   Шаг 4. Загрузите пакет (целиком или помесячно) и закройте месяц
                 </div>
                 <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
-                  Укажите <code className="font-mono">Richthofen_1C_Package.json</code>, при
+                  Укажите <code className="font-mono">Package_1C.json</code>, при
                   необходимости задайте «Период загрузки с / по» для помесячного шага, нажмите «2.
-                  Загрузить пакет Richthofen в 1С», штатно начислите зарплату и закройте месяц в 1С —
+                  Загрузить пакет документов в 1С», штатно начислите зарплату и закройте месяц в 1С —
                   уплата налогов и выплата ЗП подхватят живые остатки базы (включая релизы до ЕНС с
                   69.01 / 69.02.7 / 69.03.1).
                 </p>
@@ -381,8 +379,8 @@ export function Tab4Export1C() {
               <div className="px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2 text-xs">
                 <span className="font-mono font-medium text-slate-800 dark:text-slate-200">
                   {previewTab === 'package_json'
-                    ? 'Richthofen_1C_Package.json'
-                    : 'RichthofenLoader_1C83.bsl'}
+                    ? 'Package_1C.json'
+                    : 'Loader_1C83.bsl'}
                 </span>
                 <div className="flex items-center gap-2">
                   <button
@@ -467,7 +465,7 @@ export function Tab4Export1C() {
                 «1. Выгрузить Базу 0 в JSON»
               </strong>{' '}
               и загрузите полученный <code className="font-mono">base0_1c.json</code> сюда.
-              Richthofen автоматически свяжет существующих контрагентов, номенклатуру, ОС и
+              Система автоматически свяжет существующих контрагентов, номенклатуру, ОС и
               сотрудников и учтёт входящие остатки на начало {reportingYear} года в ОСВ.
             </p>
           </div>

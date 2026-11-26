@@ -139,6 +139,7 @@ export interface PackageDeferredExpense1C {
 export interface PackageEmployee1C {
   key: string;
   fullName: string;
+  fio?: string;
   position: string;
   hireDate: string;
   salary: number;
@@ -154,6 +155,9 @@ export interface PackageDocumentHeader1C {
   contractKey: string;
   warehouseName: string;
   employeeKey: string;
+  employeeName?: string;
+  employeePosition?: string;
+  monthlySalary?: number;
   amount: number;
   vatRate: number;
   vatAmount: number;
@@ -1323,6 +1327,100 @@ export function build1CTransferPackage(
   }
 
   // Employees
+  const isRolePlaceholderNotFio = (val?: string): boolean => {
+    const s = (val || '').replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!s) return true;
+    if (/фио\s+студент/iu.test(val || '')) return true;
+    if (
+      /^(?:главн\p{L}*\s+бухгалтер|бухгалтер|генеральн\p{L}*\s+директор|директор|руководител\p{L}*|кассир|менеджер|специалист|сотрудник(?:\s+штата|\s+организац\p{L}*)?|работник)$/iu.test(
+        s
+      )
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  const extractPositionFromPlaceholder = (val?: string): string => {
+    const cleaned = (val || '').replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
+    if (/главн\p{L}*\s+бухгалтер/iu.test(cleaned)) return 'Главный бухгалтер';
+    if (/генеральн\p{L}*\s+директор/iu.test(cleaned)) return 'Генеральный директор';
+    if (/^директор$/iu.test(cleaned)) return 'Директор';
+    if (/^бухгалтер$/iu.test(cleaned)) return 'Бухгалтер';
+    return '';
+  };
+
+  const resolveChiefAccountantFioFromDb1C = (snap?: Database1CSnapshot | null): string => {
+    if (!snap) return '';
+    const orgAny = snap.organization as unknown as Record<string, unknown> | undefined;
+    const directChief = String(
+      orgAny?.['chiefAccountant'] ?? orgAny?.['ГлавныйБухгалтер'] ?? ''
+    ).trim();
+    if (directChief && !isRolePlaceholderNotFio(directChief)) {
+      return normalizeRussianFioToNominative1C(directChief) || directChief;
+    }
+    const respRows = snap.rawDirectories?.['ОтветственныеЛица'];
+    if (Array.isArray(respRows)) {
+      for (const r of respRows) {
+        if (r && typeof r === 'object') {
+          const rec = r as Record<string, unknown>;
+          const role = String(rec['ОтветственноеЛицо'] ?? rec['Роль'] ?? rec['Должность'] ?? '');
+          const fio = String(rec['ФизическоеЛицо'] ?? rec['ФИО'] ?? rec['Наименование'] ?? '').trim();
+          if (/бухгалтер/iu.test(role) && fio && !isRolePlaceholderNotFio(fio)) {
+            return normalizeRussianFioToNominative1C(fio) || fio;
+          }
+        }
+      }
+    }
+    const rawEmpRows = snap.rawDirectories?.['Сотрудники'];
+    if (Array.isArray(rawEmpRows)) {
+      for (const r of rawEmpRows) {
+        if (r && typeof r === 'object') {
+          const rec = r as Record<string, unknown>;
+          const pos = String(rec['Должность'] ?? rec['position'] ?? '');
+          const fio = String(rec['ФИО'] ?? rec['Наименование'] ?? rec['fullName'] ?? rec['name'] ?? '').trim();
+          if (/главн\p{L}*\s+бухгалтер/iu.test(pos) && fio && !isRolePlaceholderNotFio(fio)) {
+            return normalizeRussianFioToNominative1C(fio) || fio;
+          }
+        }
+      }
+      // Also check if Base 0 has a 5th student employee in Сотрудники beyond the 4 standard Q1 staff
+      for (const r of rawEmpRows) {
+        if (r && typeof r === 'object') {
+          const rec = r as Record<string, unknown>;
+          const fio = String(rec['ФИО'] ?? rec['Наименование'] ?? rec['fullName'] ?? rec['name'] ?? '').trim();
+          if (
+            fio &&
+            !isRolePlaceholderNotFio(fio) &&
+            !/валеев|фадеев|баранкин|федоров|фёдоров/iu.test(fio)
+          ) {
+            return normalizeRussianFioToNominative1C(fio) || fio;
+          }
+        }
+      }
+    }
+    for (const emp of snap.employees || []) {
+      const fio = (emp.name || '').trim();
+      const pos = String(emp.extra?.Должность ?? emp.extra?.должность ?? '');
+      if (/главн\p{L}*\s+бухгалтер/iu.test(pos) && fio && !isRolePlaceholderNotFio(fio)) {
+        return normalizeRussianFioToNominative1C(fio) || fio;
+      }
+    }
+    for (const emp of snap.employees || []) {
+      const fio = (emp.name || '').trim();
+      if (
+        fio &&
+        !isRolePlaceholderNotFio(fio) &&
+        !/валеев|фадеев|баранкин|федоров|фёдоров/iu.test(fio)
+      ) {
+        return normalizeRussianFioToNominative1C(fio) || fio;
+      }
+    }
+    return '';
+  };
+
+  const resolvedChiefAccountantFio = resolveChiefAccountantFioFromDb1C(db1C);
+
   const empMap = new Map<string, PackageEmployee1C>();
   const empKeyByPersonNorm = new Map<string, string>();
   const registerEmployee = (params: {
@@ -1336,16 +1434,28 @@ export function build1CTransferPackage(
     propertyDeductionAmount?: number;
     propertyDeductionDate?: string;
   }): string => {
-    const rawName = (params.fullName || '').trim();
+    let rawName = (params.fullName || '').trim();
+    let inferredPos = (params.position || '').trim();
     if (!rawName || /сотрудник\p{L}*\s+организац/iu.test(rawName)) return '';
+    if (isRolePlaceholderNotFio(rawName)) {
+      if (!inferredPos) {
+        inferredPos = extractPositionFromPlaceholder(rawName);
+      }
+      if (/бухгалтер/iu.test(rawName) && resolvedChiefAccountantFio) {
+        rawName = resolvedChiefAccountantFio;
+      } else {
+        return '';
+      }
+    }
     const cleanFio = normalizeRussianFioToNominative1C(rawName) || rawName;
+    if (isRolePlaceholderNotFio(cleanFio)) return '';
     const pNorm = normalizePersonIdentityKey1C(cleanFio);
     if (!pNorm) return '';
     if (empKeyByPersonNorm.has(pNorm)) {
       const existingKey = empKeyByPersonNorm.get(pNorm)!;
       const ex = empMap.get(existingKey)!;
       if (params.salary && params.salary > 0) ex.salary = round2(params.salary);
-      if (params.position && params.position !== 'Сотрудник штата') ex.position = params.position;
+      if (inferredPos && inferredPos !== 'Сотрудник штата') ex.position = inferredPos;
       if (params.costAccount) ex.costAccount = params.costAccount;
       if (typeof params.childCount === 'number' && params.childCount > ex.childCount) {
         ex.childCount = params.childCount;
@@ -1362,7 +1472,8 @@ export function build1CTransferPackage(
     empMap.set(key, {
       key,
       fullName: cleanFio,
-      position: params.position || 'Специалист',
+      fio: cleanFio,
+      position: inferredPos || 'Специалист',
       hireDate: params.hireDate || periodFrom,
       salary: round2(params.salary || 0),
       costAccount: params.costAccount || '26',
@@ -1433,11 +1544,19 @@ export function build1CTransferPackage(
 
   const documents: PackageDocument1C[] = [];
 
+  const sanitizeClean1CComment = (raw: string): string =>
+    (raw || '')
+      .replace(/\[RichthofenID:[^\]]*\]/giu, '')
+      .replace(/https?:\/\/\S+/giu, '')
+      .replace(/\b(?:github(?:\.com)?|richthofen|bp30-v1|bp30-base0-v1)\b/giu, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
   indexedOps.forEach(({ op }, seqIdx) => {
     const { metaType1C, executionStrategy, operationKind1C } = resolveMetaTypeAndStrategy(op);
     const opDate = op.date || periodFrom;
     const quarter = deriveQuarterFromIsoDate(opDate);
-    const richthofenId = `RH-${reportingYear}-${String(seqIdx + 1).padStart(4, '0')}-${shortDeterministicHash(
+    const richthofenId = `DOC-${reportingYear}-${String(seqIdx + 1).padStart(4, '0')}-${shortDeterministicHash(
       `${op.rowKey || op.id}|${opDate}|${op.category}|${op.description.slice(0, 80)}`
     )}`;
 
@@ -1483,12 +1602,44 @@ export function build1CTransferPackage(
           })
         : '';
 
-    const employeeKey = op.employeeName
+    const isHrHireOrTransfer = metaType1C === 'ПриемНаРаботу' || metaType1C === 'КадровыйПеревод';
+    const rawEmpCandidate = (op.employeeName || '').trim();
+    const effectiveEmployeePosition = (
+      op.employeePosition ||
+      extractPositionFromPlaceholder(rawEmpCandidate) ||
+      (isHrHireOrTransfer && /главн\p{L}*\s+бухгалтер/iu.test(op.description || '')
+        ? 'Главный бухгалтер'
+        : '')
+    ).trim();
+
+    let effectiveEmployeeFio = '';
+    if (rawEmpCandidate && !isRolePlaceholderNotFio(rawEmpCandidate)) {
+      effectiveEmployeeFio = normalizeRussianFioToNominative1C(rawEmpCandidate) || rawEmpCandidate;
+    } else if (
+      (isHrHireOrTransfer || /бухгалтер/iu.test(rawEmpCandidate)) &&
+      /бухгалтер/iu.test(`${rawEmpCandidate} ${effectiveEmployeePosition} ${op.description || ''}`) &&
+      resolvedChiefAccountantFio
+    ) {
+      effectiveEmployeeFio = resolvedChiefAccountantFio;
+    }
+
+    let effectiveMonthlySalary = round2(op.monthlySalary || 0);
+    if (isHrHireOrTransfer && effectiveMonthlySalary <= 0) {
+      const mSal = (op.description || '').match(/(?:оклад\p{L}*|зарплат\p{L}*|ставк\p{L}*)[^\d]{0,25}(\d[\d\s\u00A0]{2,10})/iu);
+      if (mSal) {
+        const parsedSal = Number(mSal[1].replace(/[\s\u00A0]/g, ''));
+        if (Number.isFinite(parsedSal) && parsedSal > 0) {
+          effectiveMonthlySalary = round2(parsedSal);
+        }
+      }
+    }
+
+    const employeeKey = effectiveEmployeeFio
       ? registerEmployee({
-          fullName: op.employeeName,
-          position: op.employeePosition,
+          fullName: effectiveEmployeeFio,
+          position: effectiveEmployeePosition || op.employeePosition,
           hireDate: op.employeeHireStartDate || opDate,
-          salary: op.monthlySalary,
+          salary: effectiveMonthlySalary > 0 ? effectiveMonthlySalary : op.monthlySalary,
           costAccount: op.costAccount,
           childCount: op.employeeChildCount,
           isSingleParent: op.employeeIsSingleParent,
@@ -1496,6 +1647,10 @@ export function build1CTransferPackage(
           propertyDeductionDate: op.employeePropertyDeduction ? opDate : '',
         })
       : '';
+
+    if (isHrHireOrTransfer && effectiveMonthlySalary <= 0 && employeeKey) {
+      effectiveMonthlySalary = round2(empMap.get(employeeKey)?.salary || 0);
+    }
 
     const primaryEntry = op.entries[0];
     const debitAccount = primaryEntry?.debit || op.costAccount || op.materialAccount || '';
@@ -1576,6 +1731,9 @@ export function build1CTransferPackage(
       contractKey,
       warehouseName: op.warehouseName?.trim() || 'Основной склад',
       employeeKey,
+      ...(effectiveEmployeeFio ? { employeeName: effectiveEmployeeFio } : {}),
+      ...(effectiveEmployeePosition ? { employeePosition: effectiveEmployeePosition } : {}),
+      ...(effectiveMonthlySalary > 0 ? { monthlySalary: effectiveMonthlySalary } : {}),
       amount: round2(op.amount || primaryEntry?.amount || 0),
       vatRate: docVatRate,
       vatAmount: docVatAmount,
@@ -2011,7 +2169,7 @@ export function build1CTransferPackage(
       amount: round2(e.amount),
       debitSubconto: e.debitSubconto || '',
       creditSubconto: e.creditSubconto || '',
-      description: e.description || op.description || '',
+      description: sanitizeClean1CComment(e.description || op.description || ''),
       nonDeductibleForProfitTax: Boolean(e.nonDeductibleForProfitTax),
     }));
 
@@ -2019,7 +2177,7 @@ export function build1CTransferPackage(
       richthofenId,
       date: opDate,
       docNumber: op.docNumber || String(seqIdx + 1),
-      comment: (op.description || '').trim(),
+      comment: sanitizeClean1CComment(op.description || ''),
       quarter,
       metaType1C,
       executionStrategy,

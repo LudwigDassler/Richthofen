@@ -111,6 +111,13 @@ export function parseBase0Json(
       (bankNested ? pickString(bankNested, ['КоррСчет', 'corrAccount']) : '') ||
       DEFAULT_SBERBANK_CORR;
 
+    const chiefAccountant = pickString(orgSrc, [
+      'ГлавныйБухгалтер',
+      'chiefAccountant',
+      'Бухгалтер',
+      'ФИОГлавногоБухгалтера',
+    ]);
+
     normalizedRoot['Организация'] = {
       ...orgSrc,
       Наименование: pickString(orgSrc, ['Наименование', 'name', 'ПолноеНаименование', 'fullName']),
@@ -121,6 +128,7 @@ export function parseBase0Json(
       Банк: bankName,
       РасчетныйСчет: accountNumber,
       КоррСчет: corrAccount,
+      ...(chiefAccountant ? { ГлавныйБухгалтер: chiefAccountant } : {}),
     };
 
     if (accountNumber && !normalizedRoot['БанковскиеСчетаОрганизаций']) {
@@ -159,7 +167,7 @@ export function parseBase0Json(
   ];
   for (const [src, dst] of aliasPairs) {
     const candidate = mergedDirs[src] ?? payload[src];
-    if (Array.isArray(candidate) && !mergedDirs[dst]) {
+    if (Array.isArray(candidate) && (!mergedDirs[dst] || src === dst)) {
       mergedDirs[dst] = candidate.map((item) => {
         if (typeof item === 'string') {
           return { Наименование: item };
@@ -183,6 +191,37 @@ export function parseBase0Json(
             mapped['СрокПолезногоИспользования'] === undefined
           ) {
             mapped['СрокПолезногоИспользования'] = item['usefulLifeMonths'];
+          }
+          if (dst === 'РасходыБудущихПериодов') {
+            const rpbStart = normalizeDateISO(
+              pickString(item, [
+                'ДатаНачалаСписания',
+                'ДатаНачала',
+                'НачалоСписания',
+                'startDate',
+              ])
+            );
+            const rpbEnd = normalizeDateISO(
+              pickString(item, [
+                'ДатаОкончанияСписания',
+                'ДатаОкончания',
+                'ОкончаниеСписания',
+                'endDate',
+              ])
+            );
+            const rpbSum = parseRussianNumber(
+              item['Сумма'] ?? item['ПервоначальнаяСумма'] ?? item['totalAmount'] ?? item['amount'] ?? 0
+            );
+            const rpbMethod = pickString(item, [
+              'СпособСписания',
+              'ПорядокСписания',
+              'СпособПризнанияРасходов',
+              'writeOffMethod',
+            ]);
+            if (rpbStart) mapped['ДатаНачалаСписания'] = rpbStart;
+            if (rpbEnd) mapped['ДатаОкончанияСписания'] = rpbEnd;
+            if (rpbSum > 0 && !mapped['Сумма']) mapped['Сумма'] = rpbSum;
+            if (rpbMethod && !mapped['СпособСписания']) mapped['СпособСписания'] = rpbMethod;
           }
           return mapped;
         }

@@ -935,6 +935,7 @@ export interface VirtualDeferredExpense1C {
   writeOffMethod?: 'calendar_days' | 'monthly';
   startDate?: string;
   endDate?: string;
+  base0EndYm?: string;
   totalCalendarDays?: number;
   writeOffAccount: '20.01' | '26' | '44.01';
   startMonth: string; // YYYY-MM
@@ -964,6 +965,13 @@ export interface Virtual1CStateSnapshot {
   payroll?: VirtualPayrollYtdState1C;
   fixedAssets: VirtualFixedAsset1C[];
   deferredExpenses?: VirtualDeferredExpense1C[];
+  base0RpbDirectory?: Array<{
+    name: string;
+    totalAmount?: number;
+    startDate?: string;
+    endDate?: string;
+    writeOffMethod?: string;
+  }>;
   writsOfExecution: VirtualWritOfExecution1C[];
   financialInvestments: VirtualFinancialInvestment1C[];
   openSettlements: VirtualOpenSettlement1C[];

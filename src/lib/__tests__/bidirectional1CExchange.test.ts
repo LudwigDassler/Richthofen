@@ -337,8 +337,14 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
   const movWriteIdx = opBuhBody.indexOf('НаборДвижений.Записать()');
   assert.ok(docWriteIdx > 0 && movWriteIdx > docWriteIdx, 'ДокОп.Записать(Запись) must execute before НаборДвижений.Записать()');
 
-  // (e) Strict duplicate check by non-empty [RichthofenID:<id>] and wide horizontal form groups
-  assert.match(bsl, /ИскомаяПодстрокаТега\s*=\s*"\[RichthofenID:"\s*\+\s*ЧистыйИД\s*\+\s*"\]"/u);
+  // (e) Zero service tags / repository mentions + natural business-key duplicate check + wide horizontal form groups
+  assert.equal(
+    /richthofen|github|http|bp30|cashin|АвтоОплата51|\[Налог:/iu.test(bsl),
+    false,
+    'Generated BSL must contain ZERO mentions of Richthofen, GitHub, URLs, bp30-v1, -CASHIN, or service tags'
+  );
+  assert.match(bsl, /Функция\s+НайтиСтатусДубляПоБизнесКлючу\(/u);
+  assert.match(bsl, /Функция\s+НайтиСтатусДубляОперацииБух\(/u);
   assert.match(bsl, /УстановитьЕслиЕсть\(ГруппаНастроек,\s*"РастягиватьПоГоризонтали",\s*Истина\)/u);
   assert.match(bsl, /УстановитьЕслиЕсть\(ГруппаПериодаЗагрузки,\s*"РастягиватьПоГоризонтали",\s*Истина\)/u);
   assert.match(bsl, /УстановитьЕслиЕсть\(ЭтаФорма,\s*"Ширина",\s*115\)/u);
@@ -384,8 +390,8 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
   assert.match(fnPdrBody, /Справочники\.ПрочиеДоходыИРасходы\.СоздатьЭлемент\(\)/u);
   assert.match(fnPdrBody, /УстановитьЕслиЕсть\(НовыйПДР,\s*"ПринимаетсяКНалоговомуУчету",\s*Истина\)/u);
 
-  // (d) Smart duplicate & unposted draft handling: checks Док.Проведен, skips posted, reopens unposted draft via ПолучитьОбъект() + ОчиститьТабличныеЧастиДокумента
-  assert.match(bsl, /Функция\s+НайтиСтатусДубляПоТегуRichthofen\(/u);
+  // (d) Smart duplicate & unposted draft handling: checks Док.Проведен by natural business key, skips posted, reopens unposted draft via ПолучитьОбъект() + ОчиститьТабличныеЧастиДокумента
+  assert.match(bsl, /Функция\s+НайтиСтатусДубляПоБизнесКлючу\(/u);
   assert.match(bsl, /Док\.Проведен\s+КАК\s+Проведен/u);
   assert.match(bsl, /Процедура\s+ОчиститьТабличныеЧастиДокумента\(/u);
   assert.match(bsl, /ЧерновикСсылка\.ПолучитьОбъект\(\)/u);
@@ -422,12 +428,14 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
   assert.match(bsl, /Док\.Метаданные\(\)\.Реквизиты\.ВидОперации\.Тип\.Типы\(\)\[0\]/u);
   assert.match(bsl, /Метаданные\.НайтиПоТипу\(ТипВО\)/u);
   assert.match(bsl, /Перечисления\[МДПер\.Имя\]/u);
+  assert.match(bsl, /Функция\s+НайтиНативныйБанковскийСчетВладельца\(Организация\)/u);
   assert.match(bsl, /Функция\s+ПолучитьБанковскийСчетОрганизации\(Организация\)/u);
+  assert.match(bsl, /Процедура\s+ЗаполнитьБанковскиеСчетаШапкиПоМетаданным\(Док,\s*БанковскийСчетСсылка\)/u);
   assert.match(bsl, /Организация\.ОсновнойБанковскийСчет/u);
-  assert.match(bsl, /Справочник\.БанковскиеСчета\s+ГДЕ\s+Владелец\s*=\s*&Организация/u);
-  assert.match(bsl, /ВЫБРАТЬ\s+ПЕРВЫЕ\s+1\s+СчетОрганизации\s+ИЗ\s+Документ\.СписаниеСРасчетногоСчета/u);
-  assert.match(bsl, /УстановитьЕслиЕсть\(ДокОбъект,\s*"СчетОрганизации",\s*БанкСчетОргС\)/u);
-  assert.match(bsl, /УстановитьЕслиЕсть\(ДокОбъект,\s*"СчетОрганизации",\s*БанкСчетОргП\)/u);
+  assert.match(bsl, /ИЗ\s+Справочник\.БанковскиеСчета\s+КАК\s+БС\s+ГДЕ\s+БС\.Владелец\s*=\s*&Организация/u);
+  assert.match(bsl, /ВЫБРАТЬ\s+ПЕРВЫЕ\s+5\s+Док\.СчетОрганизации\s+КАК\s+СчетОрганизации[^"]*ИЗ\s+Документ\.СписаниеСРасчетногоСчета/u);
+  assert.match(bsl, /ЗаполнитьБанковскиеСчетаШапкиПоМетаданным\(ДокОбъект,\s*БанкСчетОргС\)/u);
+  assert.match(bsl, /ЗаполнитьБанковскиеСчетаШапкиПоМетаданным\(ДокОбъект,\s*БанкСчетОргП\)/u);
   assert.match(bsl, /Функция\s+НайтиСчетСДефолтом\(/u);
   assert.match(bsl, /Функция\s+ИзвлечьКоррСчетБанкаКассыИзJSON\(/u);
   assert.match(bsl, /Процедура\s+ЗаполнитьСубконтоШапкиБанкаКассы\(/u);
@@ -435,10 +443,11 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
   assert.match(bsl, /УстановитьКоррСчетБанкаКассыПоМетаданным\(ДокОбъект,\s*СчПрочС,\s*Ложь/u);
   assert.match(bsl, /Функция\s+ЗаполнитьРасшифровкуПлатежаКонтрагента\(/u);
   assert.match(bsl, /Функция\s+НайтиПогашениеЗадолженностиАвтоматически\(/u);
+  assert.match(bsl, /Процедура\s+ПрименитьПогашениеЗадолженностиАвтоматически\(/u);
   assert.match(bsl, /УстановитьЕслиЕсть\(Стр,\s*"ДоговорКонтрагента",\s*ДоговорСсылка\)/u);
   assert.match(bsl, /УстановитьЕслиЕсть\(Стр,\s*"СуммаПлатежа",\s*СуммаОперации\)/u);
   assert.match(bsl, /УстановитьЕслиЕсть\(Стр,\s*"СуммаВзаиморасчетов",\s*СуммаОперации\)/u);
-  assert.match(bsl, /УстановитьЕслиЕсть\(Стр,\s*"ПогашениеЗадолженности",\s*ЗначПогашАвто\)/u);
+  assert.match(bsl, /ПрименитьПогашениеЗадолженностиАвтоматически\(Док\)/u);
   assert.match(bsl, /ИмяСчРасчТЧ\s*=\s*НайтиИмяРеквизитаСчетаПоМетаданным\(ТЧРасшМД\.Реквизиты,\s*КлСчРасч/u);
   assert.match(bsl, /ИмяСчАвТЧ\s*=\s*НайтиИмяРеквизитаСчетаПоМетаданным\(ТЧРасшМД\.Реквизиты,\s*КлСчАванс\)/u);
   assert.match(bsl, /Стр\[ИмяСчРасчТЧ\]\s*=\s*СчетРасчетовСсылка/u);
@@ -475,6 +484,7 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
       'РеквизитФормы',
       'ИзменитьРеквизиты',
       'Тип',
+      'ТипЗнч',
       'ДиалогВыбораФайла',
       'ОписаниеОповещения',
       'ПустаяСтрока',
@@ -495,9 +505,15 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
       'Булево',
       'Дата',
       'Год',
+      'Месяц',
+      'День',
+      'ДобавитьМесяц',
       'НачалоДня',
       'КонецДня',
       'НачалоМесяца',
+      'КонецМесяца',
+      'НачалоГода',
+      'КонецГода',
       'СтрДлина',
       'СтрЗаменить',
       'Лев',
