@@ -503,19 +503,45 @@ test('Part B BSL Generator & Package: metadata ВидОперации before Р�
   );
 
   const cashSlice = bsl.slice(pkoSectionIdx, aoSectionIdx);
+  assert.equal(
+    cashSlice.includes('"СчетОрганизации"'),
+    false,
+    'Cash orders (ПКО/РКО) must NOT touch СчетОрганизации'
+  );
+  assert.ok(
+    cashSlice.includes('ЗаполнитьКассуОрганизацииЕслиЕсть(ДокОбъект, ОргСсылка)'),
+    'Cash orders must populate Касса via ЗаполнитьКассуОрганизацииЕслиЕсть'
+  );
   const pkoSetVO = cashSlice.indexOf('УстановитьВидОперацииДокумента(ДокОбъект, РежимВидПКО)');
-  const pkoSetAcc = cashSlice.indexOf('УстановитьЕслиЕсть(ДокОбъект, "СчетУчета", НайтиСчет("50.01"))');
+  const pkoSetAcc = cashSlice.indexOf('УстановитьСчетУчетаДенежныхСредствПоМетаданным(ДокОбъект, НайтиСчет("50.01"))');
   const pkoClearRassh = cashSlice.indexOf('ДокОбъект.РасшифровкаПлатежа.Очистить()', pkoSetVO);
   assert.ok(
     pkoSetVO > 0 && pkoSetAcc > pkoSetVO && pkoClearRassh > pkoSetAcc,
-    'ПКО must set ВидОперации BEFORE СчетУчета and BEFORE РасшифровкаПлатежа'
+    'ПКО must set ВидОперации BEFORE metadata СчетУчета (50.01) and BEFORE РасшифровкаПлатежа'
   );
 
   const rkoSetVO = cashSlice.indexOf('УстановитьВидОперацииДокумента(ДокОбъект, РежимВидРКО)');
-  const rkoSetAcc = cashSlice.indexOf('УстановитьЕслиЕсть(ДокОбъект, "СчетУчета", НайтиСчет("50.01"))', rkoSetVO);
-  const rkoClearRassh = cashSlice.indexOf('ДокОбъект.РасшифровкаПлатежа.Очистить()', rkoSetVO);
-  assert.ok(
-    rkoSetVO > 0 && rkoSetAcc > rkoSetVO && rkoClearRassh > rkoSetAcc,
-    'РКО must set ВидОперации BEFORE СчетУчета and BEFORE РасшифровкаПлатежа'
+  const rkoSetAcc = cashSlice.indexOf(
+    'УстановитьСчетУчетаДенежныхСредствПоМетаданным(ДокОбъект, НайтиСчет("50.01"))',
+    rkoSetVO
   );
+  const rkoSetCorr70 = cashSlice.indexOf(
+    'УстановитьКоррСчетБанкаКассыПоМетаданным(ДокОбъект, СчЗПКасса, Ложь, Истина',
+    rkoSetVO
+  );
+  assert.ok(
+    rkoSetVO > 0 && rkoSetAcc > rkoSetVO && rkoSetCorr70 > rkoSetAcc,
+    'РКО must set ВидОперации BEFORE metadata СчетУчета (50.01) and BEFORE ПрочийРасход 70 correspondent account'
+  );
+
+  // Verify ОперацияБух duplicate detection queries РегистрБухгалтерии.Хозрасчетный (Период МЕЖДУ &НачДня И &КонДня, Активность = ИСТИНА, ±1 ruble) and never touches ОперацияБух.Проведен
+  const opDupStart = bsl.indexOf('Функция НайтиРучнойДубльОперацииПоПроводкам(');
+  assert.ok(opDupStart > 0, 'Missing НайтиРучнойДубльОперацииПоПроводкам');
+  const opDupBody = bsl.slice(opDupStart, bsl.indexOf('КонецФункции', opDupStart));
+  assert.match(opDupBody, /РегистрБухгалтерии\.Хозрасчетный/u);
+  assert.match(opDupBody, /Движ\.Период\s+МЕЖДУ\s+&НачДня\s+И\s+&КонДня/u);
+  assert.match(opDupBody, /Движ\.Организация\s*=\s*&Организация/u);
+  assert.match(opDupBody, /Движ\.Активность\s*=\s*ИСТИНА/u);
+  assert.match(opDupBody, /СумБД\s*<\s*\(СумЖ\s*-\s*1\)\s+Или\s+СумБД\s*>\s*\(СумЖ\s*\+\s*1\)/u);
+  assert.equal(opDupBody.includes('.Проведен'), false, 'ОперацияБух duplicate check must not access .Проведен');
 });
