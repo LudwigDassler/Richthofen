@@ -1042,7 +1042,7 @@ export function createInitialVirtual1CState(
   }
   for (const doc of db1C.documents) {
     if (!doc.posted || !/исполнительный\s*лист|исполнительныйлист/iu.test(doc.documentKind)) continue;
-    const commentText = `${doc.comment || ''} ${doc.counterpartyName || ''}`;
+    const commentText = `${doc.comment || ''} ${doc.counterparty || ''}`;
     const matchedEmp = state.employees.find((e) => {
       const surname = e.fullName.toLowerCase().replace(/ё/g, 'е').split(/\s+/)[0];
       return Boolean(surname && surname.length >= 3 && commentText.toLowerCase().replace(/ё/g, 'е').includes(surname));
@@ -1056,7 +1056,7 @@ export function createInitialVirtual1CState(
       state.writsOfExecution.push({
         key: wKey,
         debtorEmployeeName: debtor,
-        recipientName: doc.counterpartyName || 'Получатель по исполнительному листу',
+        recipientName: doc.counterparty || 'Получатель по исполнительному листу',
         recipientInn: doc.counterpartyInn || '',
         ratePercent: fixedAmt ? 0 : 25,
         shareLabel: fixedAmt ? `фикс. ${fixedAmt} ₽` : '25%',

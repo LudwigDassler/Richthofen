@@ -7,6 +7,7 @@ import { parseBase0Json } from '../import1c/parseBase0Json';
 import { calculateOsvReport } from '../engine/osvCalculator';
 import { autoFixAllBy1CDb } from '../engine/auditAndAutofix';
 import {
+  bindAndGenerateOperation,
   rebindOperationsAgainst1CDb,
   recalculateOperationsChronologically,
 } from '../engine/postingEngine';
@@ -216,75 +217,62 @@ test('April 2026 reconciliation (Part A): 60.02 advance transit, 41.01 resale go
 test('Chronological partial debt + advance split on 60.01/60.02 and 62.01/62.02 & Base 0 April seeding', () => {
   // 1) Partial supplier debt 100,000 + payment 150,000 -> 100,000 (60.01) + 50,000 (60.02)
   const ops: QueuedOperation[] = [
-    {
-      id: 'op-ptu-1',
-      date: '2026-04-05',
-      description: 'Поступили материалы от ООО «Альфа» на сумму 100 000 руб. без НДС',
-      rawAmountText: '100000',
-      amount: 100000,
-      amountMode: 'explicit',
-      vatRate: 0,
-      vatAmount: 0,
-      vatRule: 'none',
-      category: 'purchase_materials',
-      counterpartyName: 'ООО «Альфа»',
-      nomenclatureName: 'Сырье А',
-      entries: [],
-      auditIssues: [],
-      sourceSheet: 'Test',
-      includeInProcessing: true,
-    },
-    {
-      id: 'op-pay-1',
-      date: '2026-04-06',
-      description: 'Перечислено с расчетного счета поставщику ООО «Альфа» 150 000 руб. без НДС',
-      rawAmountText: '150000',
-      amount: 150000,
-      amountMode: 'explicit',
-      vatRate: 0,
-      vatAmount: 0,
-      vatRule: 'none',
-      category: 'bank_out',
-      counterpartyName: 'ООО «Альфа»',
-      entries: [],
-      auditIssues: [],
-      sourceSheet: 'Test',
-      includeInProcessing: true,
-    },
-    {
-      id: 'op-sale-1',
-      date: '2026-04-10',
-      description: 'Оказаны услуги покупателю ООО «Бета» на сумму 120 000 руб., в т.ч. НДС 20%',
-      rawAmountText: '120000',
-      amount: 120000,
-      amountMode: 'explicit',
-      vatRate: 20,
-      vatAmount: 20000,
-      vatRule: 'included',
-      category: 'sale_services',
-      counterpartyName: 'ООО «Бета»',
-      entries: [],
-      auditIssues: [],
-      sourceSheet: 'Test',
-      includeInProcessing: true,
-    },
-    {
-      id: 'op-rcpt-1',
-      date: '2026-04-11',
-      description: 'Поступила оплата от покупателя ООО «Бета» на расчетный счет 240 000 руб., в т.ч. НДС 20%',
-      rawAmountText: '240000',
-      amount: 240000,
-      amountMode: 'explicit',
-      vatRate: 20,
-      vatAmount: 40000,
-      vatRule: 'included',
-      category: 'bank_in',
-      counterpartyName: 'ООО «Бета»',
-      entries: [],
-      auditIssues: [],
-      sourceSheet: 'Test',
-      includeInProcessing: true,
-    },
+    bindAndGenerateOperation(
+      {
+        sourceFileName: 'Test',
+        date: '2026-04-05',
+        description: 'Поступили материалы от ООО «Альфа» на сумму 100 000 руб. без НДС',
+        amount: 100000,
+        vatRate: 0,
+        vatAmount: 0,
+        vatRule: 'none',
+        counterpartyName: 'ООО «Альфа»',
+      },
+      null,
+      'op-ptu-1'
+    ),
+    bindAndGenerateOperation(
+      {
+        sourceFileName: 'Test',
+        date: '2026-04-06',
+        description: 'Перечислено с расчетного счета поставщику ООО «Альфа» 150 000 руб. без НДС',
+        amount: 150000,
+        vatRate: 0,
+        vatAmount: 0,
+        vatRule: 'none',
+        counterpartyName: 'ООО «Альфа»',
+      },
+      null,
+      'op-pay-1'
+    ),
+    bindAndGenerateOperation(
+      {
+        sourceFileName: 'Test',
+        date: '2026-04-10',
+        description: 'Оказаны услуги покупателю ООО «Бета» на сумму 120 000 руб., в т.ч. НДС 20%',
+        amount: 120000,
+        vatRate: 20,
+        vatAmount: 20000,
+        vatRule: 'included',
+        counterpartyName: 'ООО «Бета»',
+      },
+      null,
+      'op-sale-1'
+    ),
+    bindAndGenerateOperation(
+      {
+        sourceFileName: 'Test',
+        date: '2026-04-11',
+        description: 'Поступила оплата от покупателя ООО «Бета» на расчетный счет 240 000 руб., в т.ч. НДС 20%',
+        amount: 240000,
+        vatRate: 20,
+        vatAmount: 40000,
+        vatRule: 'included',
+        counterpartyName: 'ООО «Бета»',
+      },
+      null,
+      'op-rcpt-1'
+    ),
   ];
 
   const recalculated = recalculateOperationsChronologically(ops, null, {
@@ -356,8 +344,9 @@ test('Chronological partial debt + advance split on 60.01/60.02 and 62.01/62.02 
   });
   const db1C = parseBase0Json(base0Json, 'base0_april.json');
   const vState = createInitialVirtual1CState(db1C);
-  assert.equal(vState.deferredExpenses.length, 1);
-  assert.equal(vState.deferredExpenses[0].monthlyAmount?.toFixed(2), '31250.00');
+  const deferredList = vState.deferredExpenses ?? [];
+  assert.equal(deferredList.length, 1);
+  assert.equal(deferredList[0].monthlyAmount?.toFixed(2), '31250.00');
   assert.equal(vState.writsOfExecution.length, 1);
   assert.equal(vState.writsOfExecution[0].fixedAmount, 20000);
   assert.equal(vState.writsOfExecution[0].recipientName, 'Валеева О.Г.');
@@ -457,27 +446,56 @@ test('Part B BSL Generator & Package: metadata ВидОперации before Р�
   );
   assert.equal(cleanBsl.includes('.Выбрать('), false, 'Must not use .Выбрать( in BSL queries');
 
-  // Verify all Part B mechanisms in BSL
+  // Verify all Part B + anti-hang mechanisms in BSL
+  assert.equal(countBslKeyword(cleanBsl, 'Пока'), 0, 'Must contain zero Пока loops in BSL');
   assert.ok(bsl.includes('ПропускатьСуществующиеРучныеДокументы'), 'Missing form flag ПропускатьСуществующиеРучныеДокументы');
-  assert.ok(bsl.includes('Функция УстановитьВидОперацииПоМетаданным('), 'Missing metadata ВидОперации helper');
+  assert.ok(bsl.includes('Функция УстановитьВидОперацииНапрямую('), 'Missing direct ВидОперации helper');
+  assert.equal(
+    bsl.includes('ЗначенияПеречисления'),
+    false,
+    'ВидОперации must NOT iterate metadata ЗначенияПеречисления collections'
+  );
   assert.ok(bsl.includes('Процедура УстановитьАвтоЗачетАвансовДокумента('), 'Missing СпособЗачетаАвансов helper');
   assert.ok(bsl.includes('Функция НайтиСуществующийРучнойДубльДокумента('), 'Missing manual duplicate lookup helper');
+  assert.ok(
+    bsl.includes('ВЫБРАТЬ ПЕРВЫЕ 1 Док.Ссылка КАК Ссылка ИЗ Документ.'),
+    'Manual duplicate check must use targeted ВЫБРАТЬ ПЕРВЫЕ 1 Док.Ссылка query'
+  );
   assert.ok(bsl.includes('Функция НормализоватьИмяКонтрагентаДляПоиска('), 'Missing counterparty normalizer helper');
   assert.ok(bsl.includes('ОсновнойДоговорКонтрагента'), 'Missing contract reuse check');
-  assert.ok(bsl.includes('СуммаУжеУплаченоСегодня'), 'Missing same-day taxes_all guard');
+  assert.ok(
+    bsl.includes('ВЫБРАТЬ ПЕРВЫЕ 1 Движ.Регистратор КАК Регистратор ИЗ РегистрБухгалтерии.Хозрасчетный'),
+    'Same-day taxes_all guard must use single ВЫБРАТЬ ПЕРВЫЕ 1 Движ.Регистратор query'
+  );
   assert.ok(bsl.includes('alimonyFixedAmount'), 'Missing ИсполнительныйЛист fixed amount mapping');
 
-  // Ensure in cash receipt/disbursement branches УстановитьВидОперацииПоМетаданным comes BEFORE РасшифровкаПлатежа.Очистить()
+  // Verify period cutoff executes strictly BEFORE Richthofen duplicate check, catalog preparation, and manual duplicate check
+  const loadProcStart = bsl.indexOf('Процедура ЗагрузитьПакетНаСервере(');
+  const loadLoopStart = bsl.indexOf('Для Каждого ДокЭл Из МассивДокументов Цикл', loadProcStart);
+  const loadLoopSlice = bsl.slice(loadLoopStart);
+  const periodCutoffIdx = loadLoopSlice.indexOf('ДатаДокПроверка > ДатаОкончанияЗагрузки');
+  const tagDupIdx = loadLoopSlice.indexOf('НайтиСтатусДубляПоТегуRichthofen(ЦелевойВидДляПроверки');
+  const prepCatIdx = loadLoopSlice.indexOf('ПодготовитьСправочникиДляДокументаПакета(');
+  const manualDupIdx = loadLoopSlice.indexOf('НайтиСуществующийРучнойДубльДокумента(');
+  assert.ok(
+    periodCutoffIdx > 0 &&
+      tagDupIdx > periodCutoffIdx &&
+      prepCatIdx > tagDupIdx &&
+      manualDupIdx > prepCatIdx,
+    'ПериодС..ПериодПо cutoff must precede tag duplicate check, catalog lookup/creation, and manual duplicate check'
+  );
+
+  // Ensure in cash receipt/disbursement branches УстановитьВидОперацииНапрямую comes BEFORE РасшифровкаПлатежа.Очистить()
   const pkoSectionIdx = bsl.indexOf('ВидМета = "ПриходныйКассовыйОрдер"');
   assert.ok(pkoSectionIdx > 0);
   const cashSlice = bsl.slice(pkoSectionIdx, bsl.indexOf('ВидМета = "АвансовыйОтчет"'));
-  const firstProchPrihod = cashSlice.indexOf('УстановитьВидОперацииПоМетаданным(ДокОбъект, "ПрочийПриход")');
+  const firstProchPrihod = cashSlice.indexOf('УстановитьВидОперацииНапрямую(ДокОбъект, ВидМета, "ПрочийПриход")');
   const afterProchPrihodClear = cashSlice.indexOf('ДокОбъект.РасшифровкаПлатежа.Очистить()', firstProchPrihod);
   assert.ok(
     firstProchPrihod > 0 && afterProchPrihodClear > firstProchPrihod,
     'ПрочийПриход ВидОперации must be set BEFORE РасшифровкаПлатежа.Очистить()'
   );
-  const firstProchRashod = cashSlice.indexOf('УстановитьВидОперацииПоМетаданным(ДокОбъект, "ПрочийРасход")');
+  const firstProchRashod = cashSlice.indexOf('УстановитьВидОперацииНапрямую(ДокОбъект, ВидМета, "ПрочийРасход")');
   const afterProchRashodClear = cashSlice.indexOf('ДокОбъект.РасшифровкаПлатежа.Очистить()', firstProchRashod);
   assert.ok(
     firstProchRashod > 0 && afterProchRashodClear > firstProchRashod,

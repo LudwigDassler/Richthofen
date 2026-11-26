@@ -460,6 +460,7 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
       'КонецДня',
       'НачалоМесяца',
       'СтрДлина',
+      'СтрЗаменить',
       'Лев',
       'Сред',
       'НРег',
@@ -495,6 +496,17 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
       `Undefined BSL procedure/function call "${fnName}(...)" would fail Ctrl+F7 in 1C Configurator!`
     );
   }
+
+  // (f) Anti-hang & anti-infinite-loop guards: zero `Пока` loops anywhere in clean BSL, single-pass cache preloads, and period cutoff BEFORE DB duplicate/catalog lookups
+  assert.equal(
+    countBslKeyword(clean, 'Пока'),
+    0,
+    'Generated BSL must contain ZERO Пока loops so string normalization or query iteration can never hang 1C at 100% CPU'
+  );
+  assert.match(bsl, /Процедура\s+ЗагрузитьКэшКонтрагентовБазы1С\(/u);
+  assert.match(bsl, /Процедура\s+ЗагрузитьКэшДоговоровБазы1С\(/u);
+  assert.match(bsl, /Для\s+СчПроб\s*=\s*1\s+По\s+10\s+Цикл/u);
+  assert.match(bsl, /СчетчикДокументовЦикла\s*>\s*5000/u);
 });
 
 test('parseBase0Json: imports Base 0 snapshot, rebinds existing catalogs to already_exists / matched_1c, and carries opening balances into OSV', async () => {
