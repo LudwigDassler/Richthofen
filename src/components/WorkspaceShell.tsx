@@ -1,17 +1,40 @@
 'use client';
 
 import React, { useEffect } from 'react';
+import dynamic from 'next/dynamic';
 import { AlertCircle, CheckCircle2, Info, X } from 'lucide-react';
 import { useAccountant } from '@/context/AccountantContext';
 import { Header } from '@/components/Header';
-import { Modal1CDocument } from '@/components/modals1c';
-import { Tab1DatabaseOsv } from '@/components/Tab1DatabaseOsv';
-import { Tab2ImportPostings } from '@/components/Tab2ImportPostings';
-import { Tab3AuditAutofix } from '@/components/Tab3AuditAutofix';
-import { Tab4Export1C } from '@/components/Tab4Export1C';
+
+const TabLoadingFallback = () => (
+  <div className="py-16 flex items-center justify-center text-sm text-slate-500">
+    Загрузка раздела...
+  </div>
+);
+
+const Tab1DatabaseOsv = dynamic(
+  () => import('@/components/Tab1DatabaseOsv').then((m) => m.Tab1DatabaseOsv),
+  { ssr: false, loading: TabLoadingFallback }
+);
+const Tab2ImportPostings = dynamic(
+  () => import('@/components/Tab2ImportPostings').then((m) => m.Tab2ImportPostings),
+  { ssr: false, loading: TabLoadingFallback }
+);
+const Tab3AuditAutofix = dynamic(
+  () => import('@/components/Tab3AuditAutofix').then((m) => m.Tab3AuditAutofix),
+  { ssr: false, loading: TabLoadingFallback }
+);
+const Tab4Export1C = dynamic(
+  () => import('@/components/Tab4Export1C').then((m) => m.Tab4Export1C),
+  { ssr: false, loading: TabLoadingFallback }
+);
+const Modal1CDocument = dynamic(
+  () => import('@/components/modals1c').then((m) => m.Modal1CDocument),
+  { ssr: false }
+);
 
 export function WorkspaceShell() {
-  const { hydrated, activeTab, notice, dismissNotice } = useAccountant();
+  const { hydrated, activeTab, notice, dismissNotice, active1CModalOpId } = useAccountant();
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -71,7 +94,7 @@ export function WorkspaceShell() {
         {activeTab === 'export_1c' && <Tab4Export1C />}
       </main>
 
-      <Modal1CDocument />
+      {active1CModalOpId && <Modal1CDocument />}
     </div>
   );
 }

@@ -544,4 +544,86 @@ test('Part B BSL Generator & Package: metadata ВидОперации before Р�
   assert.match(opDupBody, /Движ\.Активность\s*=\s*ИСТИНА/u);
   assert.match(opDupBody, /СумБД\s*<\s*\(СумЖ\s*-\s*1\)\s+Или\s+СумБД\s*>\s*\(СумЖ\s*\+\s*1\)/u);
   assert.equal(opDupBody.includes('.Проведен'), false, 'ОперацияБух duplicate check must not access .Проведен');
+
+  // 1) Verify payroll RKO checks live 50.01 debit balance and auto-posts paired ПКО (ПолучениеНаличныхВБанке, Дт 50.01 Кт 51) at -1 min with -CASHIN tag
+  const cashReplStart = bsl.indexOf('Функция ОбеспечитьНаличныеВКассеПодВыплатуЗП(');
+  assert.ok(cashReplStart > 0, 'Missing ОбеспечитьНаличныеВКассеПодВыплатуЗП');
+  const cashReplBody = bsl.slice(cashReplStart, bsl.indexOf('КонецФункции', cashReplStart));
+  assert.match(
+    cashReplBody,
+    /РегистрБухгалтерии\.Хозрасчетный\.Остатки\(&ГраницаКассы,\s*Счет\s*=\s*&Счет5001,\s*,\s*Организация\s*=\s*&Организация\)/u
+  );
+  assert.ok(cashReplBody.includes('"ПолучениеНаличныхВБанке"'), 'Cash replenishment PKO must search ПолучениеНаличныхВБанке');
+  assert.ok(cashReplBody.includes('"Получение наличных в банке"'), 'Cash replenishment PKO must search synonym Получение наличных в банке');
+  assert.ok(cashReplBody.includes('НайтиВидОперацииПоМетаданным(ПКО, КандВОПКО)'), 'Cash replenishment PKO must use НайтиВидОперацииПоМетаданным');
+  assert.ok(cashReplBody.includes('ДатаПКО = ДатаРКО - 60;'), 'Cash replenishment PKO must be created 1 minute earlier than RKO');
+  assert.ok(cashReplBody.includes('БазИдКэш + "-CASHIN"'), 'Cash replenishment PKO must carry unique -CASHIN RichthofenID tag');
+  assert.ok(cashReplBody.includes('УстановитьСчетУчетаДенежныхСредствПоМетаданным(ПКО, Счет5001)'), 'Cash replenishment PKO must set 50.01');
+  assert.ok(cashReplBody.includes('УстановитьЕслиЕсть(ПКО, "СчетКредита", Счет51)'), 'Cash replenishment PKO must set СчетКредита = 51');
+  assert.ok(cashReplBody.includes('УстановитьЕслиЕсть(ПКО, "СчетОрганизации", ОсновнойБанковскийСчет)'), 'Cash replenishment PKO must set ОсновнойБанковскийСчет');
+  assert.ok(cashReplBody.includes('ЗаполнитьКассуОрганизацииЕслиЕсть(ПКО, ОргСсылка)'), 'Cash replenishment PKO must set Касса');
+  assert.ok(cashReplBody.includes('УстановитьЕслиЕсть(ПКО, "ВалютаДокумента", ВалютаРуб)'), 'Cash replenishment PKO must set ВалютаДокумента');
+  assert.ok(cashReplBody.includes('ПКО.Записать(РежимЗаписиДокумента.Проведение)'), 'Cash replenishment PKO must be posted');
+  assert.ok(
+    bsl.includes('ОбеспечитьНаличныеВКассеПодВыплатуЗП(ОргСсылка, ДокОбъект.Дата, СуммаШапки, ИдРихтгофен'),
+    'СоздатьНативныйДокумент1С must invoke ОбеспечитьНаличныеВКассеПодВыплатуЗП before posting payroll RKO'
+  );
+
+  // 2) Verify live advance/debt balance contract lookup (62.02 for РТУ, 60.02 for ПТУ, 60.01/62.01 for payments) before ОсновнойДоговорКонтрагента fallback
+  const contractByBalStart = bsl.indexOf('Функция НайтиДоговорПоОстаткамНаДату(');
+  assert.ok(contractByBalStart > 0, 'Missing НайтиДоговорПоОстаткамНаДату');
+  const contractByBalBody = bsl.slice(contractByBalStart, bsl.indexOf('КонецФункции', contractByBalStart));
+  assert.match(
+    contractByBalBody,
+    /РегистрБухгалтерии\.Хозрасчетный\.Остатки\(&ДатаДок,\s*Счет\s+В\s*\(&СчетаАвансовИДолга\),\s*,\s*Организация\s*=\s*&Организация\s+И\s+Субконто1\s*=\s*&Контрагент\)/u
+  );
+  assert.ok(contractByBalBody.includes('Ост.Субконто2 КАК Договор'), 'Contract balance query must extract Субконто2 (Договор)');
+
+  const pickContractStart = bsl.indexOf('Функция ПодобратьДоговорПоЖивомуСальдоИлиОсновной(');
+  assert.ok(pickContractStart > 0, 'Missing ПодобратьДоговорПоЖивомуСальдоИлиОсновной');
+  const pickContractBody = bsl.slice(pickContractStart, bsl.indexOf('КонецФункции', pickContractStart));
+  const queryBalCallIdx = pickContractBody.indexOf('НайтиДоговорПоОстаткамНаДату(');
+  const mainContractFallbackIdx = pickContractBody.indexOf('КонтрагентСсылка.ОсновнойДоговорКонтрагента');
+  assert.ok(
+    queryBalCallIdx > 0 && mainContractFallbackIdx > queryBalCallIdx,
+    'ПодобратьДоговорПоЖивомуСальдоИлиОсновной must check Хозрасчетный.Остатки BEFORE falling back to ОсновнойДоговорКонтрагента'
+  );
+  assert.ok(pickContractBody.includes('НайтиСчет("62.02")') && pickContractBody.includes('НайтиСчет("60.02")'));
+  assert.ok(pickContractBody.includes('НайтиСчет("62.01")') && pickContractBody.includes('НайтиСчет("60.01")'));
+
+  // Ensure ПТУ, РТУ, ПоступлениеНаРасчетныйСчет, and СписаниеСРасчетногоСчета all resolve contracts via ПодобратьДоговорПоЖивомуСальдоИлиОсновной
+  assert.ok(
+    bsl.includes('ПодобратьДоговорПоЖивомуСальдоИлиОсновной(КонтрСсылка, ОргСсылка, ДатаДок, ДогСсылка, "СПоставщиком", "ПТУ"'),
+    'ПоступлениеТоваровУслуг must select supplier contract by live 60.02 balance'
+  );
+  assert.ok(
+    bsl.includes('ПодобратьДоговорПоЖивомуСальдоИлиОсновной(КонтрСсылка, ОргСсылка, ДатаДок, ДогСсылка, "СПокупателем", "РТУ"'),
+    'РеализацияТоваровУслуг must select buyer contract by live 62.02 balance'
+  );
+  assert.ok(
+    bsl.includes('ПодобратьДоговорПоЖивомуСальдоИлиОсновной(КонтрСсылка, ОргСсылка, ДатаДок, ДогСсылка, "СПокупателем", "ОплатаОтПокупателя"'),
+    'ПоступлениеНаРасчетныйСчет must select buyer contract by live 62.01/62.02 balance'
+  );
+  assert.ok(
+    bsl.includes('ПодобратьДоговорПоЖивомуСальдоИлиОсновной(КонтрСсылка, ОргСсылка, ДатаДок, ДогСсылка, "СПоставщиком", "ОплатаПоставщику"'),
+    'СписаниеСРасчетногоСчета must select supplier contract by live 60.01/60.02 balance'
+  );
+
+  // 3) Verify 1-pass non-recursive chronological re-posting of ПоступлениеТоваровУслуг & РеализацияТоваровУслуг at the end of ЗагрузитьПакетНаСервере
+  const repostStart = bsl.indexOf('Функция ПерепровестиПоступленияИРеализацииПериода(');
+  assert.ok(repostStart > 0, 'Missing ПерепровестиПоступленияИРеализацииПериода');
+  const repostBody = bsl.slice(bsl.indexOf('\n', repostStart) + 1, bsl.indexOf('КонецФункции', repostStart));
+  assert.ok(repostBody.includes('ИЗ Документ.ПоступлениеТоваровУслуг'), 'Chronological repost must include ПоступлениеТоваровУслуг');
+  assert.ok(repostBody.includes('ИЗ Документ.РеализацияТоваровУслуг'), 'Chronological repost must include РеализацияТоваровУслуг');
+  assert.ok(repostBody.includes('УПОРЯДОЧИТЬ ПО Дата ВОЗР'), 'Chronological repost must sort ascending by Дата');
+  assert.equal(
+    repostBody.includes('ПерепровестиПоступленияИРеализацииПериода('),
+    false,
+    'ПерепровестиПоступленияИРеализацииПериода must be single-pass with zero recursion'
+  );
+  assert.ok(
+    loadLoopSlice.includes('ПерепровестиПоступленияИРеализацииПериода(ОргСсылка, НачПерПерепров, КонПерПерепров'),
+    'ЗагрузитьПакетНаСервере must invoke ПерепровестиПоступленияИРеализацииПериода after main document loop'
+  );
 });
+

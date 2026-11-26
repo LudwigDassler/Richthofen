@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useMemo, useRef, useState } from 'react';
-import * as XLSX from 'xlsx';
 import {
   AlertCircle,
   AlertTriangle,
@@ -307,7 +306,8 @@ export function Tab1DatabaseOsv() {
     });
   }, [selectedAccountDrilldown, selectedOsvRow, osvReport.movementsByAccount]);
 
-  const exportOsvToExcel = () => {
+  const exportOsvToExcel = async () => {
+    const XLSX = await import('xlsx');
     const sourceLabel =
       osvSourceMode === 'combined'
         ? 'База 1С + новые операции'

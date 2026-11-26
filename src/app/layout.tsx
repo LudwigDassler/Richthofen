@@ -1,6 +1,5 @@
 import type { Metadata } from 'next';
 import './globals.css';
-import { AccountantProvider } from '@/context/AccountantContext';
 
 const APP_TITLE = '1С:Бухгалтерский Контур 8.3';
 const APP_DESCRIPTION =
@@ -22,8 +21,11 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="ru" suppressHydrationWarning>
-      <body className="min-h-screen font-sans bg-[#F7F8FA] text-slate-900 dark:bg-slate-950 dark:text-slate-100 antialiased selection:bg-slate-900 selection:text-white dark:selection:bg-amber-500 dark:selection:text-slate-950">
-        <AccountantProvider>{children}</AccountantProvider>
+      <body
+        suppressHydrationWarning
+        className="min-h-screen font-sans bg-[#F7F8FA] text-slate-900 dark:bg-slate-950 dark:text-slate-100 antialiased selection:bg-slate-900 selection:text-white dark:selection:bg-amber-500 dark:selection:text-slate-950"
+      >
+        {children}
       </body>
     </html>
   );
