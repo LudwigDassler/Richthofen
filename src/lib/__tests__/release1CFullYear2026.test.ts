@@ -283,8 +283,8 @@ test('Release 1C:BP 3.0 (Blocks 1–4): Stealth mode, 3 month-closing fixes, Pro
   assert.match(bsl, /ДобавитьМесяц\(НачалоМесяца\(МаксПериодБазы\),\s*1\)/u);
 
   // 2.6 Neutral build stamp ONLY in form log, never in documents
-  assert.match(bsl, /Сборка модуля: bp30-priem-fix-1/u);
-  assert.equal(serializedPkg.includes('bp30-priem-fix-1'), false, 'Package_1C.json must never contain build stamp');
+  assert.match(bsl, /Сборка модуля: bp30-may-fix-2/u);
+  assert.equal(serializedPkg.includes('bp30-may-fix-2'), false, 'Package_1C.json must never contain build stamp');
 
   // =========================================================================
   // BLOCK 3: Full May–December 2026 Document Hardening
@@ -335,8 +335,8 @@ test('Release 1C:BP 3.0 (Blocks 1–4): Stealth mode, 3 month-closing fixes, Pro
     '21.08 АвансовыйОтчет must resolve accountable employee'
   );
   assert.ok(
-    aoSep5 && aoSep5.header.employeeKey.length > 0 && (aoSep5.header.employeeName || '').length > 0,
-    '05.09 АвансовыйОтчет must resolve accountable employee'
+    aoSep5 && aoSep5.header.employeeKey.length > 0 && (aoSep5.header.employeeName || '').length > 0 && aoSep5.rows[0]?.nomenclatureKey.length > 0,
+    '05.09 АвансовыйОтчет must resolve accountable employee and non-empty nomenclatureKey'
   );
   assert.match(bsl, /Процедура\s+УстановитьПодотчетноеЛицоПоМетаданным\(/u);
   assert.match(bsl, /Процедура\s+ЗаполнитьТЧАвансыАвансовогоОтчета\(/u);
@@ -393,6 +393,85 @@ test('Release 1C:BP 3.0 (Blocks 1–4): Stealth mode, 3 month-closing fixes, Pro
       secSummary.reglamentIn1C,
     pkg.documents.length
   );
+
+  // 3.8 May–Dec Fix #1: ТребованиеНакладная (all write-offs have non-empty nomenclature, leaf 10.* account, reconciled >0 qty, and BSL metadata account fill)
+  const tnDocs = pkg.documents.filter((d) => d.metaType1C === 'ТребованиеНакладная');
+  assert.ok(tnDocs.length >= 8, `Expected >= 8 ТребованиеНакладная documents across May–Sept, got ${tnDocs.length}`);
+  for (const tn of tnDocs) {
+    assert.ok(tn.rows.length >= 1, `ТребованиеНакладная on ${tn.date} must have >= 1 row`);
+    for (const r of tn.rows) {
+      assert.ok(r.nomenclatureKey.length > 0 && r.nomenclatureName.length > 0, `ТребованиеНакладная row on ${tn.date} must have non-empty nomenclature`);
+      assert.ok(r.quantity > 0, `ТребованиеНакладная row on ${tn.date} must have quantity > 0`);
+      assert.match(r.account, /^10\.\d+/u, `ТребованиеНакладная row on ${tn.date} must use leaf 10.* subaccount, got ${r.account}`);
+    }
+  }
+  const ptuMay17 = pkg.documents.find((d) => d.metaType1C === 'ПоступлениеТоваровУслуг' && d.date === '2026-05-17');
+  const tnMay19 = tnDocs.find((d) => d.date === '2026-05-19');
+  assert.ok(
+    ptuMay17 && tnMay19 && tnMay19.rows[0].nomenclatureName === 'Бетон' && tnMay19.rows[0].account === ptuMay17.rows[0].account && tnMay19.rows[0].account === '10.08',
+    '19.05 ТребованиеНакладная must resolve Бетон on exact 17.05 receipt subaccount 10.08'
+  );
+  const tnJul06 = tnDocs.find((d) => d.date === '2026-07-06');
+  assert.ok(tnJul06 && tnJul06.rows[0].quantity === 160, '06.07 ТребованиеНакладная must write off all 160 ceiling tiles');
+  const tnAug09 = tnDocs.find((d) => d.date === '2026-08-09');
+  const brickRowAug09 = tnAug09?.rows.find((r) => /кирпич/iu.test(r.nomenclatureName));
+  const mortarRowAug09 = tnAug09?.rows.find((r) => /раствор/iu.test(r.nomenclatureName));
+  assert.ok(
+    brickRowAug09?.quantity === 750 && mortarRowAug09?.quantity === 1,
+    '09.08 ТребованиеНакладная must write off 750 bricks + 1 batch of mortar'
+  );
+  const tnSep08 = tnDocs.find((d) => d.date === '2026-09-08');
+  assert.ok(tnSep08 && tnSep08.rows[0].quantity === 1, '08.09 ТребованиеНакладная must reconcile parquet batch qty = 1');
+  assert.match(bsl, /Функция\s+ПодобратьМатериалИСчет10ДляСписания\(/u);
+  assert.match(bsl, /Процедура\s+ЗаполнитьСчетаСтрокиМатериаловПоМетаданным\(/u);
+
+  // 3.9 May–Dec Fix #2: ИсполнительныйЛист (06.05 Федоров Ф.Ф., start date >= doc date, end date 31.12.2026, 25%, metadata fill + initials match)
+  const writMay06 = pkg.documents.find((d) => d.metaType1C === 'ИсполнительныйЛист' && d.date === '2026-05-06');
+  assert.ok(writMay06, 'Expected 06.05.2026 ИсполнительныйЛист');
+  assert.equal(writMay06.header.employeeName, 'Федоров Ф.Ф.');
+  assert.ok((writMay06.header.writStartDate || '') >= writMay06.date, 'writStartDate must be >= document date (never < prohibition date)');
+  assert.equal(writMay06.header.writEndDate, '2026-12-31');
+  assert.equal(writMay06.header.alimonyRatePercent, 25);
+  assert.match(bsl, /Процедура\s+ЗаполнитьРеквизитыИсполнительногоЛистаПоМетаданным\(/u);
+  assert.match(bsl, /Функция\s+ФИОСовпадаетСИнициалами\(/u);
+
+  // 3.10 May–Dec Fix #3: ИнвентаризацияНЗП (31.05, 30.06, 31.08 — non-zero Состав row, exact WIP amount, sorted after payroll and before month-close)
+  const wipDocs = pkg.documents.filter((d) => d.metaType1C === 'ИнвентаризацияНЗП' && d.date >= '2026-05-01');
+  assert.equal(wipDocs.length, 3, 'Expected 3 ИнвентаризацияНЗП documents in May–Dec (31.05, 30.06, 31.08)');
+  const wipMay = wipDocs.find((d) => d.date === '2026-05-31');
+  const wipJun = wipDocs.find((d) => d.date === '2026-06-30');
+  const wipAug = wipDocs.find((d) => d.date === '2026-08-31');
+  assert.ok(wipMay && Math.abs(wipMay.header.amount - 568779.93) < 0.05 && wipMay.rows[0]?.nomenclatureGroup === 'Ремонт помещений');
+  assert.ok(wipJun && Math.abs(wipJun.header.amount - 794638.53) < 0.05 && wipJun.rows[0]?.nomenclatureGroup === 'Ремонт помещений');
+  assert.ok(wipAug && Math.abs(wipAug.header.amount - 6633480.26) < 0.05 && wipAug.rows[0]?.nomenclatureGroup === 'Кирпичная кладка');
+  for (const dEnd of ['2026-05-31', '2026-06-30', '2026-08-31']) {
+    const idxPayroll = pkg.documents.findIndex(
+      (d) => d.date === dEnd && (d.metaType1C === 'НачислениеЗарплаты' || d.comment.toLowerCase().includes('начислена заработная плата'))
+    );
+    const idxWip = pkg.documents.findIndex((d) => d.date === dEnd && d.metaType1C === 'ИнвентаризацияНЗП');
+    const idxClose = pkg.documents.findIndex(
+      (d) => d.date === dEnd && d.metaType1C === 'ЗакрытиеМесяца' && d.header.operationKind1C === 'ЗакрытиеМесяца'
+    );
+    assert.ok(idxPayroll >= 0 && idxWip > idxPayroll && idxClose > idxWip, `On ${dEnd}, ИнвентаризацияНЗП must be sorted after payroll accrual and before ЗакрытиеМесяца`);
+  }
+  assert.match(bsl, /Функция\s+ПодобратьНоменклатурнуюГруппуИОстатокНЗП\(/u);
+  assert.match(bsl, /МетаНЗП\.ТабличныеЧасти\.Найти\("Состав"\)/u);
+
+  // 3.11 May–Dec Fix #4: СчетНаОплатуПокупателю (01.05 — 2,320,000 ₽, non-empty nomenclature, bank account metadata fill)
+  const invBuyerMay01 = pkg.documents.find((d) => d.metaType1C === 'СчетНаОплатуПокупателю' && d.date === '2026-05-01');
+  assert.ok(invBuyerMay01, 'Expected 01.05.2026 СчетНаОплатуПокупателю');
+  assert.equal(invBuyerMay01.header.amount, 2320000);
+  assert.ok(invBuyerMay01.rows.length === 1 && invBuyerMay01.rows[0].nomenclatureKey.length > 0 && invBuyerMay01.rows[0].nomenclatureName.length > 0);
+  assert.match(bsl, /УстановитьЕслиЕсть\(ДокОбъект,\s*"СтруктурнаяЕдиница",\s*БанкСчСчетПок\)/u);
+
+  // 3.12 Payroll & Cash Payouts: 15.05 via bank (51), 15.06 & 15.08 via cash (50.01), 20.08 & 04.09 RKO with 50.01<-51 auto-PKO
+  const payMay15 = pkg.documents.find((d) => d.date === '2026-05-15' && d.dynamicBalanceMode === 'payroll_balance');
+  assert.ok(payMay15 && payMay15.metaType1C === 'СписаниеСРасчетногоСчета', '15.05 payroll payout must remain via bank (СписаниеСРасчетногоСчета)');
+  const payJun15 = pkg.documents.find((d) => d.date === '2026-06-15' && d.dynamicBalanceMode === 'payroll_balance');
+  const payAug15 = pkg.documents.find((d) => d.date === '2026-08-15' && d.dynamicBalanceMode === 'payroll_balance');
+  assert.ok(payJun15 && payJun15.metaType1C === 'ВыдачаНаличных', '15.06 payroll payout must be cash RKO (ВыдачаНаличных)');
+  assert.ok(payAug15 && payAug15.metaType1C === 'ВыдачаНаличных', '15.08 payroll payout must be cash RKO (ВыдачаНаличных)');
+  assert.match(bsl, /Функция\s+ДокументСодержитСнятиеНаличныхИзБанка51\(/u);
 
   // =========================================================================
   // BLOCK 4: ПроверитьЗаполнение() & Chronological Re-posting (ПТУ + ДопРасходы + РТУ + ПередачаОС)

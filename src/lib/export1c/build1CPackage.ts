@@ -183,6 +183,7 @@ export interface PackageDocumentHeader1C {
   writEndDate?: string;
   alimonyFixedAmount?: number;
   alimonyRatePercent?: number;
+  alimonyShare?: string;
   usefulLifeMonths?: number;
 }
 
@@ -514,13 +515,6 @@ function getIntraDaySortPhase(op: QueuedOperation): number {
   }
 
   if (
-    op.category === 'wip_inventory' ||
-    op.docType1C === 'ИнвентаризацияНЗП'
-  ) {
-    return 58;
-  }
-
-  if (
     op.category === 'payroll_accrual' ||
     op.docType1C === 'НачислениеЗарплаты' ||
     op.category === 'depreciation_accrual' ||
@@ -528,6 +522,13 @@ function getIntraDaySortPhase(op: QueuedOperation): number {
     op.category === 'insurance_accrual'
   ) {
     return 60;
+  }
+
+  if (
+    op.category === 'wip_inventory' ||
+    op.docType1C === 'ИнвентаризацияНЗП'
+  ) {
+    return 65;
   }
 
   if (
@@ -1647,6 +1648,55 @@ export function build1CTransferPackage(
 
   const documents: PackageDocument1C[] = [];
 
+  // Running ledgers for 20.01 WIP by НоменклатурнаяГруппа and 10.* material stock by nomenclatureKey
+  const wip20BalanceByGroup = new Map<string, { displayName: string; balance: number }>();
+  const adjustWip20Balance = (rawGroup: string, delta: number) => {
+    const cleanGrp = (rawGroup || '').split(/\s+\/\s+/)[0].trim() || 'Основная номенклатурная группа';
+    const normGrp = normalizeSimpleEntityKey1C(cleanGrp) || 'основнаяноменклатурнаягруппа';
+    const prev = wip20BalanceByGroup.get(normGrp) || { displayName: cleanGrp, balance: 0 };
+    if (cleanGrp !== 'Основная номенклатурная группа') {
+      prev.displayName = cleanGrp;
+    }
+    prev.balance = round2(Math.max(0, prev.balance + delta));
+    wip20BalanceByGroup.set(normGrp, prev);
+  };
+  if (db1C?.rawBalances) {
+    for (const bRow of db1C.rawBalances) {
+      if (bRow.account === '20.01') {
+        const dt = bRow.endDebit > 0 ? bRow.endDebit : bRow.rawDebit > 0 ? bRow.rawDebit : bRow.startDebit;
+        const kt = bRow.endCredit > 0 ? bRow.endCredit : bRow.rawCredit > 0 ? bRow.rawCredit : bRow.startCredit;
+        if (dt - kt > 0.005) {
+          adjustWip20Balance(bRow.subconto || 'Основная номенклатурная группа', dt - kt);
+        }
+      }
+    }
+  }
+
+  const stock10ByNomKey = new Map<
+    string,
+    { account: string; qty: number; netAmount: number; name: string }
+  >();
+  const recordStock10Receipt = (nomKey: string, name: string, account: string, qty: number, netAmt: number) => {
+    if (!nomKey || !account.startsWith('10.')) return;
+    const prev = stock10ByNomKey.get(nomKey) || {
+      account,
+      qty: 0,
+      netAmount: 0,
+      name,
+    };
+    prev.account = account;
+    prev.qty = round2(prev.qty + (qty > 0 ? qty : 1));
+    prev.netAmount = round2(prev.netAmount + Math.max(0, netAmt));
+    stock10ByNomKey.set(nomKey, prev);
+  };
+  const recordStock10WriteOff = (nomKey: string, qty: number, netAmt: number) => {
+    if (!nomKey) return;
+    const prev = stock10ByNomKey.get(nomKey);
+    if (!prev) return;
+    prev.qty = round2(Math.max(0, prev.qty - (qty > 0 ? qty : 0)));
+    prev.netAmount = round2(Math.max(0, prev.netAmount - Math.max(0, netAmt)));
+  };
+
   const sanitizeClean1CComment = (raw: string): string =>
     (raw || '')
       .replace(/\[[A-Za-zА-Яа-яЁё0-9_-]+ID:[^\]]*\]/giu, '')
@@ -1838,9 +1888,15 @@ export function build1CTransferPackage(
       } else if (/до\s+конца\s+года/iu.test(desc)) {
         end = `${yr}-12-31`;
       }
-      return { start: start || opDate, end };
+      const safeStart = !start || start < opDate ? opDate : start;
+      const safeEnd = end && end < safeStart ? '' : end;
+      return { start: safeStart, end: safeEnd };
     };
     const writPeriod = metaType1C === 'ИсполнительныйЛист' ? resolveWritPeriodDates() : null;
+    const mShare =
+      metaType1C === 'ИсполнительныйЛист'
+        ? (op.description || '').match(/(?:^|[^\d/])(1\/4|1\/3|1\/2|1\/6|2\/3|3\/10)(?=$|[^\d/])/u)
+        : null;
     const writFields =
       metaType1C === 'ИсполнительныйЛист' && writPeriod
         ? {
@@ -1848,6 +1904,7 @@ export function build1CTransferPackage(
             writEndDate: writPeriod.end,
             alimonyFixedAmount: round2(op.alimonyFixedAmount || 0),
             alimonyRatePercent: round2(op.alimonyRatePercent || 0),
+            ...(mShare ? { alimonyShare: mShare[1] } : {}),
           }
         : {};
 
@@ -1915,6 +1972,64 @@ export function build1CTransferPackage(
           deferredExpenseKey: '',
         });
       }
+    } else if (metaType1C === 'ИнвентаризацияНЗП') {
+      const mQuotedProj = (op.description || '').match(/объект\p{L}*\s+[«"']([^»"']+)[»"']/iu);
+      let wipGroupName =
+        (op.nomenclatureGroupName &&
+        op.nomenclatureGroupName.trim() &&
+        op.nomenclatureGroupName.trim() !== 'Основная номенклатурная группа'
+          ? op.nomenclatureGroupName.trim()
+          : '') ||
+        (mQuotedProj ? mQuotedProj[1].trim() : '');
+      if (!wipGroupName) {
+        let bestGrp = '';
+        let bestBal = 0;
+        for (const gVal of wip20BalanceByGroup.values()) {
+          if (gVal.balance > bestBal && gVal.displayName !== 'Основная номенклатурная группа') {
+            bestBal = gVal.balance;
+            bestGrp = gVal.displayName;
+          }
+        }
+        if (!bestGrp) {
+          for (const gVal of wip20BalanceByGroup.values()) {
+            if (gVal.balance > bestBal) {
+              bestBal = gVal.balance;
+              bestGrp = gVal.displayName;
+            }
+          }
+        }
+        wipGroupName = bestGrp || defaultNomGroup;
+      }
+      const normTargetGrp = normalizeSimpleEntityKey1C(wipGroupName);
+      const trackedWip = normTargetGrp ? wip20BalanceByGroup.get(normTargetGrp)?.balance ?? 0 : 0;
+      let wipAmount = round2(op.amount && op.amount > 0 ? op.amount : trackedWip);
+      if (wipAmount <= 0) {
+        for (const gVal of wip20BalanceByGroup.values()) {
+          if (gVal.balance > wipAmount) {
+            wipAmount = round2(gVal.balance);
+          }
+        }
+      }
+      header.amount = wipAmount;
+      header.debitAccount = '20.01';
+      rows.push({
+        nomenclatureKey: '',
+        nomenclatureName: wipGroupName,
+        isService: false,
+        quantity: 1,
+        price: wipAmount,
+        amount: wipAmount,
+        vatRate: 0,
+        vatAmount: 0,
+        account: '20.01',
+        vatAccount: '',
+        costAccount: '20.01',
+        nomenclatureGroup: wipGroupName,
+        expenseItem: 'Материальные расходы',
+        fixedAssetKey: '',
+        employeeKey: '',
+        deferredExpenseKey: '',
+      });
     } else if (
       metaType1C === 'ПринятиеКУчетуОС' ||
       metaType1C === 'ПередачаОС' ||
@@ -2205,7 +2320,22 @@ export function build1CTransferPackage(
                   }) ?? stockEntries[idx]
                 : undefined);
 
-        const qty = it.quantity && it.quantity > 0 ? it.quantity : 1;
+        let qty = it.quantity && it.quantity > 0 ? it.quantity : 1;
+        let resolvedItemAcc = itemAcc;
+        if (metaType1C === 'ТребованиеНакладная') {
+          const trackedStock = stock10ByNomKey.get(nomKey);
+          if (trackedStock && trackedStock.qty > 0) {
+            if (trackedStock.account.startsWith('10.')) {
+              resolvedItemAcc = trackedStock.account;
+            }
+            const targetNet = matchedEntry ? matchedEntry.amount : (op.amount || 0) / Math.max(1, effectiveItems.length);
+            if (Math.abs(trackedStock.netAmount - targetNet) <= 5 || qty > trackedStock.qty) {
+              qty = trackedStock.qty;
+            } else if (!it.quantity && trackedStock.netAmount > 0 && trackedStock.qty > 1 && targetNet > 0) {
+              qty = Math.max(1, Math.round((targetNet / trackedStock.netAmount) * trackedStock.qty));
+            }
+          }
+        }
         let lineAmount = 0;
         let lineVat = 0;
 
@@ -2248,7 +2378,7 @@ export function build1CTransferPackage(
         const price = qty > 0 ? round2(lineAmount / qty) : lineAmount;
         const vatAcc =
           metaType1C === 'ПоступлениеТоваровУслуг'
-            ? itemAcc.startsWith('08.')
+            ? resolvedItemAcc.startsWith('08.')
               ? '19.01'
               : '19.03'
             : '';
@@ -2262,7 +2392,7 @@ export function build1CTransferPackage(
           amount: lineAmount,
           vatRate: metaType1C === 'ПоступлениеТоваровУслуг' ? docVatRate : 0,
           vatAmount: lineVat,
-          account: itemAcc,
+          account: resolvedItemAcc,
           vatAccount: vatAcc,
           costAccount: op.costAccount || '20.01',
           nomenclatureGroup: defaultNomGroup,
@@ -2283,45 +2413,109 @@ export function build1CTransferPackage(
         metaType1C === 'ТребованиеНакладная' ||
         metaType1C === 'ОтчетПроизводстваЗаСмену' ||
         metaType1C === 'АвансовыйОтчет' ||
-        metaType1C === 'СчетНаОплатуПокупателю')
+        metaType1C === 'СчетНаОплатуПокупателю' ||
+        metaType1C === 'ВозвратТоваровПоставщику' ||
+        metaType1C === 'ВозвратТоваровОтПокупателя' ||
+        metaType1C === 'СписаниеТоваров')
     ) {
       const isRpbPurchase =
         op.category === 'deferred_expense_97' || op.entries.some((e) => e.debit === '97.21');
+      const isBuyerInvoiceSvc =
+        metaType1C === 'СчетНаОплатуПокупателю' &&
+        Boolean(
+          op.isService ||
+            /(?:ремонт|работ|услуг|аренд|монтаж|отделк|строительн|благоустройств|устройств|кладк|покрыт)/iu.test(
+              op.description || ''
+            )
+        );
       const isSvcRow =
         operationKind1C === 'Услуги' ||
         metaType1C === 'ПоступлениеДопРасходов' ||
-        (metaType1C === 'РеализацияТоваровУслуг' && operationKind1C === 'Услуги');
+        (metaType1C === 'РеализацияТоваровУслуг' && operationKind1C === 'Услуги') ||
+        isBuyerInvoiceSvc;
+
+      const entrySubcontoItemHint = (() => {
+        if (metaType1C === 'ТребованиеНакладная' || metaType1C === 'СписаниеТоваров' || metaType1C === 'ВозвратТоваровПоставщику') {
+          const cr10 = op.entries.find((e) => e.credit.startsWith('10.') || e.credit.startsWith('41.'));
+          const sub = (cr10?.creditSubconto || '').split(/\s+\/\s+/)[0].trim();
+          return sanitizePackageNomenclatureName(sub, op.description);
+        }
+        if (metaType1C === 'АвансовыйОтчет' || metaType1C === 'ВозвратТоваровОтПокупателя') {
+          const dt10 = op.entries.find((e) => e.debit.startsWith('10.') || e.debit.startsWith('41.'));
+          const sub = (dt10?.debitSubconto || '').split(/\s+\/\s+/)[0].trim();
+          return sanitizePackageNomenclatureName(sub, op.description);
+        }
+        return '';
+      })();
+
+      const lineAmt = round2(op.amount || primaryEntry?.amount || 0);
+      let stockMatchedSeed: { key: string; account: string; qty: number; netAmount: number; name: string } | null = null;
+      if (metaType1C === 'ТребованиеНакладная' && !op.nomenclatureName && !entrySubcontoItemHint) {
+        const descLow = (op.description || '').toLowerCase();
+        for (const [sKey, sVal] of stock10ByNomKey.entries()) {
+          if (sVal.qty <= 0) continue;
+          const stem = sVal.name.toLowerCase().slice(0, Math.max(4, Math.min(6, sVal.name.length)));
+          if ((stem && descLow.includes(stem)) || (lineAmt > 0 && Math.abs(sVal.netAmount - lineAmt) <= 5)) {
+            stockMatchedSeed = { key: sKey, ...sVal };
+            break;
+          }
+        }
+      }
 
       const fallbackItemLabel = isRpbPurchase
         ? op.nomenclatureName || 'Расходы будущих периодов'
         : isSvcRow
           ? sanitizePackageNomenclatureName(op.nomenclatureName, op.description) ||
-            (metaType1C === 'РеализацияТоваровУслуг'
-              ? 'Выполнение строительно-монтажных работ'
-              : 'Услуги сторонних организаций')
-          : sanitizePackageNomenclatureName(op.nomenclatureName, op.description);
+            (metaType1C === 'СчетНаОплатуПокупателю' &&
+            op.nomenclatureGroupName &&
+            op.nomenclatureGroupName.trim() &&
+            op.nomenclatureGroupName.trim() !== 'Основная номенклатурная группа'
+              ? op.nomenclatureGroupName.trim()
+              : metaType1C === 'РеализацияТоваровУслуг' || metaType1C === 'СчетНаОплатуПокупателю'
+                ? 'Выполнение строительно-монтажных работ'
+                : 'Услуги сторонних организаций')
+          : sanitizePackageNomenclatureName(op.nomenclatureName, op.description) ||
+            entrySubcontoItemHint ||
+            stockMatchedSeed?.name ||
+            (metaType1C === 'ТребованиеНакладная' || metaType1C === 'СписаниеТоваров'
+              ? 'Основные материалы'
+              : metaType1C === 'АвансовыйОтчет'
+                ? 'Хозяйственные материалы'
+                : metaType1C === 'СчетНаОплатуПокупателю' ||
+                    metaType1C === 'ВозвратТоваровПоставщику' ||
+                    metaType1C === 'ВозвратТоваровОтПокупателя'
+                  ? 'Товары'
+                  : '');
 
-      const rowAccount = isRpbPurchase
+      let rowAccount = isRpbPurchase
         ? '97.21'
         : metaType1C === 'ОтчетПроизводстваЗаСмену'
           ? '43'
-          : metaType1C === 'ТребованиеНакладная'
-            ? op.entries.find((e) => e.credit.startsWith('10.'))?.credit || op.materialAccount || '10.01'
-            : metaType1C === 'РеализацияТоваровУслуг'
-              ? isSvcRow
-                ? '90.01.1'
-                : op.entries.find((e) => e.credit === '43' || e.credit.startsWith('41'))?.credit || '43'
-              : operationKind1C === 'Оборудование'
-                ? '08.04.1'
-                : isSvcRow
-                  ? op.costAccount || op.entries.find((e) => ['20.01', '26', '44.01'].includes(e.debit))?.debit || '26'
-                  : op.entries.find((e) => e.debit.startsWith('10.') || e.debit.startsWith('41.'))?.debit ||
-                    op.materialAccount ||
-                    '10.01';
+          : metaType1C === 'ТребованиеНакладная' || metaType1C === 'СписаниеТоваров'
+            ? stockMatchedSeed?.account ||
+              op.entries.find((e) => e.credit.startsWith('10.') || e.credit.startsWith('41.'))?.credit ||
+              op.materialAccount ||
+              '10.01'
+            : metaType1C === 'ВозвратТоваровПоставщику' || metaType1C === 'ВозвратТоваровОтПокупателя'
+              ? op.entries.find((e) => e.credit.startsWith('10.') || e.credit.startsWith('41.') || e.debit.startsWith('41.') || e.debit.startsWith('10.'))?.credit ||
+                op.materialAccount ||
+                '41.01'
+              : metaType1C === 'РеализацияТоваровУслуг'
+                ? isSvcRow
+                  ? '90.01.1'
+                  : op.entries.find((e) => e.credit === '43' || e.credit.startsWith('41'))?.credit || '43'
+                : operationKind1C === 'Оборудование'
+                  ? '08.04.1'
+                  : isSvcRow
+                    ? op.costAccount || op.entries.find((e) => ['20.01', '26', '44.01'].includes(e.debit))?.debit || '26'
+                    : op.entries.find((e) => e.debit.startsWith('10.') || e.debit.startsWith('41.'))?.debit ||
+                      op.materialAccount ||
+                      '10.01';
 
       const nomKey =
         !isRpbPurchase && fallbackItemLabel
-          ? registerNomenclature({
+          ? stockMatchedSeed?.key ||
+            registerNomenclature({
               rawName: fallbackItemLabel,
               descriptionCtx: op.description,
               account: rowAccount,
@@ -2343,8 +2537,18 @@ export function build1CTransferPackage(
           })
         : '';
 
-      const qty = op.quantity && op.quantity > 0 ? op.quantity : 1;
-      const lineAmt = round2(op.amount || primaryEntry?.amount || 0);
+      let qty = op.quantity && op.quantity > 0 ? op.quantity : 1;
+      if (metaType1C === 'ТребованиеНакладная' && nomKey) {
+        const trackedStock = stock10ByNomKey.get(nomKey);
+        if (trackedStock && trackedStock.qty > 0) {
+          if (trackedStock.account.startsWith('10.')) {
+            rowAccount = trackedStock.account;
+          }
+          if (Math.abs(trackedStock.netAmount - lineAmt) <= 5 || qty > trackedStock.qty) {
+            qty = trackedStock.qty;
+          }
+        }
+      }
       const price = qty > 0 ? round2(lineAmt / qty) : lineAmt;
       const vatAcc =
         metaType1C === 'ПоступлениеТоваровУслуг' || metaType1C === 'ПоступлениеДопРасходов' || metaType1C === 'АвансовыйОтчет'
@@ -2478,6 +2682,47 @@ export function build1CTransferPackage(
           nonDeductibleForProfitTax: Boolean(e.nonDeductibleForProfitTax),
         })),
       });
+      for (const wr of woRows) {
+        recordStock10WriteOff(wr.nomenclatureKey, wr.quantity, wr.amount);
+      }
+    }
+
+    // Update running 10.* stock and 20.01 WIP ledgers after emitting the document
+    if (
+      (metaType1C === 'ПоступлениеТоваровУслуг' && operationKind1C === 'Товары') ||
+      metaType1C === 'АвансовыйОтчет'
+    ) {
+      for (const r of rows) {
+        if (!r.isService && r.account.startsWith('10.')) {
+          const net = round2(vatIncluded ? r.amount - r.vatAmount : r.amount);
+          recordStock10Receipt(r.nomenclatureKey, r.nomenclatureName, r.account, r.quantity, net);
+        }
+      }
+    } else if (metaType1C === 'ПоступлениеДопРасходов') {
+      const addNet = round2(vatIncluded ? header.amount - header.vatAmount : header.amount);
+      const baseSum = rows.reduce((s, r) => s + (r.amount || 0), 0);
+      for (const r of rows) {
+        if (r.account.startsWith('10.') && r.nomenclatureKey) {
+          const share = baseSum > 0 ? round2((addNet * r.amount) / baseSum) : addNet;
+          const prev = stock10ByNomKey.get(r.nomenclatureKey);
+          if (prev) {
+            prev.netAmount = round2(prev.netAmount + share);
+          }
+        }
+      }
+    } else if (metaType1C === 'ТребованиеНакладная' || metaType1C === 'СписаниеТоваров') {
+      for (const r of rows) {
+        recordStock10WriteOff(r.nomenclatureKey, r.quantity, r.amount);
+      }
+    }
+
+    for (const e of op.entries) {
+      if (e.debit === '20.01') {
+        adjustWip20Balance(e.debitSubconto || defaultNomGroup, e.amount);
+      }
+      if (e.credit === '20.01') {
+        adjustWip20Balance(e.creditSubconto || defaultNomGroup, -e.amount);
+      }
     }
   });
 
