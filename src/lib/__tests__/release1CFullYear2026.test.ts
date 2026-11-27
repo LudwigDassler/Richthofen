@@ -258,6 +258,23 @@ test('Release 1C:BP 3.0 (Blocks 1–4): Stealth mode, 3 month-closing fixes, Pro
   assert.equal(aprilHire.header.employeePosition, 'Главный бухгалтер');
   assert.equal(aprilHire.header.monthlySalary, 72200);
 
+  // 2.4 НайтиВидНачисленияОклада(Док, ИмяТЧ, ИмяКолонкиНачисления): Priority 1 (ПлановыеНачисления) -> Priority 2 (column metadata), zero hardcoded ОплатаПоОкладу, pre-posting check with ПолноеИмя()
+  assert.equal(bsl.includes('.ОплатаПоОкладу'), false, 'Loader_1C83.bsl must not hardcode .ОплатаПоОкладу');
+  const accFnIdx = bsl.indexOf('Функция НайтиВидНачисленияОклада(Док, ИмяТЧ, ИмяКолонкиНачисления)');
+  assert.ok(accFnIdx > 0, 'Expected НайтиВидНачисленияОклада helper in BSL');
+  const accFnBody = bsl.slice(accFnIdx, bsl.indexOf('КонецФункции', accFnIdx));
+  const accP1 = accFnBody.indexOf('ИЗ РегистрСведений.ПлановыеНачисления ГДЕ Начисление <> НЕОПРЕДЕЛЕНО УПОРЯДОЧИТЬ ПО Период УБЫВ');
+  const accP2 = accFnBody.indexOf('Метаданные.НайтиПоТипу(ТипНач)');
+  assert.ok(accP1 > 0 && accP2 > accP1, 'Strict Priority 1 (ПлановыеНачисления) -> Priority 2 (Метаданные.НайтиПоТипу) in НайтиВидНачисленияОклада');
+  assert.match(bsl, /Функция\s+ПроверитьЗаполнениеНачисленияПриемаНаРаботу\(Док\)/u);
+  assert.match(bsl, /Если НЕ ЗначениеЗаполнено\(Стр\[ИмяКолонкиНачисления\]\) Тогда/u);
+  assert.match(bsl, /МДПоТипу\.ПолноеИмя\(\)/u);
+
+  // 2.5 ВыгрузитьБазу0НаСервере auto-resolves cutoff date (e.g. 01.04.2026 after Q1) when 01.01.<Year> has 0 balance rows
+  assert.match(bsl, /Если МассивОстатков\.Количество\(\) = 0 Тогда/u);
+  assert.match(bsl, /ВЫБРАТЬ МАКСИМУМ\(Движ\.Период\) КАК МаксПериод ИЗ РегистрБухгалтерии\.Хозрасчетный/u);
+  assert.match(bsl, /ДатаАвтоСреза = КонецМесяца\(МаксПериодБазы\) \+ 1;/u);
+
   // =========================================================================
   // BLOCK 3: Full May–December 2026 Document Hardening
   // =========================================================================
