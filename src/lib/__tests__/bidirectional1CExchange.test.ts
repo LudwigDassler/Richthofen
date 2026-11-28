@@ -385,13 +385,13 @@ test('generateBslLoader: produces syntactically balanced 1C 8.3 BSL code with ze
   assert.match(procRowCurrBody, /УстановитьЕслиЕсть\(СтрРасш,\s*"КратностьВзаиморасчетов",\s*1\)/u);
   assert.match(procRowCurrBody, /УстановитьЕслиЕсть\(СтрРасш,\s*"СуммаВзаиморасчетов",\s*СуммаПлатежаСтроки\)/u);
 
-  // (c) НайтиИлиСоздатьПрочиеДоходыРасходы(Наименование) embedded directly in module for Ctrl+F7 compilation
-  const fnPdrStart = bsl.indexOf('Функция НайтиИлиСоздатьПрочиеДоходыРасходы(Наименование)');
-  assert.ok(fnPdrStart > 0, 'НайтиИлиСоздатьПрочиеДоходыРасходы(Наименование) must be defined in module');
+  // (c) НайтиИлиСоздатьПрочиеДоходыРасходы(Наименование, ...) embedded directly in module for Ctrl+F7 compilation
+  const fnPdrStart = bsl.indexOf('Функция НайтиИлиСоздатьПрочиеДоходыРасходы(Наименование');
+  assert.ok(fnPdrStart > 0, 'НайтиИлиСоздатьПрочиеДоходыРасходы(Наименование, ...) must be defined in module');
   const fnPdrBody = bsl.slice(fnPdrStart, bsl.indexOf('КонецФункции', fnPdrStart));
   assert.match(fnPdrBody, /Справочники\.ПрочиеДоходыИРасходы\.НайтиПоНаименованию\([^,]+,\s*Истина\)/u);
   assert.match(fnPdrBody, /Справочники\.ПрочиеДоходыИРасходы\.СоздатьЭлемент\(\)/u);
-  assert.match(fnPdrBody, /УстановитьЕслиЕсть\(НовыйПДР,\s*"ПринимаетсяКНалоговомуУчету",\s*Истина\)/u);
+  assert.match(fnPdrBody, /УстановитьЕслиЕсть\(НовыйПДР,\s*"ПринимаетсяКНалоговомуУчету",\s*(?:Истина|НЕ\s+НеПринимаемыйНУ)\)/u);
 
   // (d) Smart duplicate & unposted draft handling: checks Док.Проведен by natural business key, skips posted, reopens unposted draft via ПолучитьОбъект() + ОчиститьТабличныеЧастиДокумента
   assert.match(bsl, /Функция\s+НайтиСтатусДубляПоБизнесКлючу\(/u);

@@ -283,8 +283,9 @@ test('Release 1C:BP 3.0 (Blocks 1–4): Stealth mode, 3 month-closing fixes, Pro
   assert.match(bsl, /ДобавитьМесяц\(НачалоМесяца\(МаксПериодБазы\),\s*1\)/u);
 
   // 2.6 Neutral build stamp ONLY in form log, never in documents
-  assert.match(bsl, /Сборка модуля: bp30-may-fix-2/u);
-  assert.equal(serializedPkg.includes('bp30-may-fix-2'), false, 'Package_1C.json must never contain build stamp');
+  assert.match(bsl, /Сборка модуля: bp30-release-final-v3/u);
+  assert.equal(bsl.includes('bp30-may-fix-2'), false, 'Old build stamp must not remain in BSL');
+  assert.equal(serializedPkg.includes('bp30-release-final-v3'), false, 'Package_1C.json must never contain build stamp');
 
   // =========================================================================
   // BLOCK 3: Full May–December 2026 Document Hardening
@@ -481,6 +482,80 @@ test('Release 1C:BP 3.0 (Blocks 1–4): Stealth mode, 3 month-closing fixes, Pro
   assert.match(bsl, /НужноПерепровестиПериод\s*=\s*\(СозданоИПроведено\s*>\s*0\s+Или\s+ПерезаписаноЧерновиков\s*>\s*0\)/u);
   assert.match(bsl, /ИЗ Документ\.ПоступлениеДопРасходов/u);
   assert.match(bsl, /ИЗ Документ\.ПередачаОС/u);
+
+  // =========================================================================
+  // FINAL RELEASE v3: All 7 Mandatory Blocks Verification (April–December 2026)
+  // =========================================================================
+  // Block 1: ОперацияБух dynamic subcontos + НУ/ПР + JSON counterparty/contract analytics on 76.09
+  assert.match(bsl, /Функция\s+НайтиИлиСоздатьПрочиеДоходыРасходы\(/u);
+  assert.match(bsl, /ПринимаетсяКНалоговомуУчету/u);
+  assert.match(bsl, /Функция\s+НайтиИлиСоздатьСтатьюДДС\(/u);
+  assert.match(bsl, /Движ\.СуммаНУДт\s*=\s*СуммаДвиж/u);
+  assert.match(bsl, /Движ\.СуммаНУКт\s*=\s*СуммаДвиж/u);
+  assert.match(bsl, /Движ\.СуммаПРДт\s*=\s*СуммаДвиж/u);
+  assert.match(bsl, /КодДтСтр\s*=\s*"99\.02\.3"/u);
+  const interestManualDocs = pkg.documents.filter(
+    (d) =>
+      d.metaType1C === 'ОперацияБух' &&
+      d.date >= '2026-04-01' &&
+      d.entries.some((p) => p.debit === '76.09' && p.credit === '91.01')
+  );
+  assert.ok(interestManualDocs.length >= 4, `Expected >= 4 promissory note interest ОперацияБух docs in Apr–Sep, got ${interestManualDocs.length}`);
+  for (const mDoc of interestManualDocs) {
+    assert.ok(mDoc.header.counterpartyKey.length > 0, `ОперацияБух on ${mDoc.date} must resolve counterpartyKey for 76.09`);
+    assert.ok(mDoc.header.contractKey.length > 0, `ОперацияБух on ${mDoc.date} must resolve contractKey (Прочее) for 76.09`);
+  }
+
+  // Block 2: PKO & Auto-PKO 4-step bank account priority + СчетБанка / Субконто1 / СубконтоКт1 + ПроверитьЗаполнение on Auto-PKO
+  assert.match(bsl, /СтрДлина\(НомОсн\)\s*>=\s*20/u);
+  assert.match(bsl, /ЗапрНульБС/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(ПКО,\s*"СчетБанка",\s*ОсновнойБанковскийСчет\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(ПКО,\s*"СубконтоКт1",\s*ОсновнойБанковскийСчет\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(ПКО,\s*"Субконто1",\s*ОсновнойБанковскийСчет\)/u);
+  assert.match(bsl, /ПроверитьЗаполнениеДокументаСЛогом\(ПКО,\s*ИмяМетаПКО,\s*ДатаПКО\)/u);
+  assert.match(bsl, /ЭтоПКОИзБанка51/u);
+
+  // Block 3: HR ФизическиеЛица FIO split + РегистрыСведений.ФИОФизЛиц + ГоловнаяОрганизация
+  assert.match(bsl, /Процедура\s+ЗаполнитьФИОФизЛицаИРегистр\(/u);
+  assert.match(bsl, /РегистрыСведений\.ФИОФизЛиц\.СоздатьМенеджерЗаписи\(\)/u);
+  assert.match(bsl, /УстановитьЕслиЕсть\(НовыйСотр,\s*"ГоловнаяОрганизация",\s*ОрганизацияСсылка\)/u);
+
+  // Block 4: ПоступлениеОС + КорректировкаДолга + ПроверитьЗаполнениеДокументаСЛогом across all document builders
+  assert.match(bsl, /ИначеЕсли\s+ВидМета\s*=\s*"ПоступлениеОС"\s+Тогда/u);
+  assert.match(bsl, /ИначеЕсли\s+ВидМета\s*=\s*"КорректировкаДолга"\s+Тогда/u);
+  assert.match(bsl, /Процедура\s+ПроверитьЗаполнениеДокументаСЛогом\(/u);
+
+  // Block 5: Intra-day chronology (zero 23:59:59, slots 09:00..17:00) + safe form defaults + payroll warning
+  assert.equal(bsl.includes('23, 59, 59'), false, 'BSL must not contain 23, 59, 59 timestamps');
+  assert.equal(bsl.includes('23:59:59'), false, 'BSL must not contain 23:59:59 timestamps');
+  assert.match(bsl, /Функция\s+ПолучитьДатуВремяСлотаДокумента\(/u);
+  assert.match(bsl, /ЭтотОбъект\["ПропускатьНачислениеЗарплаты"\]\s*=\s*Истина/u);
+  assert.match(bsl, /ЭтотОбъект\["ПропускатьЗакрытиеМесяца"\]\s*=\s*Истина/u);
+  assert.match(bsl, /ЭтотОбъект\["ФолбэкВОперациюБухПриОшибке"\]\s*=\s*Ложь/u);
+  assert.match(bsl, /\(Внимание: укажите дату документа = последний день месяца 12:00:00!\)/u);
+
+  // Block 6: BSL structural syntax check (balanced blocks + zero Пока loops)
+  const cleanBsl = bsl
+    .split('\n')
+    .map((line) => (line.trimStart().startsWith('//') ? '' : line.replace(/"(?:""|[^"])*"/g, '""').replace(/\/\/.*$/, '')))
+    .join('\n');
+  const countKw = (kw: string) =>
+    Array.from(cleanBsl.matchAll(new RegExp(`(?<![\\p{L}\\p{N}_])${kw}(?![\\p{L}\\p{N}_])`, 'giu'))).length;
+  assert.equal(countKw('Процедура'), countKw('КонецПроцедуры'), 'Balanced Процедура / КонецПроцедуры');
+  assert.equal(countKw('Функция'), countKw('КонецФункции'), 'Balanced Функция / КонецФункции');
+  assert.equal(countKw('Если'), countKw('КонецЕсли'), 'Balanced Если / КонецЕсли');
+  assert.equal(countKw('Цикл'), countKw('КонецЦикла'), 'Balanced Цикл / КонецЦикла');
+  assert.equal(countKw('Попытка'), countKw('КонецПопытки'), 'Balanced Попытка / КонецПопытки');
+  assert.equal(countKw('Пока'), 0, 'Zero Пока loops in clean BSL');
+
+  // April–December 2026 document breakdown verification
+  const aprDecDocs = pkg.documents.filter((d) => d.date >= '2026-04-01' && d.date <= '2026-12-31');
+  const countsByType: Record<string, number> = {};
+  for (const d of aprDecDocs) {
+    countsByType[d.metaType1C] = (countsByType[d.metaType1C] || 0) + 1;
+  }
+  console.log('[APR-DEC 2026 SUMMARY] Total docs:', aprDecDocs.length, JSON.stringify(countsByType));
+  assert.ok(aprDecDocs.length > 80, `Expected > 80 April–December 2026 documents, got ${aprDecDocs.length}`);
 });
 
 test('Release 1C:BP 3.0 (Block 5): Exact 0.00-kopeck April 2026 OSV convergence with live 1C:BP 3.0 (14,202,374.21 RUB)', async () => {

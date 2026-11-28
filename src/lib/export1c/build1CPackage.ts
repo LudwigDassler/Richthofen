@@ -921,7 +921,11 @@ function resolveMetaTypeAndStrategy(op: QueuedOperation): {
         operationKind1C: 'ПоступлениеДопРасходов',
       };
     }
-    if (op.category === 'purchase_equipment' || op.entries.some((e) => e.debit.startsWith('08.04'))) {
+    if (
+      op.category === 'purchase_equipment' ||
+      op.docType1C === ('ПоступлениеОС' as unknown as QueuedOperation['docType1C']) ||
+      op.entries.some((e) => e.debit.startsWith('08.04'))
+    ) {
       return {
         metaType1C: 'ПоступлениеТоваровУслуг',
         executionStrategy: 'native',
@@ -1728,6 +1732,57 @@ export function build1CTransferPackage(
         kind: 'ФизическоеЛицо',
       });
     }
+    if (!counterpartyKey && metaType1C === 'ОперацияБух') {
+      const settlementPrefixes = ['76.', '60.', '62.', '58.', '66.', '67.'];
+      for (const e of op.entries) {
+        const dtTouches = settlementPrefixes.some((p) => e.debit === p.slice(0, -1) || e.debit.startsWith(p));
+        const ktTouches = settlementPrefixes.some((p) => e.credit === p.slice(0, -1) || e.credit.startsWith(p));
+        const rawSubCandidate = (dtTouches ? e.debitSubconto : ktTouches ? e.creditSubconto : '') || '';
+        const firstPart = rawSubCandidate.split(/\s+\/\s+/)[0].trim();
+        if (
+          firstPart.length >= 3 &&
+          !isGenericPlaceholderNomenclature1C(firstPart) &&
+          !/^(прочи|расчет|процент|вексел|ценн|резерв|налог|штраф)/iu.test(firstPart)
+        ) {
+          counterpartyKey = registerCounterparty({ name: firstPart });
+          if (counterpartyKey) break;
+        }
+      }
+      if (
+        !counterpartyKey &&
+        resolvedVirtualState.financialInvestments &&
+        resolvedVirtualState.financialInvestments.length > 0 &&
+        op.entries.some(
+          (e) =>
+            e.debit.startsWith('58.') ||
+            e.credit.startsWith('58.') ||
+            ((e.debit === '76.09' || e.credit === '76.09' || e.debit === '76.03' || e.credit === '76.03') &&
+              /вексел|процент|ценн\p{L}*\s+бумаг/iu.test(`${op.description || ''} ${e.description || ''}`))
+        )
+      ) {
+        const secIssuer = (
+          resolvedVirtualState.financialInvestments.find((fi) => (fi.counterpartyName || '').trim().length >= 3)
+            ?.counterpartyName || ''
+        ).trim();
+        if (secIssuer.length >= 3) {
+          counterpartyKey = registerCounterparty({ name: secIssuer });
+        }
+      }
+    }
+
+    const has60 = op.entries.some((e) => e.debit.startsWith('60') || e.credit.startsWith('60'));
+    const has62 = op.entries.some((e) => e.debit.startsWith('62') || e.credit.startsWith('62'));
+    const hasOtherSettlement = op.entries.some(
+      (e) =>
+        e.debit.startsWith('76.') ||
+        e.credit.startsWith('76.') ||
+        e.debit.startsWith('58.') ||
+        e.credit.startsWith('58.') ||
+        e.debit.startsWith('66.') ||
+        e.credit.startsWith('66.') ||
+        e.debit.startsWith('67.') ||
+        e.credit.startsWith('67.')
+    );
 
     const inferredCtrKind: 'СПоставщиком' | 'СПокупателем' | 'Прочее' =
       metaType1C === 'РеализацияТоваровУслуг' ||
@@ -1736,17 +1791,22 @@ export function build1CTransferPackage(
       metaType1C === 'СчетНаОплатуПокупателю' ||
       operationKind1C === 'ОплатаПокупателя' ||
       operationKind1C === 'ВозвратПокупателю' ||
-      op.entries.some((e) => e.debit.startsWith('62') || e.credit.startsWith('62'))
+      has62
         ? 'СПокупателем'
         : op.category === 'loan_received' ||
             op.category === 'loan_repaid' ||
             op.category === 'loan_issued' ||
-            op.category === 'alimony_payout'
+            op.category === 'alimony_payout' ||
+            (!has60 && hasOtherSettlement)
           ? 'Прочее'
           : 'СПоставщиком';
 
+    const needsContractForManualOp =
+      metaType1C === 'ОперацияБух' && (has60 || has62 || hasOtherSettlement);
+
     const contractKey =
-      counterpartyKey && (op.contractName || op.contractNumber || metaType1C !== 'ОперацияБух')
+      counterpartyKey &&
+      (op.contractName || op.contractNumber || metaType1C !== 'ОперацияБух' || needsContractForManualOp)
         ? registerContract({
             counterpartyKey,
             name: op.contractName,
@@ -2422,11 +2482,8 @@ export function build1CTransferPackage(
         op.category === 'deferred_expense_97' || op.entries.some((e) => e.debit === '97.21');
       const isBuyerInvoiceSvc =
         metaType1C === 'СчетНаОплатуПокупателю' &&
-        Boolean(
-          op.isService ||
-            /(?:ремонт|работ|услуг|аренд|монтаж|отделк|строительн|благоустройств|устройств|кладк|покрыт)/iu.test(
-              op.description || ''
-            )
+        /(?:ремонт|работ|услуг|аренд|монтаж|отделк|строительн|благоустройств|устройств|кладк|покрыт)/iu.test(
+          op.description || ''
         );
       const isSvcRow =
         operationKind1C === 'Услуги' ||
